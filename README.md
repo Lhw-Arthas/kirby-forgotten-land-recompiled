@@ -15,7 +15,8 @@ See [docs/STATUS.md](docs/STATUS.md) for how far the game gets and what is known
 game boots, plays its opening and reaches the first stage with correct graphics, but it is **not tested beyond
 that and not playable yet**.
 
-Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`).
+Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`). The
+launcher and the runtime accept any version of the game by program id, but only v1.0.0 has been built and run.
 
 ## Layout
 
@@ -51,13 +52,15 @@ cd launcher; npm install; npx tauri build
 .\src-tauri\target\release\kfl-recomp-launcher.exe
 ```
 
-Pick your game folder, press **Build**, then **Play**.
+Pick your game folder, press **Build**, then **Play**. Build writes `romfs.bin` (about 6 GB, the game's data packed
+into one file) into the game folder you picked and leaves it there.
 
 Or build by hand in Git Bash, with your `exefs` and `romfs` in `../work/kfl/extracted/`:
 
 ```bash
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
 make -j16 ../work/kfl/build/lasrecomp.exe   # the runtime
+(cd ../work/kfl && ./build/lasrecomp.exe extracted --build-romfs)   # the data image, extracted/romfs.bin: about 6 GB, about a minute
 make gen                                    # translate the game code to C
 make -j16                                   # compile it (about 10 minutes on 16 threads)
 cd ../work/kfl && LARECOMP_GAME_LIB=build/lasgame.dll ./build/lasrecomp.exe extracted --play
