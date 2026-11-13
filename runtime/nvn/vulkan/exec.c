@@ -1274,6 +1274,7 @@ static bool mv_wanted(void) {
 static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h;
 static int debug_pass_no;
+static NvnTexture *pass_rt0;  // the colour target 0 the open pass began with
 
 static void vk_end_pass_at(int line);
 static void debug_save_depth(TexBackend *b, const char *path);
@@ -1306,7 +1307,8 @@ static void vk_end_pass_at(int line) {
             nth++;
         }
     }
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    // (the pass's own target: st.rt already holds the next pass's when a draw ends this one)
+    if (g_debug_frame && pass_rt0 && pass_rt0->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
@@ -1314,7 +1316,9 @@ static void vk_end_pass_at(int line) {
         if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
-        renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        LOG("[pass] %s: color0 %ux%u f%#x addr %llx\n", path, pass_rt0->width, pass_rt0->height, pass_rt0->format,
+            (unsigned long long)pass_rt0->addr);
+        renderer_save_texture_tex(pass_rt0->backend, path);
     }
     // (the scene pass ends - a copy, a dispatch, another target - with its opaque draws done: the occlusion now)
     if (ao.qual && !ao.busy && ao.opaque >= 16 && ao.done_frame != fx_frame()) ssao_run();
@@ -1442,6 +1446,8 @@ static void begin_pass(void) {
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     vkCmdBeginRendering(cb, &ri);
     in_pass = true;
+    pass_rt0 = st.rt.ncolor ? st.rt.color[0] : NULL;
+    if (g_debug_frame) LOG("[pass-begin] %d color, color0 addr %llx\n", st.rt.ncolor, pass_rt0 ? (unsigned long long)pass_rt0->addr : 0ull);
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
@@ -3206,6 +3212,16 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
+    if (g_debug_frame) {
+        LOG("[dispatch] cs %llx %ux%ux%u%s", (unsigned long long)st.program->stages[5].code_addr, gx, gy, gz,
+            cp && atomic_load(&cp->p.state) == 1 ? "" : " SKIPPED");
+        for (int i = 0; i < 8; i++) {  // bound images (an image handle is its texture pool index)
+            uint32_t id = (uint32_t)(st.img[5][i] & 0xFFFFF);
+            NvnTexture *t = st.img[5][i] && st.tpool && id < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[id].tex : NULL;
+            if (t) LOG(" | img%d %llx %ux%ux%u f%#x tg%u", i, (unsigned long long)t->addr, t->width, t->height, t->depth, t->format, t->target);
+        }
+        LOG("\n");
+    }
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
