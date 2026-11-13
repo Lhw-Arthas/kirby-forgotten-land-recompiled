@@ -262,12 +262,13 @@ fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Re
     let out = log.try_clone().map_err(|e| e.to_string())?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let _ = writeln!(log, "\n== {cmd:?}");
-    let child = cmd.stdin(Stdio::null()).stdout(out).stderr(err).spawn().map_err(|e| format!("{cmd:?}: {e}"))?;
     {
+        // the flag check and the registration share one lock hold, so a cancel never lands between spawn and registration
         let mut job = app.job.lock().unwrap();
         if job.cancelled {
             return Err("Cancelled.".into());
         }
+        let child = cmd.stdin(Stdio::null()).stdout(out).stderr(err).spawn().map_err(|e| format!("{cmd:?}: {e}"))?;
         job.phase = phase;
         job.child = Some(child);
     }
@@ -450,6 +451,21 @@ mod tests {
         fs::write(link.join("keep.bin"), "x").unwrap();
         assert!(link_game_dir(&link, &new).is_err());
         assert!(link.join("keep.bin").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cancel_before_spawn_starts_nothing() {
+        let root = scratch("precancel");
+        let app = app("", "");
+        app.job.lock().unwrap().cancelled = true;
+        let mut log = fs::File::create(root.join("log")).unwrap();
+        let mut c = Command::new("cmd");
+        c.args(["/C", "set /a 40+2"]);
+        assert_eq!(run_step(&app, Phase::Runtime, c, &mut log), Err("Cancelled.".into()));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        // a spawned step would have printed 42 into the log
+        assert!(!fs::read_to_string(root.join("log")).unwrap().contains("42"));
         fs::remove_dir_all(&root).unwrap();
     }
 }
