@@ -162,6 +162,8 @@ $(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
 	mv -f $(dir $@)link/$(notdir $@) $@
 
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
+# shortcut: about 540 object paths go on one command line, which fits what Windows allows only while WORK is a short
+# relative path (the launcher passes one); link through an archive or response file if a long or absolute WORK is needed
 $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
 	mv -f $@.tmp $@
@@ -183,9 +185,9 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/python) $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && $(abspath $(PY)) gen.py sdk ../$(GAME)/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py main ../$(GAME)/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk0 ../$(GAME)/exefs/subsdk0 0x7006000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py sdk $(abspath $(GAME))/exefs/sdk 0x7004000000 $(abspath $(GEN))/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py main $(abspath $(GAME))/exefs/main 0x7000000000 $(abspath $(GEN))/main $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py subsdk0 $(abspath $(GAME))/exefs/subsdk0 0x7006000000 $(abspath $(GEN))/subsdk0 $(GENSIMD) $(GENTRACE)
 
 gen-objs: $(GEN_OBJ)
 
