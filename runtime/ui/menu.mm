@@ -528,13 +528,12 @@ static void cfg_draw(ImGuiIO &io, float scale) {
 
     // the page, above the strip at the bottom: as wide as the box (the cursor's arrow in the window's margin)
     float strip = fh * 1.45f, page_h = wp.y + ws.y - strip - st.ItemSpacing.y - ImGui::GetCursorScreenPos().y;
-    bool known = false;
     ImGui::PushID(g_cfg_tab);  // (each page its own scroll)
     ui_page_begin("##page", ImVec2(0, page_h));
     static int shown = -1;  // (another page: the cursor on its first setting)
     if (shown != g_cfg_tab && shown >= 0 && GImGui->NavCursorVisible) ImGui::SetKeyboardFocusHere();
     shown = g_cfg_tab;
-    if (g_cfg_tab == 0) ui_page_graphics(ui_graphics_x(NULL, 0), known);
+    if (g_cfg_tab == 0) ui_page_graphics(ui_graphics_x(NULL, 0));
     else if (g_cfg_tab == 1) ui_page_image_sound();
     else ui_page_advanced();
     ui_page_end();

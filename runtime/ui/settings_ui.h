@@ -70,9 +70,8 @@ const char *ui_tip_last(void);
 // L1 / R1 on a controller: the tab (page) before / after, once per frame
 void ui_tabs_begin(int *current, int count);
 
-// The pages. known: the game's build has the address tables the frame rate modes hook (runtime/fnhook.c).
-// ui_graphics_x: the column for the graphics page's rows plus the caller's own (extra labels) drawn above it.
+// The pages. ui_graphics_x: the column for the graphics page's rows plus the caller's own (extra labels) drawn above it.
 float ui_graphics_x(const char *const *extra, int n_extra);
-void ui_page_graphics(float x, bool known);
+void ui_page_graphics(float x);
 void ui_page_image_sound(void);
 void ui_page_advanced(void);

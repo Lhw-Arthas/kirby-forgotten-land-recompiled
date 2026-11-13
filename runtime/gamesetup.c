@@ -67,10 +67,6 @@ static bool game_ok(const char *exefs) {
     return id == TITLE_KFL;
 }
 
-const char *game_name(const char *exefs) {
-    uint64_t id = program_id(exefs);
-    return id == TITLE_KFL ? "Forgotten Land" : NULL;
-}
 
 // (a romfs.bin that isn't a readable RomFS - cut short, or another dump tool's format - stopped the game at its first
 // read with 2002-6063, issue #31: set up again instead)

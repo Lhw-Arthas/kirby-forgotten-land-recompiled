@@ -487,17 +487,16 @@ void ui_tabs_begin(int *current, int count) {
 
 // ------------------------------------------------------------------ the graphics page
 static const char *const *graphics_labels(int *n) {
-    static const char *l[9];
-    l[0] = UI_T("Frame rate limit", "Limite de quadros", "Лимит кадров");
-    l[1] = UI_T("Ambient occlusion (SSAO)", "Oclusão de ambiente (SSAO)", "Затенение (SSAO)");
-    l[2] = UI_T("Indirect light (GI)", "Luz indireta (GI)", "Непрямой свет (GI)");
-    l[3] = UI_T("Shadow filter", "Filtro das sombras", "Фильтр теней");
-    l[4] = UI_T("Anti-aliasing", "Antisserrilhado", "Сглаживание");
-    l[5] = UI_T("FSR 3.1 mode", "Modo do FSR 3.1", "Режим FSR 3.1");
-    l[6] = UI_T("Frame generation", "Geração de quadros", "Генерация кадров");
-    l[7] = UI_T("Sharpening (AMD RCAS)", "Nitidez (AMD RCAS)", "Резкость (AMD RCAS)");
-    l[8] = UI_T("Show FPS", "Mostrar FPS", "Показывать FPS");
-    *n = 9;
+    static const char *l[8];
+    l[0] = UI_T("Ambient occlusion (SSAO)", "Oclusão de ambiente (SSAO)", "Затенение (SSAO)");
+    l[1] = UI_T("Indirect light (GI)", "Luz indireta (GI)", "Непрямой свет (GI)");
+    l[2] = UI_T("Shadow filter", "Filtro das sombras", "Фильтр теней");
+    l[3] = UI_T("Anti-aliasing", "Antisserrilhado", "Сглаживание");
+    l[4] = UI_T("FSR 3.1 mode", "Modo do FSR 3.1", "Режим FSR 3.1");
+    l[5] = UI_T("Frame generation", "Geração de quadros", "Генерация кадров");
+    l[6] = UI_T("Sharpening (AMD RCAS)", "Nitidez (AMD RCAS)", "Резкость (AMD RCAS)");
+    l[7] = UI_T("Show FPS", "Mostrar FPS", "Показывать FPS");
+    *n = 8;
     return l;
 }
 
@@ -508,28 +507,11 @@ float ui_graphics_x(const char *const *extra, int n_extra) {
     return extra && n_extra ? fmaxf(x, ui_label_x(extra, n_extra)) : x;
 }
 
-void ui_page_graphics(float x, bool known) {
+void ui_page_graphics(float x) {
     int n;
     const char *const *l = graphics_labels(&n);
-    // the world's frame rate (runtime/hle/fps60.c, switched at the next present): the game's 30, 60, or 120 (more
-    // experimental); menus, battles and captures stay at 30
-    {
-        const char *fr[] = {UI_T("30 fps (original)", "30 fps (original)", "30 fps (оригинал)"), "60 fps",
-                            UI_T("120 fps (experimental)", "120 fps (experimental)", "120 fps (экспериментально)")};
-        int f = !known ? 0 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
-        ui_row(l[0], x);
-        ImGui::BeginDisabled(!known);
-        if (ui_combo("##fps", &f, fr, 3)) g_settings.fps = f == 2 ? 120 : f == 1 ? 60 : 30;
-        ImGui::EndDisabled();
-        ui_tip(!known ? UI_T("Only with Eevee 1.0.0 or 1.0.2, or Pikachu 1.0.0, for now.",
-                             "Por enquanto só no Eevee 1.0.0 ou 1.0.2, ou no Pikachu 1.0.0.",
-                             "Пока только с Eevee 1.0.0 или 1.0.2 либо Pikachu 1.0.0.")
-                      : UI_T("The world at 60 or 120 fps; menus, the Pokédex, battles and captures stay at 30.",
-                             "Mundo a 60 ou 120 fps; menus, Pokédex, batalhas e capturas continuam a 30.",
-                             "Мир на 60 или 120 к/с; меню, Покедекс, бои и поимки остаются на 30."));
-    }
     // the FPS counter in a corner of the game (runtime/ui/menu.mm), issue #34
-    ui_toggle("##show_fps", l[8], x, &g_settings.show_fps);
+    ui_toggle("##show_fps", l[7], x, &g_settings.show_fps);
     ui_tip(UI_T("The frame rate in a corner of the screen while playing.",
                 "A taxa de quadros num canto da tela durante o jogo.",
                 "Частота кадров в углу экрана во время игры."));
@@ -537,7 +519,7 @@ void ui_page_graphics(float x, bool known) {
     // SSAO and GI by quality level (their parameters: settings_apply_levels; high = what they had before the levels)
     const char *lv[] = {UI_T("Off", "Desligado", "Выкл."), UI_T("Low", "Baixo", "Низкое"), UI_T("Medium", "Médio", "Среднее"),
                         UI_T("High", "Alto", "Высокое")};
-    ui_row(l[1], x);
+    ui_row(l[0], x);
     {   // (SSAO only: ultra = high plus the contact shadows, settings_apply_levels)
         const char *lv5[] = {lv[0], lv[1], lv[2], lv[3], "Ultra"};
         ui_combo("##ssao_lv", &g_settings.ssao_level, lv5, 5);
@@ -550,14 +532,14 @@ void ui_page_graphics(float x, bool known) {
                         "Alto, mais sombras de contato onde os objetos tocam o chão (pés, grama, objetos pequenos).",
                         "Высокое плюс контактные тени там, где предметы касаются земли (ноги, трава, мелкие объекты)."));
     }
-    ui_row(l[2], x);
+    ui_row(l[1], x);
     ui_combo("##gi_lv", &g_settings.gi_level, lv, 4);
     ui_tip(UI_T("Light bouncing off nearby surfaces: their colour on the ground and the walls around them.",
                 "A luz que reflete nas superfícies próximas: a cor delas no chão e nas paredes em volta.",
                 "Свет, отражённый от ближних поверхностей: их цвет на земле и стенах вокруг."));
     // the shadow map's filter (runtime/nvn/vulkan/textures.c vk_sampler, runtime/nvn/maxwell/translate.c shpcf)
     const char *sh[] = {UI_T("Game's", "Do jogo", "Как в игре"), UI_T("Bilinear", "Bilinear", "Билинейный"), UI_T("Smooth", "Suave", "Мягкий")};
-    ui_row(l[3], x);
+    ui_row(l[2], x);
     ui_combo("##shadow_filter", &g_settings.shadow_filter, sh, 3);
     ui_tip(UI_T("The edges of the shadows: as the game draws them, smoothed, or softer still.",
                 "As bordas das sombras: como o jogo as desenha, suavizadas ou ainda mais suaves.",
@@ -569,7 +551,7 @@ void ui_page_graphics(float x, bool known) {
     // (settings_apply_levels).
     {
         const char *aa[] = {UI_T("Off", "Desligado", "Выкл."), "SMAA", "TAA", "FSR 3.1"};
-        ui_row(l[4], x);
+        ui_row(l[3], x);
         if (ui_combo("##aa", &g_settings.antialias, aa, 4)) settings_apply_levels();
         ui_tip(UI_T("Smooths jagged edges. SMAA: light, on the final image. TAA and FSR 3.1: steadier, over several frames; FSR 3.1 also draws the scene at a lower resolution and upscales it.",
                     "Suaviza os serrilhados. SMAA: leve, na imagem final. TAA e FSR 3.1: mais estáveis, ao longo de vários quadros; o FSR 3.1 também desenha a cena numa resolução menor e a amplia.",
@@ -582,7 +564,7 @@ void ui_page_graphics(float x, bool known) {
                             UI_T("Balanced (1.7x)", "Equilibrado (1,7x)", "Баланс (1,7x)"),
                             UI_T("Performance (2.0x)", "Desempenho (2,0x)", "Производительность (2,0x)"),
                             UI_T("Ultra Performance (3.0x)", "Ultra desempenho (3,0x)", "Макс. производительность (3,0x)")};
-        ui_row(l[5], x);
+        ui_row(l[4], x);
         ui_combo("##fsr3p", &g_settings.fsr3_preset, pr, 5);
         ui_tip(UI_T("How much lower the scene is drawn before FSR 3.1 upscales it: the window's size divided by the ratio. Higher ratios run faster and look softer.",
                     "Quanto menor a cena é desenhada antes de o FSR 3.1 ampliá-la: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
@@ -590,7 +572,7 @@ void ui_page_graphics(float x, bool known) {
         // its sharpening: RCAS, AMD's robust contrast-adaptive sharpening (CAS) inside FSR 3.1 (exec.c post_process; the
         // frame generation's in-between images take it too)
         float pct = g_settings.fsr3_sharpness * 100;
-        ui_row(l[7], x);
+        ui_row(l[6], x);
         if (ui_slider("##fsr3s", &pct, 0, 100, "%.0f%%", 5)) g_settings.fsr3_sharpness = pct / 100;
         ui_tip(UI_T("FSR 3.1's own sharpening (RCAS, AMD's contrast-adaptive sharpening). 0% turns it off.",
                     "A nitidez do próprio FSR 3.1 (RCAS, o realce adaptativo de contraste da AMD). 0% desliga.",
@@ -602,7 +584,7 @@ void ui_page_graphics(float x, bool known) {
     {
         const char *fg[] = {UI_T("Off", "Desligado", "Выкл."), "Auto", "2x", "3x", "4x"};
         int cur = g_settings.frame_gen == FG_AUTO ? 1 : g_settings.frame_gen >= 2 && g_settings.frame_gen <= 4 ? g_settings.frame_gen : 0;
-        ui_row(l[6], x);
+        ui_row(l[5], x);
         if (ui_combo("##fg", &cur, fg, 5)) g_settings.frame_gen = cur == 1 ? FG_AUTO : cur ? cur : 0;
         ui_tip(UI_T("Images per frame of the world (60 fps x 2 = 120). Each extra image costs about half as much "
                     "as drawing the scene again, and the window shows the game one frame later. Auto: as many as "

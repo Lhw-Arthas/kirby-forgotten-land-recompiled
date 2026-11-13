@@ -33,8 +33,6 @@ bool setup_ready(void);
 // The game files set up, but no game code built for this version (a new version unzipped over the folder, or the
 // other CPU level): the launcher rebuilds it by itself (setup_start(NULL)).
 bool setup_needs_build(void);
-// The game in that exefs/ folder: "Forgotten Land" or NULL.
-const char *game_name(const char *exefs);
 // Starts a setup from the picked folder (NULL: only rebuild the game code from files set up already).
 void setup_start(const char *folder);
 int setup_state(void);         // SETUP_*

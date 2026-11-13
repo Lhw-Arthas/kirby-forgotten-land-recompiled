@@ -1,4 +1,4 @@
-// Let's Go Recomp start screen: a launcher's window (no system frame, taller than wide) with a sidebar - the project's
+// The start screen: a launcher's window (no system frame, taller than wide) with a sidebar - the project's
 // icon, the pages, Play - and the page beside it: Game (the game files - picked once, set up and recompiled here:
 // runtime/gamesetup.c - and the game options), Graphics (the window, then the F12 menu's graphics page:
 // runtime/ui/settings_ui.mm), Image and sound (the same as the F12 menu's), Controls (keyboard / mouse) and Mods
@@ -54,12 +54,12 @@ static float g_scale = 1;  // the window's height over 1080 (ui_scale): fixed si
 static const struct { int slot; const char *en, *pt; } k_actions[] = {
     {BIND_LS_UP, "Walk up", "Andar para cima"},             {BIND_A, "A (or Enter): confirm", "A (ou Enter): confirmar"},
     {BIND_LS_DOWN, "Walk down", "Andar para baixo"},         {BIND_B, "B (or Backspace): back", "B (ou Backspace): cancelar"},
-    {BIND_LS_LEFT, "Walk left", "Andar para a esquerda"},    {BIND_X, "X: menu", "X: menu"},
-    {BIND_LS_RIGHT, "Walk right", "Andar para a direita"},   {BIND_Y, "Y: options / box", "Y: opções / caixa"},
-    {BIND_UP, "D-pad up", "Direcional cima"},                {BIND_L, "L: move Pokémon / items", "L: mover Pokémon / itens"},
-    {BIND_DOWN, "D-pad down", "Direcional baixo"},           {BIND_R, "R: move Pokémon / items", "R: mover Pokémon / itens"},
-    {BIND_LEFT, "D-pad left", "Direcional esquerda"},        {BIND_PLUS, "+: partner", "+: parceiro"},
-    {BIND_RIGHT, "D-pad right", "Direcional direita"},       {BIND_MINUS, "-: Pokédex", "-: Pokédex"},
+    {BIND_LS_LEFT, "Walk left", "Andar para a esquerda"},    {BIND_X, "X", "X"},
+    {BIND_LS_RIGHT, "Walk right", "Andar para a direita"},   {BIND_Y, "Y", "Y"},
+    {BIND_UP, "D-pad up", "Direcional cima"},                {BIND_L, "L", "L"},
+    {BIND_DOWN, "D-pad down", "Direcional baixo"},           {BIND_R, "R", "R"},
+    {BIND_LEFT, "D-pad left", "Direcional esquerda"},        {BIND_PLUS, "+", "+"},
+    {BIND_RIGHT, "D-pad right", "Direcional direita"},       {BIND_MINUS, "-", "-"},
 };
 
 static const char *key_name(int sc) {
@@ -113,10 +113,10 @@ static void keys_section(void) {
     }
     ui_heading(T("Mouse and controller", "Mouse e controle"));
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("%s", T("Mouse while aiming a Poké Ball: move = aim, left = throw.",
-                                "Mouse na mira da Poké Ball: mover = mirar, esquerdo = arremessar."));
-    ImGui::TextDisabled("%s", T("Otherwise: left = touch screen (Play with your partner). Right = B.",
-                                "Fora dela: esquerdo = tocar na tela (Brincar com o parceiro). Direito = B."));
+    ImGui::TextDisabled("%s", T("Mouse while the game uses motion controls: move = aim, left = A.",
+                                "Mouse quando o jogo usa o controle de movimento: mover = mirar, esquerdo = A."));
+    ImGui::TextDisabled("%s", T("Otherwise: left = touch screen. Right = B.",
+                                "Fora disso: esquerdo = tocar na tela. Direito = B."));
     ImGui::PopTextWrapPos();
     ui_row(sl[0], x);
     ui_slider("##mouse", &g_settings.mouse_sens, 0.02f, 0.30f, "%.2f", 0.01f);
@@ -214,27 +214,25 @@ static void game_files_section(SDL_Window *win) {
     }
     bool ready = setup_ready();
     if (ready) {
-        const char *name = game_name("extracted/exefs");
-        ImGui::TextColored(k_green, g_pt ? "Pokémon: Let's Go, %s! - pronto para jogar" : "Pokémon: Let's Go, %s! - ready to play",
-                           name ? name : "Eevee");
+        ImGui::TextColored(k_green, "%s", T("Kirby and the Forgotten Land - ready to play", "Kirby and the Forgotten Land - pronto para jogar"));
         if (ui_button(T("Change folder...", "Trocar pasta..."))) SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
         return;
     }
     if (st >= SETUP_FAIL_NOT_FOUND) {
         static const char *const en[] = {"No game files found in that folder.", "Those are packed game files (.xci / .nsp).",
-                                         "That's not Pokémon: Let's Go, Eevee! or Pikachu!.", "The files couldn't be copied.",
+                                         "That's not Kirby and the Forgotten Land.", "The files couldn't be copied.",
                                          "The game code didn't build.", "The game code builder is missing from this copy.",
                                          "The game's data image (romfs.bin) can't be read."};
         static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo empacotados (.xci / .nsp).",
-                                         "Isso não é o Pokémon: Let's Go, Eevee! nem o Pikachu!.", "Os arquivos não puderam ser copiados.",
+                                         "Isso não é o Kirby and the Forgotten Land.", "Os arquivos não puderam ser copiados.",
                                          "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia.",
                                          "A imagem de dados do jogo (romfs.bin) não pode ser lida."};
         static const char *const en_h[] = {"Choose the folder that holds exefs and romfs.", "Extract them first (exefs and romfs).",
-                                           "Pick the folder of your own extracted Let's Go, Eevee! or Pikachu!.", "Check there are about 6 GB free and try again.",
+                                           "Pick the folder of your own extracted Kirby and the Forgotten Land.", "Check there are about 6 GB free and try again.",
                                            "Try again (it needs about 2 GB free); if it fails again, lasrecomp.log says which step failed: attach it to an issue.", "Download the release again.",
                                            "Pick the folder with the romfs folder itself (not a romfs.bin from another tool); details in lasrecomp.log."};
         static const char *const pt_h[] = {"Escolha a pasta que tem exefs e romfs.", "Extraia antes (exefs e romfs).",
-                                           "Escolha a pasta do seu Let's Go, Eevee! ou Pikachu! extraído.", "Confira se há uns 6 GB livres e tente de novo.",
+                                           "Escolha a pasta do seu Kirby and the Forgotten Land extraído.", "Confira se há uns 6 GB livres e tente de novo.",
                                            "Tente de novo (precisa de uns 2 GB livres); se falhar de novo, o lasrecomp.log diz qual etapa falhou: anexe-o a uma issue.", "Baixe a release de novo.",
                                            "Escolha a pasta com a própria pasta romfs (não um romfs.bin de outra ferramenta); detalhes no lasrecomp.log."};
         int k = st - SETUP_FAIL_NOT_FOUND;
@@ -244,8 +242,8 @@ static void game_files_section(SDL_Window *win) {
         ImGui::PopTextWrapPos();
     } else {
         ImGui::PushTextWrapPos(0);
-        ImGui::TextUnformatted(T("Select the folder with your own extracted Pokémon: Let's Go, Eevee! or Pikachu! (exefs and romfs).",
-                                 "Selecione a pasta com o seu Pokémon: Let's Go, Eevee! ou Pikachu! extraído (exefs e romfs)."));
+        ImGui::TextUnformatted(T("Select the folder with your own extracted Kirby and the Forgotten Land (exefs and romfs).",
+                                 "Selecione a pasta com o seu Kirby and the Forgotten Land extraído (exefs e romfs)."));
         ImGui::PopTextWrapPos();
     }
     if (ui_button(T("Select game folder...", "Selecionar pasta do jogo..."), -1))
@@ -483,7 +481,7 @@ extern "C" void launcher_lg_run(const char *root) {
     int res = 0;
     for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool ui2x_on = g_settings.ui2x;  // (the interface at 2x: runtime/ui2x.c)
-    bool full = g_settings.fullscreen, wildb = g_settings.wild_battle, skipc = g_settings.skip_controller;
+    bool full = g_settings.fullscreen;
     mods_reload(g_settings.mod);  // (the folders under mods/: runtime/mods.h)
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
@@ -549,9 +547,6 @@ extern "C" void launcher_lg_run(const char *root) {
         g_scale = ui_scale(scaler, io.DisplaySize.y * 0.86f);
         ImGui::NewFrame();
         float s = g_scale;
-        bool known = !setup_ready();
-        const char *only = T("Only with Eevee 1.0.0 or 1.0.2, or Pikachu 1.0.0, for now.",
-                             "Por enquanto só no Eevee 1.0.0 ou 1.0.2, ou no Pikachu 1.0.0.");
         const char *names[NTABS] = {T("Game", "Jogo"), T("Graphics", "Gráficos"), T("Image and sound", "Imagem e som"),
                                     T("Controls", "Controles"), "Mods"};
         ui_tabs_begin(&tab, NTABS);  // (L1 / R1 on a controller: the page before / after)
@@ -583,8 +578,8 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImDrawList *dl = ImGui::GetWindowDrawList();
                 if (icon) dl->AddImage(icon, p, ImVec2(p.x + block, p.y + block));
                 float tx = p.x + block + 12 * s, ty = p.y + (block - step - fs) * 0.5f;
-                dl->AddText(ImGui::GetFont(), fs, ImVec2(tx, ty), ImGui::GetColorU32(UI_GOLD), "Let's Go");
-                dl->AddText(ImGui::GetFont(), fs, ImVec2(tx, ty + step), ImGui::GetColorU32(UI_GOLD), "Recomp");
+                dl->AddText(ImGui::GetFont(), fs, ImVec2(tx, ty), ImGui::GetColorU32(UI_GOLD), "Forgotten");
+                dl->AddText(ImGui::GetFont(), fs, ImVec2(tx, ty + step), ImGui::GetColorU32(UI_GOLD), "Land Recomp");
                 ImGui::PopFont();
                 ImGui::Dummy(ImVec2(side_w - pad * 2, block));
             }
@@ -649,22 +644,11 @@ extern "C" void launcher_lg_run(const char *root) {
                 game_files_section(win);
                 ui_heading(T("Options", "Opções"));
                 // A / B and X / Y by the layout's positions (runtime/hle/bindings.c bind_set_layout)
-                const char *ol[] = {T("Wild battles (experimental)", "Batalhas selvagens (experimental)"),
-                                    T("Skip controller selection", "Pular a escolha do controle"), T("Controller layout", "Layout do controle")};
-                float ox = ui_label_x(ol, 3);
-                ImGui::BeginDisabled(!known);
-                ui_toggle("##wild", ol[0], ox, &wildb);
-                ui_tip(!known ? only : T("Touching a wild Pokémon starts a classic battle instead of going straight to the capture. "
-                                         "Its CATCH button throws one Poké Ball, with better odds the weaker the Pokémon is.",
-                                         "Encostar num Pokémon selvagem começa uma batalha clássica em vez de ir direto para a captura. "
-                                         "O botão de captura (CATCH) joga uma Poké Bola, com mais chance quanto mais fraco o Pokémon estiver."));
-                ui_toggle("##skipc", ol[1], ox, &skipc);
-                ui_tip(!known ? only : T("The game starts at the Game Freak logo, with your controller already chosen, instead of asking for a button press first.",
-                                         "O jogo começa no logo da Game Freak, com o seu controle já escolhido, em vez de pedir antes que se aperte um botão."));
-                ImGui::EndDisabled();
+                const char *ol[] = {T("Controller layout", "Layout do controle")};
+                float ox = ui_label_x(ol, 1);
                 const char *lay[] = {"Nintendo", "Xbox"};
                 int lv = bind_layout();
-                ui_row(ol[2], ox);
+                ui_row(ol[0], ox);
                 if (ui_combo("##padlayout", &lv, lay, 2)) bind_set_layout(lv);
                 ui_tip(T("Which controller buttons are A / B and X / Y. Nintendo: A right, B bottom. Xbox: A bottom, B right, as the letters on an Xbox controller. The button prompts follow.",
                          "Quais botões do controle são A / B e X / Y. Nintendo: A à direita, B embaixo. Xbox: A embaixo, B à direita, como as letras de um controle de Xbox. Os ícones dos botões acompanham."));
@@ -676,7 +660,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 ui_toggle("##full", extra[1], x, &full);
                 ui_tip(T("When the game starts.", "Ao começar o jogo."));
                 ui_group_gap();
-                ui_page_graphics(x, known);
+                ui_page_graphics(x);
                 ui2x_section(ready, &ui2x_on);
             } else if (tab == TAB_IMAGE) {
                 ui_page_image_sound();
@@ -702,8 +686,6 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
     settings_apply_levels();  // (the upscaler follows the anti-aliasing)
-    g_settings.wild_battle = wildb;
-    g_settings.skip_controller = skipc;
     g_settings.ui2x = ui2x_on;
     mods_active(g_settings.mod, sizeof g_settings.mod);
     settings_save();
