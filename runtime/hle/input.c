@@ -414,16 +414,15 @@ static void host_test_frame(uint64_t frame) {
 
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
-// A presses for the game at given frames (runtime/hle/wildbattle.c: answers that need no question), each held 4 frames
+// A presses for the game at given frames, each held 4 frames
 static uint64_t g_press_a[4];
 void input_press_a_at(uint64_t frame) {
     for (int i = 0; i < 4; i++)
         if (!g_press_a[i] || g_press_a[i] + 4 < frame) { g_press_a[i] = frame; return; }
 }
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
-// Script entries "b<N>:<button>:<len>" count from the last input_mark() (runtime/hle/wildbattle.c marks each battle's
-// start), "c<N>:..." from the last input_mark_capture() (the capture after one of its battles): the encounter's frame
-// changes from run to run, the battle's own timing doesn't.
+// Script entries "b<N>:<button>:<len>" count from the last input_mark(), "c<N>:..." from the last input_mark_capture():
+// nothing calls either in this game, so those entries never fire.
 static uint64_t g_last_frame;
 static long g_mark = -1, g_mark_c = -1;
 void input_mark(void) { g_mark = (long)g_last_frame; }

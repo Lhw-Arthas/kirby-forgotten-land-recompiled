@@ -1,4 +1,4 @@
-# Let's Go Recomp build (from LAS Recomp's).
+# Forgotten Land Recomp build (from LAS Recomp's).
 # Windows (the supported platform): MSYS2 UCRT64 shell or Git Bash with MSYS2 on PATH, clang + Vulkan renderer
 # (docs/COMPILAR-WINDOWS.md). The Linux branch is LAS Recomp's, kept but untested here.
 #   make gen           translate your own game files (extracted/exefs) into generated/
