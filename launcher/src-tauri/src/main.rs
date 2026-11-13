@@ -141,8 +141,8 @@ impl App {
         }
         missing
     }
-    // WORK relative to the repo, on one drive: the Makefile's gen target writes ../$(WORK) from tools/, and the link line
-    // with absolute object paths is longer than Windows allows (Argument list too long)
+    // WORK relative to the repo, on one drive: the link line carries about 540 object paths, which only fit what Windows
+    // allows (Argument list too long) while WORK is a short relative path
     fn work_from_repo(&self) -> PathBuf {
         let repo = fs::canonicalize(&self.repo).unwrap_or(self.repo.clone());
         let strip = |p: &Path| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase());
