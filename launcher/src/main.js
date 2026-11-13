@@ -137,12 +137,18 @@ function draw() {
   $('#view').innerHTML = html;
 }
 
+// built once: rebuilding it on every page change would drop the keyboard focus
+$('#nav').innerHTML = `<div class="brand">Forgotten Land<small>Recompiled</small></div>${PAGES.map(
+  ([id, name]) => `<button class="nav-item" data-page="${id}">${name}</button>`,
+).join('')}`;
+
 function go(to) {
   page = to;
   document.body.dataset.page = to;
-  $('#nav').innerHTML = `<div class="brand">Forgotten Land<small>Recompiled</small></div>${PAGES.map(
-    ([id, name]) => `<button class="nav-item" data-page="${id}" ${id === to ? 'aria-current="page"' : ''}>${name}</button>`,
-  ).join('')}`;
+  for (const b of document.querySelectorAll('.nav-item')) {
+    if (b.dataset.page === to) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  }
   drawn = '';
   draw();
 }
@@ -157,7 +163,7 @@ async function refresh() {
 }
 
 document.addEventListener('click', (e) => {
-  const nav = e.target.closest('[data-page]');
+  const nav = e.target.closest('.nav-item');
   if (nav) return go(nav.dataset.page);
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act && actions[act]) actions[act]();
