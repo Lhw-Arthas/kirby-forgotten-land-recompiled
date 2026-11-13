@@ -856,7 +856,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
 
 #define OPM(val, mask) ((w & (uint64_t)(mask)) == (uint64_t)(val))
     if (OPM(0xe300000000000000ull, 0xfff0000000000000ull)) {  // EXIT
-        sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
+        int test = (int)bits(w, 0, 5);
+        // FCSM_TR (0x1c): the VOTE.VTG cull test's result, never set here (VOTE.VTG is a no-op): the vertex goes on
+        if (test == 0x1c) {
+        } else if (test != 0xf) fail(c, "EXIT with flow test %#x at %#x", test, pc);
+        else sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
     } else if (OPM(0xe330000000000000ull, 0xfff0000000000000ull)) {  // KIL
         c->info->uses_discard = true;
         if (getenv("LARECOMP_NO_DISCARD")) {
