@@ -19,6 +19,7 @@ const SETTING_KEYS: [&str; 3] = ["fullscreen", "render_height", "volume"];
 enum Phase {
     Idle,
     Runtime,
+    Image,
     Translate,
     Compile,
     Failed,
@@ -117,6 +118,9 @@ impl App {
     fn lib(&self) -> PathBuf {
         self.work.join("build").join("lasgame.dll")
     }
+    fn image(&self) -> PathBuf {
+        self.game().join("romfs.bin")
+    }
     fn ini(&self) -> PathBuf {
         self.work.join("larecomp.ini")
     }
@@ -142,6 +146,13 @@ impl App {
         // MSYS make wants forward slashes
         let work = self.work.to_string_lossy().replace('\\', "/");
         c.current_dir(&self.repo).env("PATH", self.tool_path()).env("MSYSTEM", "UCRT64").arg(format!("WORK={work}")).args(args);
+        hide_window(&mut c);
+        c
+    }
+    // returns at once when a valid image exists
+    fn build_image(&self) -> Command {
+        let mut c = Command::new(self.exe());
+        c.args(["extracted", "--build-romfs"]).current_dir(&self.work).env("PATH", self.tool_path());
         hide_window(&mut c);
         c
     }
@@ -200,7 +211,7 @@ fn status(app: St) -> Status {
         game_dir,
         game_error,
         tools_missing: app.tools_missing(),
-        built: app.exe().is_file() && app.lib().is_file(),
+        built: app.exe().is_file() && app.lib().is_file() && app.image().is_file(),
         running,
         phase: job.phase,
         progress,
@@ -232,11 +243,11 @@ fn set_game_dir(app: St, path: String) -> Result<(), String> {
     Ok(())
 }
 
-fn run_step(app: &App, phase: Phase, args: &[&str], log: &mut fs::File) -> Result<(), String> {
+fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Result<(), String> {
     let out = log.try_clone().map_err(|e| e.to_string())?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
-    let _ = writeln!(log, "\n== make {}", args.join(" "));
-    let child = app.make(args).stdin(Stdio::null()).stdout(out).stderr(err).spawn().map_err(|e| format!("make: {e}"))?;
+    let _ = writeln!(log, "\n== {cmd:?}");
+    let child = cmd.stdin(Stdio::null()).stdout(out).stderr(err).spawn().map_err(|e| format!("{cmd:?}: {e}"))?;
     {
         let mut job = app.job.lock().unwrap();
         if job.cancelled {
@@ -275,9 +286,10 @@ fn start_setup(app: St) -> Result<(), String> {
         let jobs = format!("-j{}", std::thread::available_parallelism().map_or(4, |n| n.get()));
         let result = fs::File::create(app.work.join("setup.log")).map_err(|e| e.to_string()).and_then(|mut log| {
             let exe = format!("{}/build/lasrecomp.exe", app.work.to_string_lossy().replace('\\', "/"));
-            run_step(&app, Phase::Runtime, &[&jobs, &exe], &mut log)?;
-            run_step(&app, Phase::Translate, &["gen"], &mut log)?;
-            run_step(&app, Phase::Compile, &[&jobs], &mut log)
+            run_step(&app, Phase::Runtime, app.make(&[&jobs, &exe]), &mut log)?;
+            run_step(&app, Phase::Image, app.build_image(), &mut log)?;
+            run_step(&app, Phase::Translate, app.make(&["gen"]), &mut log)?;
+            run_step(&app, Phase::Compile, app.make(&[&jobs]), &mut log)
         });
         let mut job = app.job.lock().unwrap();
         match result {

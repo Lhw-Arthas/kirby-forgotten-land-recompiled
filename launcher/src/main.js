@@ -2,7 +2,7 @@ import './style.css';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import { PHASE_LABEL, primaryAction } from './action.js';
+import { BUSY_PHASES, PHASE_LABEL, primaryAction } from './action.js';
 
 const PAGES = [
   ['home', 'Home'],
@@ -49,7 +49,7 @@ const actions = {
   'open-game-log': () => call('open_path', { which: 'game_log' }),
 };
 
-const busy = (s) => ['runtime', 'translate', 'compile'].includes(s.phase);
+const busy = (s) => BUSY_PHASES.includes(s.phase);
 
 function progress(s) {
   if (!busy(s)) return '';
@@ -88,7 +88,7 @@ const views = {
         ? `<p class="bad" role="alert">Missing: ${esc(s.tools_missing.join(', '))}. See the README for the install commands.</p>`
         : '<p>MSYS2 clang, make and the Python environment are installed.</p>')}
       ${step(3, 'Game code', s.built, `
-        <p>${s.built ? 'The game code is built for this PC.' : 'Translates the game code from your files and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
+        <p>${s.built ? 'The game code is built for this PC.' : 'Builds the runtime, writes a game data image of about 6 GB next to the romfs folder, then translates the game code from your files and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
         ${s.phase === 'failed' ? `<p class="bad" role="alert">${esc(s.error)}</p>` : ''}
         ${progress(s)}
         <div class="row">
