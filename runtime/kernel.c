@@ -473,12 +473,14 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     if (g_prof_cv < 0) g_prof_cv = getenv("LARECOMP_PROF_CONDVAR") != NULL;
     uint64_t cv_t0 = g_prof_cv ? plat_now_ns() : 0;
     t->woken_ns = 0;
+    // The key first, as the console's kernel does: the SDK's Signal skips the svc while the key reads 0, so a signaller
+    // that took the just-released mutex in user space would otherwise see no waiter and the wake-up was lost.
+    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     mutex_release(mutex);
     t->wait_kind = WAIT_CONDVAR;
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
-    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     uint32_t r = block_current(timeout);
     if (g_prof_cv) cv_prof_note(cv_t0, t->woken_ns);
     // Timed out / cancelled: the mutex is NOT reacquired here. As on the console, the caller does it: the SDK's
