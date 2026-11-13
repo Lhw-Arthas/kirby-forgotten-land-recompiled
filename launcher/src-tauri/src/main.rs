@@ -141,10 +141,26 @@ impl App {
         }
         missing
     }
+    // WORK relative to the repo, on one drive: the Makefile's gen target writes ../$(WORK) from tools/, and the link line
+    // with absolute object paths is longer than Windows allows (Argument list too long)
+    fn work_from_repo(&self) -> PathBuf {
+        let repo = fs::canonicalize(&self.repo).unwrap_or(self.repo.clone());
+        let strip = |p: &Path| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase());
+        let (r, w) = (strip(&repo), strip(&self.work));
+        let (rc, wc): (Vec<_>, Vec<_>) = (r.components().collect(), w.components().collect());
+        if rc.first() != wc.first() {
+            return self.work.clone();
+        }
+        let same = rc.iter().zip(&wc).take_while(|(a, b)| a == b).count();
+        let mut rel = PathBuf::new();
+        (same..rc.len()).for_each(|_| rel.push(".."));
+        self.work.components().skip(same).for_each(|c| rel.push(c));
+        rel
+    }
     fn make(&self, args: &[&str]) -> Command {
         let mut c = Command::new(self.msys.join("usr\\bin\\make.exe"));
         // MSYS make wants forward slashes
-        let work = self.work.to_string_lossy().replace('\\', "/");
+        let work = self.work_from_repo().to_string_lossy().replace('\\', "/");
         c.current_dir(&self.repo).env("PATH", self.tool_path()).env("MSYSTEM", "UCRT64").arg(format!("WORK={work}")).args(args);
         hide_window(&mut c);
         c
@@ -285,7 +301,7 @@ fn start_setup(app: St) -> Result<(), String> {
     std::thread::spawn(move || {
         let jobs = format!("-j{}", std::thread::available_parallelism().map_or(4, |n| n.get()));
         let result = fs::File::create(app.work.join("setup.log")).map_err(|e| e.to_string()).and_then(|mut log| {
-            let exe = format!("{}/build/lasrecomp.exe", app.work.to_string_lossy().replace('\\', "/"));
+            let exe = format!("{}/build/lasrecomp.exe", app.work_from_repo().to_string_lossy().replace('\\', "/"));
             run_step(&app, Phase::Runtime, app.make(&[&jobs, &exe]), &mut log)?;
             run_step(&app, Phase::Image, app.build_image(), &mut log)?;
             run_step(&app, Phase::Translate, app.make(&["gen"]), &mut log)?;
@@ -380,4 +396,20 @@ fn main() {
         .invoke_handler(tauri::generate_handler![status, set_game_dir, start_setup, cancel_setup, play, set_setting, open_path])
         .run(tauri::generate_context!())
         .expect("launcher failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(repo: &str, work: &str) -> App {
+        App { repo: repo.into(), work: work.into(), msys: PathBuf::new(), job: Arc::new(Mutex::new(Job { phase: Phase::Idle, error: String::new(), child: None, cancelled: false })), game: Mutex::new(None) }
+    }
+
+    #[test]
+    fn work_from_repo_is_relative_on_one_drive() {
+        assert_eq!(app(r"E:\a\repo", r"E:\a\kfl-e2e").work_from_repo(), PathBuf::from(r"..\kfl-e2e"));
+        assert_eq!(app(r"E:\a\repo", r"E:\b\w").work_from_repo(), PathBuf::from(r"..\..\b\w"));
+        assert_eq!(app(r"E:\a\repo", r"D:\w").work_from_repo(), PathBuf::from(r"D:\w"));
+    }
 }
