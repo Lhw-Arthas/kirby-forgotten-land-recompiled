@@ -321,9 +321,17 @@ fn start_setup(app: St) -> Result<(), String> {
 
 #[tauri::command]
 fn cancel_setup(app: St) {
-    let mut job = app.job.lock().unwrap();
-    job.cancelled = true;
-    if let Some(mut child) = job.child.take() {
+    cancel(&app);
+}
+
+fn cancel(app: &App) {
+    let child = {
+        let mut job = app.job.lock().unwrap();
+        job.cancelled = true;
+        job.child.take()
+    };
+    // killed outside the lock so the status poll does not stall
+    if let Some(mut child) = child {
         // make's compiler children too
         let mut k = Command::new("taskkill");
         k.args(["/F", "/T", "/PID", &child.id().to_string()]);
@@ -466,6 +474,27 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         // a spawned step would have printed 42 into the log
         assert!(!fs::read_to_string(root.join("log")).unwrap().contains("42"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn sleeper() -> Command {
+        let mut c = Command::new("ping");
+        c.args(["-n", "30", "127.0.0.1"]);
+        c
+    }
+
+    #[test]
+    fn cancel_kills_the_running_step() {
+        let root = scratch("cancel");
+        let app = Arc::new(app("", ""));
+        let (a, log) = (Arc::clone(&app), root.join("log"));
+        let t = std::thread::spawn(move || run_step(&a, Phase::Runtime, sleeper(), &mut fs::File::create(log).unwrap()));
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(app.job.lock().unwrap().child.is_some());
+        let started = std::time::Instant::now();
+        cancel(&app);
+        assert_eq!(t.join().unwrap(), Err("Cancelled.".into()));
+        assert!(started.elapsed().as_secs() < 5 && app.job.lock().unwrap().child.is_none());
         fs::remove_dir_all(&root).unwrap();
     }
 }
