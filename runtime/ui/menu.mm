@@ -28,7 +28,6 @@ extern "C" {
 #include "menu.h"
 #include "../paths.h"
 void input_reset(void);
-uint64_t rt_addr(uint64_t eevee);  // runtime/fnhook.c (0: a build without the tables the frame rate modes need)
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
 }
 
@@ -529,7 +528,7 @@ static void cfg_draw(ImGuiIO &io, float scale) {
 
     // the page, above the strip at the bottom: as wide as the box (the cursor's arrow in the window's margin)
     float strip = fh * 1.45f, page_h = wp.y + ws.y - strip - st.ItemSpacing.y - ImGui::GetCursorScreenPos().y;
-    bool known = rt_addr(0x70002f8bb0ull) != 0;
+    bool known = false;
     ImGui::PushID(g_cfg_tab);  // (each page its own scroll)
     ui_page_begin("##page", ImVec2(0, page_h));
     static int shown = -1;  // (another page: the cursor on its first setting)
