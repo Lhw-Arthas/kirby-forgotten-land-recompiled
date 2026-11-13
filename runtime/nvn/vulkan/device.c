@@ -226,6 +226,7 @@ static void create_device(void) {
     b->sampleRateShading = h->sampleRateShading;
     b->fragmentStoresAndAtomics = h->fragmentStoresAndAtomics;
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
+    b->shaderStorageImageWriteWithoutFormat = h->shaderStorageImageWriteWithoutFormat;  // (SUST: images declared without a format)
     b->pipelineStatisticsQuery = h->pipelineStatisticsQuery;  // (LARECOMP_GPUPROF_STATS: invocations per draw)
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     if (getenv("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)

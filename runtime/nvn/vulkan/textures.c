@@ -316,6 +316,10 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
+    // NVN_TEXTURE_FLAGS_IMAGE: compute shaders may store to it (SUST). Extended usage: its other-format views need not
+    // support storage themselves.
+    if (!depthfmt && (t->flags & 0x4) && format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        usage |= VK_IMAGE_USAGE_STORAGE_BIT, flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = flags, .imageType = type, .format = vf,
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
@@ -333,6 +337,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         depthfmt = false;
     }
     b->format = vf;
+    b->storage = (ci.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
     b->aspect = depthfmt ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
     b->base_type = type == VK_IMAGE_TYPE_1D ? (layers > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D)
@@ -1009,6 +1014,14 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (nlog++ < 30) LOG("[tex] type mismatch: want %d have %d (%ux%ux%u target %u fmt %#x layers %u)\n", want, have, t->width,
                          t->height, t->depth, t->target, t->format, b->layers);
     return vk_dummy_view(want_textype);
+}
+
+VkImageView vk_storage_view(NvnTexture *t, const NvnTextureView *v, bool has_view, int want_textype) {
+    TexBackend *b = vk_tex(t, true);  // (written by the GPU from now on: not re-uploaded from guest memory)
+    if (!b->storage || b->samples > 1 || view_type_for(want_textype) != b->base_type) return VK_NULL_HANDLE;
+    uint32_t lv0 = has_view && (v->setmask & 1) ? v->base_level : 0;
+    if (lv0 >= b->levels) lv0 = b->levels - 1;
+    return vk_image_view(b, b->base_type, b->format, lv0, 1, 0, b->layers, IDENTITY, b->aspect);
 }
 
 // 1x1 black textures for unbound slots, per type

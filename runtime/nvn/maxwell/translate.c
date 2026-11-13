@@ -85,6 +85,7 @@ typedef struct {
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
+    int32_t handle_off[256];  // c[HANDLE_CBUF] byte offset + 1 the register was last loaded from (MOV / LDC), else 0
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -177,6 +178,7 @@ static const char *operand_c_for_ffma(Ctx *c, uint64_t w, char *buf, const char 
 static void set_reg(Ctx *c, int r, const char *expr) {
     if (r == RZ) return;
     c->reg_used[r] = 1;
+    c->handle_off[r] = 0;
     sp(&c->body, "    r%d = %s;\n", r, expr);
 }
 
@@ -836,6 +838,33 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     write_tex_result(c, slot, call, mask, d, RZ, false, false);
 }
 
+// NVN keeps the bound handles in c[2]: textures from 0x20, images from 0x120 (8 bytes each; exec.c reads them back
+// from the bind state, the bank itself is never bound)
+#define HANDLE_CBUF 2
+#define IMAGE_HANDLES 0x120
+
+// SUST.P (untyped surface store, all four components): data Rd..Rd+3, integer coordinates from Ra, the image bound at
+// handle offset bits 36-48 (bit 51) or bindless through register bits 39-46 (yuzu surface_load_store.cpp layout),
+// which must hold a handle MOV / LDC loaded from c[2] (Ctx.handle_off: a computed handle is not supported)
+static void emit_sust(Ctx *c, uint64_t w, uint32_t pc) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), dim = (int)bits(w, 33, 3), hr = (int)bits(w, 39, 8);
+    int64_t off = bits(w, 51, 1) ? (int64_t)bits(w, 36, 13) * 4 : (int64_t)c->handle_off[hr] - 1;
+    int type = dim == 0 ? TEXTYPE_1D : dim == 3 ? TEXTYPE_2D : dim == 5 ? TEXTYPE_3D : -1;
+    if (!c->glsl) { fail(c, "sust: GLSL only"); return; }
+    if (bits(w, 20, 4) != 0xf) { fail(c, "sust: component mask %#x", (unsigned)bits(w, 20, 4)); return; }
+    if (type < 0) { fail(c, "sust: dimension %d", dim); return; }
+    if (off < IMAGE_HANDLES) { fail(c, "sust: image handle r%d not loaded from c[%d] at %#x", hr, HANDLE_CBUF, pc); return; }
+    int s = tex_slot(c, (uint32_t)off / 4, type, false, false);
+    c->info->tex[s].is_image = true;
+    int n = type == TEXTYPE_3D ? 3 : type == TEXTYPE_2D ? 2 : 1;
+    char co[160] = "", v[640] = "";
+    for (int i = 0; i < n; i++) sprintf(co + strlen(co), "%sint(%s)", i ? ", " : "", R(a == RZ ? RZ : a + i));
+    for (int i = 0; i < 4; i++) sprintf(v + strlen(v), "%s%s", i ? ", " : "", F(R(d == RZ ? RZ : d + i)));
+    // shortcut: the data goes out as float4, right for float / unorm images only; an integer image needs a uimage type
+    if (n == 1) sp(&c->body, "    imageStore(t%d, %s, float4(%s));\n", s, co, v);
+    else sp(&c->body, "    imageStore(t%d, int%d(%s), float4(%s));\n", s, n, co, v);
+}
+
 // ------------------------------------------------------------------ instruction translation
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
@@ -932,6 +961,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             cbuf_ref(c, idx, off + 4 * i, dyn, cb);
             if (dyn) c->info->cbuf_size[idx] = 0x10000;
             set_reg(c, d + i, cb);
+            if (!dyn && idx == HANDLE_CBUF && d != RZ) c->handle_off[d + i] = (int32_t)(off + 4 * i) + 1;
         }
         if (overlap) sp(&c->body, "    }\n");
     } else if (OPM(0xd000000000000000ull, 0xf600000000000000ull)) {  // TEXS
@@ -1097,6 +1127,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x5c98000000000000ull, 0xfff8000000000000ull) || OPM(0x4c98000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3898000000000000ull, 0xfef8000000000000ull)) {  // MOV
         set_reg(c, d, B(false));
+        if (OPM(0x4c98000000000000ull, 0xfff8000000000000ull) && bits(w, 34, 5) == HANDLE_CBUF && d != RZ)
+            c->handle_off[d] = (int32_t)bits(w, 20, 14) * 4 + 1;  // (a bindless handle: emit_sust)
     } else if (OPM(0x0100000000000000ull, 0xfff0000000000000ull)) {  // MOV32I
         sprintf(t, "0x%08xu", (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
@@ -1664,6 +1696,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (!c->glsl) sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         else if (c->stage == STAGE_COMPUTE) sp(&c->body, "    barrier();\n");
         else sp(&c->body, "    /* bar */\n");  // GLSL barrier() is compute / tessellation only
+    } else if (OPM(0xeb20000000000000ull, 0xfff0000000000000ull)) {  // SUST.P
+        emit_sust(c, w, pc);
     } else {
         fail(c, "unknown instruction %016llx at %#x", (unsigned long long)w, pc);
     }
@@ -1928,6 +1962,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
+        if (t->is_image) {  // (stores only: no format qualifier, shaderStorageImageWriteWithoutFormat)
+            sp(&s, "layout(set = %d, binding = %d) uniform writeonly %s t%d;\n", set, 32 + i,
+               t->type == TEXTYPE_3D ? "image3D" : t->type == TEXTYPE_2D ? "image2D" : "image1D", i);
+            continue;
+        }
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {

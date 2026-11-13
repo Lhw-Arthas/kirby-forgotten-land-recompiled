@@ -363,9 +363,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
             if (s->npools == 16) FATAL("descriptor pools exhausted\n");
             VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
-                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024}};
+                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}};
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 5, .pPoolSizes = sizes};
+                                             .poolSizeCount = 6, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -2387,6 +2388,22 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
 }
 
+// The texture pool entry an image slot (SUST) names: image handles follow the texture ones from 0x120 (translate.c
+// IMAGE_HANDLES), each an index into the texture pool (objects.c nvnDeviceGetImageHandle)
+static NvnTexEntry *shader_image_entry(int stage, const ShaderTexture *t) {
+    int k = ((int)t->handle_offset - 0x120) / 8;
+    uint64_t h = k >= 0 && k < 8 ? st.img[stage][k] : 0;
+    uint32_t id = (uint32_t)(h & 0xFFFFF);
+    if (!h || !st.tpool || id >= (uint32_t)st.tpool->count) return NULL;
+    NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[id];
+    return e->tex ? e : NULL;
+}
+
+static VkImageView shader_image_view(int stage, const ShaderTexture *t) {
+    NvnTexEntry *e = shader_image_entry(stage, t);
+    return e ? vk_storage_view(e->tex, &e->view, e->has_view, t->type) : VK_NULL_HANDLE;
+}
+
 static bool is_attachment(NvnTexture *t) {
     if (!t) return false;
     if (t == st.rt.depth) return true;
@@ -3117,6 +3134,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_wh[sg][ti][0] = wh[0]; tex_wh[sg][ti][1] = wh[1];
             }
             w[n].pImageInfo = &ii[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding >= 32 && (int)b->binding - 32 < si->ntex) {
+            ii[n] = (VkDescriptorImageInfo){VK_NULL_HANDLE, shader_image_view(stage, &si->tex[b->binding - 32]), VK_IMAGE_LAYOUT_GENERAL};
+            w[n].pImageInfo = &ii[n];  // (never null: dispatch_compute skips a dispatch whose image is missing)
         } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
@@ -3223,6 +3243,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         LOG("\n");
     }
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    for (int i = 0; i < cp->si->ntex; i++)
+        if (cp->si->tex[i].is_image && !shader_image_view(5, &cp->si->tex[i])) {
+            static int nlog;
+            if (nlog++ < 10) LOG("[compute] cs %llx: image slot %d has no storage image bound: dispatch skipped\n",
+                                 (unsigned long long)st.program->stages[5].code_addr, i);
+            stat_skipped++;
+            return;
+        }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
