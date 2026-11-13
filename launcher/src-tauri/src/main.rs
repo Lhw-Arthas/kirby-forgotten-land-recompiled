@@ -245,18 +245,16 @@ fn set_game_dir(app: St, path: String) -> Result<(), String> {
         return Ok(());
     }
     fs::create_dir_all(&app.work).map_err(|e| e.to_string())?;
+    link_game_dir(&link, &src)
+}
+
+// A junction made through the Windows API, not `cmd /C mklink`: cmd re-parses `&`, `^` and `%` in the path
+fn link_game_dir(link: &Path, src: &Path) -> Result<(), String> {
     if link.exists() {
         // remove_dir only removes a junction or an empty folder: real game files are never deleted here
-        fs::remove_dir(&link).map_err(|_| format!("{} already holds game files. Move that folder away first.", link.display()))?;
+        fs::remove_dir(link).map_err(|_| format!("{} already holds game files. Move that folder away first.", link.display()))?;
     }
-    let mut c = Command::new("cmd");
-    c.args(["/C", "mklink", "/J"]).arg(&link).arg(&src);
-    hide_window(&mut c);
-    let out = c.output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(())
+    junction::create(src, link).map_err(|e| e.to_string())
 }
 
 fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Result<(), String> {
@@ -411,5 +409,27 @@ mod tests {
         assert_eq!(app(r"E:\a\repo", r"E:\a\kfl-e2e").work_from_repo(), PathBuf::from(r"..\kfl-e2e"));
         assert_eq!(app(r"E:\a\repo", r"E:\b\w").work_from_repo(), PathBuf::from(r"..\..\b\w"));
         assert_eq!(app(r"E:\a\repo", r"D:\w").work_from_repo(), PathBuf::from(r"D:\w"));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("kfl-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn junction_survives_shell_metacharacters() {
+        let root = scratch("meta");
+        let src = root.join("D&Kirby^Co %PATH% (a b) 100%");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("probe.txt"), "ok").unwrap();
+        let link = root.join("extracted");
+        link_game_dir(&link, &src).unwrap();
+        assert_eq!(fs::read_to_string(link.join("probe.txt")).unwrap(), "ok");
+        assert_eq!(fs::canonicalize(&link).unwrap(), fs::canonicalize(&src).unwrap());
+        assert!(!root.join("Co").exists() && !root.join("PATH").exists());
+        fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 }
