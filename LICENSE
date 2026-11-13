@@ -1,6 +1,7 @@
 MIT License
 
-Copyright (c) 2026 raulzito12345rrs
+Copyright (c) 2026 scarxity (Kirby and the Forgotten Land Recompiled)
+Portions copyright (c) 2026 raulzito12345rrs (letsgo-recomp)
 Portions copyright (c) 2026 Peiikai (LAS Recomp, see LICENSE-LASRecomp)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -22,5 +23,5 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 This license covers the source code in this repository only. It grants nothing
-for Pokémon: Let's Go, Eevee!, which belongs to Nintendo / The Pokémon Company /
-Game Freak and must be supplied by each user from their own copy.
+for Kirby and the Forgotten Land, which belongs to Nintendo / HAL Laboratory
+and must be supplied by each user from their own copy.

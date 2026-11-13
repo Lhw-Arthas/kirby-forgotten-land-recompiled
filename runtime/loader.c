@@ -174,10 +174,10 @@ static void relocate(Module *m) {
 
 void loader_load(const char *exefs) {
     char path[1024];
-    // Let's Go: the game, the SDK, glslc (runtime GLSL compiler) and multimedia (movie::). Same order and bases as
+    // Kirby and the Forgotten Land: the game, the SDK and subsdk0 (multimedia). Same order and bases as
     // the generated code (Makefile `gen`, tools/gamelib_entry.c).
     static const struct { const char *name; uint64_t base; } mods[] = {
-        {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}, {"subsdk1", SUBSDK1_BASE}};
+        {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}};
     for (unsigned i = 0; i < sizeof mods / sizeof mods[0]; i++) {
         Module *m = &g_modules[g_nmodules++];
         m->name = mods[i].name;

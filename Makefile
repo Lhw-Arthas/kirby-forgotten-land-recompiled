@@ -17,7 +17,11 @@ endif
 # Linux: ARCH (x86_64 / aarch64, default this machine's) picks the target, separately from PLATFORM. The generated code
 # differs per arch (AArch64 hosts run the guest's FP/SIMD as inline asm, others use the portable C of simd.h), so a
 # cross build has its own generated-<arch>/ and build/<arch>/; SYSROOT is the target's root filesystem (headers, libs).
-GEN      ?= generated
+# Nothing derived from the game lives in this repository: the extracted game files, the generated C and the build
+# output all go to WORK, a folder outside it ($(WORK)/extracted holds your own exefs/ and romfs/).
+WORK     ?= ../work/kfl
+GAME     ?= $(WORK)/extracted
+GEN      ?= $(WORK)/generated
 ifeq ($(PLATFORM),linux)
 HOSTARCH := $(patsubst arm64,aarch64,$(shell uname -m))
 ARCH     ?= $(HOSTARCH)
@@ -30,7 +34,7 @@ GENSIMD  := --simd $(if $(filter aarch64,$(ARCH)),asm,c)
 endif
 
 # B: build dir. DEPS: a prefix with SDL3 / FFmpeg to use instead of the system's (MSYS2's).
-B         ?= build
+B         ?= $(WORK)/build
 DEPS      ?=
 # EXE_NAME: the exe's name (the release's: LetsGoRecomp); the game code library imports from the exe by it
 EXE_NAME  ?= lasrecomp
@@ -41,7 +45,7 @@ GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibi
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
-GEN_SRC  := $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c) $(wildcard $(GEN)/subsdk0/*.c) $(wildcard $(GEN)/subsdk1/*.c)
+GEN_SRC  := $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c) $(wildcard $(GEN)/subsdk0/*.c)
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/tools/gamelib_entry.o
 RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
             $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
@@ -180,10 +184,9 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/python) $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7006000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk1 ../extracted/exefs/subsdk1 0x7008000000 ../$(GEN)/subsdk1 $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py sdk ../$(GAME)/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py main ../$(GAME)/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py subsdk0 ../$(GAME)/exefs/subsdk0 0x7006000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
 
 gen-objs: $(GEN_OBJ)
 

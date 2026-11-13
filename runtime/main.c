@@ -35,6 +35,7 @@ static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that li
     for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
 }
 static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_exception_ready(Cpu *c) { (void)c; }
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
@@ -154,12 +155,13 @@ static void boot(const char *root) {
     }
     LOG("main thread: prio %d, stack 0x%x, program id %016llx\n", prio, stack_size, (unsigned long long)g_program_id);
 
-    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
+    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");
     if (!start) FATAL("nn::init::Start not found\n");
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
     uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
+    // SDK 11's nn::init::Start(thread_handle, args_region, exception_handler_ready, init_sdk, init_main): as rtld calls it
+    kernel_run_main(t, t->handle, 0, hle_register("<rtld_exception_ready>", rtld_exception_ready), init_fn, fini_fn);
 }
 
 int main(int argc, char **argv) {

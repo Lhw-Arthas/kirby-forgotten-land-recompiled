@@ -26,6 +26,7 @@
 // instruction patches are addresses in the main: only the builds with address tables get them (game_build).
 #define TITLE_EEVEE 0x0100187003A36000ull
 #define TITLE_PIKACHU 0x010003F003A34000ull
+#define TITLE_KFL 0x01004D300C5AE000ull  // Kirby and the Forgotten Land: the game this port accepts
 static const uint8_t EEVEE_100[8] = {0x0a, 0x3f, 0x0d, 0x21, 0xe6, 0x7d, 0xad, 0x80};    // Let's Go, Eevee! v1.0.0 main
 static const uint8_t PIKACHU_100[8] = {0x1c, 0x37, 0x56, 0x92, 0xde, 0x4f, 0x4b, 0x87};  // Let's Go, Pikachu! v1.0.0
 static const uint8_t EEVEE_102[8] = {0x58, 0x31, 0xec, 0x64, 0xd6, 0xb6, 0x96, 0xfd};    // Let's Go, Eevee! v1.0.2 main
@@ -70,7 +71,7 @@ static uint64_t program_id(const char *exefs) {
 
 static bool game_ok(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE || id == TITLE_PIKACHU;
+    return id == TITLE_KFL;
 }
 
 int game_build(const char *exefs) {
@@ -112,7 +113,7 @@ const char *game_version(const char *exefs) {
 
 const char *game_name(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : NULL;
+    return id == TITLE_KFL ? "Forgotten Land" : NULL;
 }
 
 // (a romfs.bin that isn't a readable RomFS - cut short, or another dump tool's format - stopped the game at its first
@@ -226,7 +227,7 @@ static void *setup_thread(void *arg) {
     g_phase0 = 0, g_phase1 = 0.01f;
     bool ok = true;
     if (!strcmp(f.exefs, f.romfs)) {  // (a flat dump, main next to bin/: only the six code files, not the whole RomFS)
-        static const char *const code[] = {"main", "main.npdm", "rtld", "sdk", "subsdk0", "subsdk1"};
+        static const char *const code[] = {"main", "main.npdm", "rtld", "sdk", "subsdk0"};
         mkdir(ROOT "/exefs", 0755);
         for (size_t i = 0; ok && i < sizeof code / sizeof *code; i++) {
             char src[1100], dst[1100];
