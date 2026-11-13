@@ -250,7 +250,8 @@ fn set_game_dir(app: St, path: String) -> Result<(), String> {
 
 // A junction made through the Windows API, not `cmd /C mklink`: cmd re-parses `&`, `^` and `%` in the path
 fn link_game_dir(link: &Path, src: &Path) -> Result<(), String> {
-    if link.exists() {
+    // symlink_metadata sees a dead junction (the player moved their dump), which exists() follows and misses
+    if fs::symlink_metadata(link).is_ok() {
         // remove_dir only removes a junction or an empty folder: real game files are never deleted here
         fs::remove_dir(link).map_err(|_| format!("{} already holds game files. Move that folder away first.", link.display()))?;
     }
@@ -430,6 +431,25 @@ mod tests {
         assert_eq!(fs::canonicalize(&link).unwrap(), fs::canonicalize(&src).unwrap());
         assert!(!root.join("Co").exists() && !root.join("PATH").exists());
         fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dead_junction_is_replaced_and_real_folder_is_kept() {
+        let root = scratch("dead");
+        let (old, new, link) = (root.join("old"), root.join("new"), root.join("extracted"));
+        fs::create_dir(&old).unwrap();
+        fs::create_dir(&new).unwrap();
+        link_game_dir(&link, &old).unwrap();
+        fs::remove_dir(&old).unwrap();
+        assert!(!link.exists() && fs::symlink_metadata(&link).is_ok());
+        link_game_dir(&link, &new).unwrap();
+        assert_eq!(fs::canonicalize(&link).unwrap(), fs::canonicalize(&new).unwrap());
+        fs::remove_dir(&link).unwrap();
+        fs::create_dir(&link).unwrap();
+        fs::write(link.join("keep.bin"), "x").unwrap();
+        assert!(link_game_dir(&link, &new).is_err());
+        assert!(link.join("keep.bin").is_file());
         fs::remove_dir_all(&root).unwrap();
     }
 }
