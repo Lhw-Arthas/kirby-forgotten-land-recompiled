@@ -35,6 +35,21 @@ SERVICE("pctl:s", pctl_s) { pctl_root(s, req, resp); }
 SERVICE("pctl:a", pctl_a) { pctl_root(s, req, resp); }
 SERVICE("pctl:r", pctl_r) { pctl_root(s, req, resp); }
 
+// ------------------------------------------------------------------ nfp:user (amiibo: no reader attached)
+static void nfp_user(Service *s, IpcReq *req, IpcResp *resp) {
+    switch (req->cmd) {
+    case 0: case 1: break;  // Initialize / Finalize
+    case 2: OUT(int32_t, 0) = 0; resp_size(resp, 4); break;  // ListDevices: none
+    case 19: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetState: initialized
+    case 23: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;  // AttachAvailabilityChangeEvent
+    default: ok_logger(s, req, resp);
+    }
+}
+SERVICE("nfp:user", nfp_user_root) {
+    if (req->cmd == 0) ipc_return_object(resp, service_new("IUser", nfp_user, NULL));  // CreateUserInterface
+    else ok_logger(s, req, resp);
+}
+
 // ------------------------------------------------------------------ aoc:u (no DLC)
 SERVICE("aoc:u", aoc_u) {
     (void)s;
