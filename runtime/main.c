@@ -22,8 +22,8 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     }
 }
 
-// nn::init::Start calls x2 right after nnosInitialize and x3 after nninitStartup, just before
-// nnMain: SDK constructors run early, the game's run once nninitStartup has set up its heap.
+// nn::init::Start calls x2 right after nnosInitialize, x3 after nninitStartup just before nnMain (every
+// module's constructors, once nninitStartup has set up the heap) and x4 only after nnMain returns.
 // rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
 // __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
 static void module_init(Cpu *c, Module *m) {
@@ -32,10 +32,11 @@ static void module_init(Cpu *c, Module *m) {
     else run_array(c, m->init_array, m->init_array_sz);
 }
 
-static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that link against it
+static void rtld_init_all(Cpu *c) {  // the SDK, the subsdk modules that link against it, then main
     for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+    module_init(c, &g_modules[0]);
 }
-static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_fini_all(Cpu *c) { (void)c; }
 static void rtld_exception_ready(Cpu *c) { (void)c; }
 
 // Claim the guest address range before anything else can map there. The host allocator places
@@ -158,10 +159,10 @@ static void boot(const char *root) {
 
     uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");
     if (!start) FATAL("nn::init::Start not found\n");
-    uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
-    uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
+    uint64_t init_fn = hle_register("<rtld_init_all>", rtld_init_all);
+    uint64_t fini_fn = hle_register("<rtld_fini_all>", rtld_fini_all);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    // SDK 11's nn::init::Start(thread_handle, args_region, exception_handler_ready, init_sdk, init_main): as rtld calls it
+    // SDK 11's nn::init::Start(thread_handle, args_region, exception_handler_ready, init_all, fini_all): as rtld calls it
     kernel_run_main(t, t->handle, 0, hle_register("<rtld_exception_ready>", rtld_exception_ready), init_fn, fini_fn);
 }
 
