@@ -462,11 +462,17 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    fn sleeper() -> Command {
+        let mut c = Command::new("ping");
+        c.args(["-n", "30", "127.0.0.1"]);
+        c
+    }
+
     #[test]
     fn cancel_before_spawn_starts_nothing() {
         let root = scratch("precancel");
         let app = app("", "");
-        app.job.lock().unwrap().cancelled = true;
+        cancel(&app);
         let mut log = fs::File::create(root.join("log")).unwrap();
         let mut c = Command::new("cmd");
         c.args(["/C", "set /a 40+2"]);
@@ -475,12 +481,6 @@ mod tests {
         // a spawned step would have printed 42 into the log
         assert!(!fs::read_to_string(root.join("log")).unwrap().contains("42"));
         fs::remove_dir_all(&root).unwrap();
-    }
-
-    fn sleeper() -> Command {
-        let mut c = Command::new("ping");
-        c.args(["-n", "30", "127.0.0.1"]);
-        c
     }
 
     #[test]
