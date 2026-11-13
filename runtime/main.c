@@ -6,6 +6,7 @@
 
 #include "gamelib.h"
 #include "gamesetup.h"
+#include "romfs_build.h"
 #include "paths.h"
 #include "settings.h"
 #include "hle.h"
@@ -174,12 +175,22 @@ int main(int argc, char **argv) {
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
     static char arg_root[1024];
+    bool build_romfs = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        else if (!strcmp(argv[i], "--build-romfs")) build_romfs = true;
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    if (build_romfs) {  // --build-romfs: <root>/romfs.bin, the image the game reads, from <root>/romfs/ (the launcher's setup)
+        char dir[1100], img[1100], why[256] = "";
+        snprintf(dir, sizeof dir, "%s/romfs", root);
+        snprintf(img, sizeof img, "%s/romfs.bin", root);
+        if (romfs_image_ok(img, why, sizeof why)) return 0;
+        if (!romfs_build(dir, img, NULL, why, sizeof why)) { fprintf(stderr, "romfs image: %s\n", why); return 1; }
+        return 0;
+    }
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void launcher_lg_run(const char *root);

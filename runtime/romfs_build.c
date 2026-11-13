@@ -20,8 +20,8 @@
 #include <windows.h>
 #endif
 
-#define ROMFS_GAME_FILES 27818  // (Eevee 1.0.0 and 1.0.2, Pikachu 1.0.0: counted)
-#define ROMFS_MIN_FILES 27000
+#define ROMFS_GAME_FILES 9373  // (Kirby and the Forgotten Land 1.0.0: counted in an extracted romfs)
+#define ROMFS_MIN_FILES 9373
 #define EMPTY 0xFFFFFFFFu
 #define DATA_START 0x200u
 

@@ -81,6 +81,13 @@ static void hhist_push(const char *name, Cpu *c) {
     hhist[i].x0 = c->x[0];
     hhist[i].x1 = c->x[1];
     hhist[i].x30 = c->x[30];
+    // LARECOMP_HLE_TRACE=<part of a name>: every call of the matching host functions, as it happens (bring-up)
+    static const char *trace;
+    static bool trace_read;
+    if (!trace_read) trace = getenv("LARECOMP_HLE_TRACE"), trace_read = true;
+    if (trace && name && strstr(name, trace))
+        LOG("[hle] %s x0=%llx x1=%llx x2=%llx x3=%llx lr=%llx\n", name, (unsigned long long)c->x[0], (unsigned long long)c->x[1],
+            (unsigned long long)c->x[2], (unsigned long long)c->x[3], (unsigned long long)c->x[30]);
 }
 static void hhist_dump(void) {
     int n = hhist_n < HHIST ? hhist_n : HHIST, start = hhist_n - n;
