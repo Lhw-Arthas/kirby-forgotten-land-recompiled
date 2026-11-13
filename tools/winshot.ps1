@@ -1,6 +1,6 @@
 param([int]$ProcId, [string]$Out)
 # (winshot.ps1 <pid> <out.png>: the client area of that process's window, from the desktop - what reached the screen, which
-# the game's own captures cannot show with AMD's swapchain: tools/fg_walk.sh)
+# the game's own captures cannot show with AMD's swapchain)
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;

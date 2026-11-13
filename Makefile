@@ -3,7 +3,6 @@
 # (docs/COMPILAR-WINDOWS.md). The Linux branch is LAS Recomp's, kept but untested here.
 #   make gen           translate your own game files (extracted/exefs) into generated/
 #   make -j20          build/lasrecomp.exe (runtime) and build/lasgame.dll (the game code)
-#   make jogo          a copy to play while build/ is rebuilt (build/jogo/)
 #   make dist          the release zip (build/dist/LetsGoRecomp-<version>-windows.zip): needs make deps-windows,
 #                      make gen-helper and tools/fetch_zig.sh first
 UNAME := $(shell uname -s)
@@ -245,8 +244,4 @@ gen-helper:
 	$(PY) tools/pe_no_cfg.py build/helper/lasgen/lasgen.exe
 	@du -sh build/helper/lasgen
 
-# A copy to play while build/ is rebuilt (the exe in use is locked on Windows): build/jogo/ (tools/publicar_jogo.sh)
-jogo:
-	tools/publicar_jogo.sh
-
-.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper jogo
+.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper
