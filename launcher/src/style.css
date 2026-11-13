@@ -22,7 +22,6 @@ body {
 }
 code { font: 13px Consolas, monospace; user-select: text; word-break: break-all; color: var(--ink); }
 
-/* The art never changes: sharp on Home, blurred behind every other page. */
 #bg, #bg .art, #bg .scrim { position: fixed; inset: 0; }
 #bg .art { background: url('./art.svg') center / cover no-repeat; transition: filter 0.35s, transform 0.35s; }
 #bg .scrim { background: linear-gradient(90deg, rgba(20, 12, 36, 0.78) 0, rgba(20, 12, 36, 0.25) 46%, transparent 72%); transition: background 0.35s; }
