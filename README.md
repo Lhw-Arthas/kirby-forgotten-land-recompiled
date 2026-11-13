@@ -12,7 +12,8 @@ an emulator.
 ## Status
 
 See [docs/STATUS.md](docs/STATUS.md) for how far the game gets and what is known to be missing. In short: the
-pipeline translates and compiles the whole game, and the game is **not playable yet**.
+game boots, plays its opening and reaches the first stage with correct graphics, but it is **not tested beyond
+that and not playable yet**.
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`).
 

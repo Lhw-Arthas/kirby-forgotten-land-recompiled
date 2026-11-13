@@ -13,28 +13,31 @@ Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` bui
 | Boot | Works: SDK and game start-up, services, RomFS, threads, Vulkan device and window |
 | First screens | Works: the online prompt and the difficulty pick render and take input |
 | Opening movie | Plays |
-| First stage | Reached with scripted input. Kirby moves. The scene is drawn in the internal passes |
-| Image on screen in 3D scenes | **Broken: the presented frame is white** |
+| Opening cutscene | Renders correctly |
+| First stage | Reached with scripted input. Kirby walks, the scene is lit and on screen |
+| Launcher | Works end to end: pick the game folder, build, cancel, play |
 
-Reproduce the furthest point with `bash tools/run_scripted.sh <name> 170 "5000" LARECOMP_DEBUG_FRAME=5000`.
-`tools/boot_check.sh` runs a timed boot without input.
+Reproduce the furthest point with `bash tools/run_scripted.sh <name> 170 "3400,5000"` and look at
+`<work>/runs/<name>/fin_5000.png`. `tools/boot_check.sh` runs a timed boot without input.
 
 ## Known problems
 
-- 3D scenes are presented white. The g-buffer is correct, so the fault is in lighting, tone mapping or the final
-  composite.
-- Two compute shaders fail to translate (the Maxwell `SUST` surface store). Storage images are not implemented.
-- About one boot in four exits by itself with code 0. Cause unknown.
-- A UI shader samples two 3D lookup textures as 2D (`[tex] type mismatch`).
-- 3D scenes run at 17 to 30 fps, with long stalls the first time a pipeline is compiled.
-- Audio has not been tested.
-- Nothing past the start of the first stage has been tried.
+- Nothing past the first seconds of the first stage has been tried. Expect more missing shader instructions,
+  services and rendering faults.
+- 3D scenes run at about 30 fps, with long stalls the first time a pipeline is compiled.
+- Audio has only been checked for not crashing. Nobody has listened to it.
+- Input has only been tested through the scripted path, not with a real controller or keyboard.
+- One boot in four exited by itself with code 0 in an earlier session. It did not happen again in 44 later runs.
+- The launcher's build can fail to link when the work folder is on another drive or behind a long path.
+- Closing the launcher during a build may leave the compile running.
 
 ## Stubs and shortcuts
 
 - `nfp:user` (amiibo) reports no reader.
 - `prepo:u`, `bcat:u` and `ectx:aw` log their calls and return success.
 - Compute shaders get a fixed 32 KB of shared memory.
+- Compute shader image stores (`SUST`) write float data only, and the image handle layout is inferred from the
+  game's shaders.
 - The shader translator rejects `EXIT` flow tests and `LEA` forms the game has not used so far.
 
 ## Inherited from letsgo-recomp, still to sort out
