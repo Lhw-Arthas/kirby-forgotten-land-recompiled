@@ -419,11 +419,16 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     tegra_layout_init(t);
     // Packaged textures (BNTX) were swizzled offline with their own block size, which can differ from the driver
     // default: NVNpackagedTextureLayout's low byte is log2(GOBs per block), height in bits 0-3, depth in bits 4-7
-    // (Kirby's 16x16x16 grading LUTs: 0x40, one GOB high and 16 deep).
+    // (Kirby's 16x16x16 grading LUTs: 0x40, one GOB high and 16 deep). The nibble split is inferred from those LUTs
+    // alone (seen: 0..4 and 0x40), so it is applied to 3D textures only.
     uint64_t pl = G(uint64_t, b, 0x50);
-    if (pl && (uint32_t)pl <= 0x55 && (pl & 0xF) <= 5) {
+    if (pl && t->depth > 1 && (uint32_t)pl <= 0x55 && (pl & 0xF) <= 5) {
         t->block_height_log2 = (uint32_t)pl & 0xF;
-        if (t->depth > 1) t->block_depth_log2 = ((uint32_t)pl >> 4) & 0xF;
+        t->block_depth_log2 = ((uint32_t)pl >> 4) & 0xF;
+    } else if (pl && (uint32_t)pl <= 5) t->block_height_log2 = (uint32_t)pl;
+    if (pl && (uint32_t)pl > 4 && (uint32_t)pl != 0x40) {
+        static int once;
+        if (!once++) LOG("[nvn] packaged layout %016llx (target %u, %ux%ux%u) not seen before: check its block size\n", pl, target, t->width, t->height, t->depth);
     }
     if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
