@@ -112,6 +112,7 @@ static uint32_t norm_target(int64_t t) {
 // ------------------------------------------------------------------ operands
 static const char *reg(Ctx *c, int r, char *buf) {
     if (r == RZ) return "0u";
+    if (r > RZ) { fail(c, "register r%d out of range", r); return "0u"; }  // a vector operand running past r254
     c->reg_used[r] = 1;
     sprintf(buf, "r%d", r);
     return buf;
@@ -175,10 +176,16 @@ static const char *operand_c_for_ffma(Ctx *c, uint64_t w, char *buf, const char 
     return reg(c, (int)bits(w, 39, 8), buf);
 }
 
-static void set_reg(Ctx *c, int r, const char *expr) {
-    if (r == RZ) return;
+// Every register write goes through here: it also forgets the image handle the register held (emit_sust).
+static void def_reg(Ctx *c, int r) {
+    if (r > RZ) { fail(c, "register r%d out of range", r); return; }
     c->reg_used[r] = 1;
     c->handle_off[r] = 0;
+}
+
+static void set_reg(Ctx *c, int r, const char *expr) {
+    if (r == RZ) return;
+    def_reg(c, r);
     sp(&c->body, "    r%d = %s;\n", r, expr);
 }
 
@@ -445,7 +452,7 @@ static bool emit_half(Ctx *c, uint64_t w) {
         } else {
             bool bf = bits(w, 49, 1);
             if (d != RZ) {
-                c->reg_used[d] = 1;
+                def_reg(c, d);
                 sp(&c->body, "      l = l %s pp; h = h %s pp;\n", bool_op(bop), bool_op(bop));
                 sp(&c->body, bf ? "      r%d = (l ? 0x3c00u : 0u) | (h ? 0x3c000000u : 0u);\n"
                                 : "      r%d = (l ? 0xFFFFu : 0u) | (h ? 0xFFFF0000u : 0u);\n", d);
@@ -510,8 +517,8 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
         char v[4][16];
         for (int i = 0; i < 4; i++) { if (i < n) sprintf(v[i], "t[%d]", comps[i]); else strcpy(v[i], "0.0f"); }
         const char *pk = c->glsl ? "      r%d = packHalf2x16(vec2(%s, %s));\n" : "      r%d = as_type<uint>(half2(half(%s), half(%s)));\n";
-        if (d0 != RZ) { c->reg_used[d0] = 1; sp(&c->body, pk, d0, v[0], v[1]); }
-        if (d1 != RZ) { c->reg_used[d1] = 1; sp(&c->body, pk, d1, v[2], v[3]); }
+        if (d0 != RZ) { def_reg(c, d0); sp(&c->body, pk, d0, v[0], v[1]); }
+        if (d1 != RZ) { def_reg(c, d1); sp(&c->body, pk, d1, v[2], v[3]); }
         sp(&c->body, "    }\n");
         return;
     }
@@ -526,7 +533,7 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
     for (int comp = 0; comp < 4; comp++) {
         if (!(mask & (1u << comp))) continue;
         int r = regs[n++];
-        if (r != RZ) { c->reg_used[r] = 1; sp(&c->body, "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
+        if (r != RZ) { def_reg(c, r); sp(&c->body, "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
     }
     sp(&c->body, "    }\n");
 }
@@ -989,7 +996,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             }
             int n = 0;
             for (int i = 0; i < 4; i++)
-                if (mask & (1u << i)) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }
+                if (mask & (1u << i)) { def_reg(c, d + n); sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }
             sp(&c->body, "    }\n");
         } else if (qt == 1) {  // dimension
             if (c->stage != STAGE_VERTEX) {  // report the guest size of scaled allocations
@@ -1003,7 +1010,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             }
             int n = 0;
             for (int i = 0; i < 4; i++)
-                if (mask & (1u << i)) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }
+                if (mask & (1u << i)) { def_reg(c, d + n); sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }
             sp(&c->body, "    }\n");
         } else {
             fail(c, "txq type %d", qt);
@@ -1039,7 +1046,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                slot, slot, mv, co, slot, slot, mv, co);
         int n = 0;
         for (int i = 0; i < 2; i++)
-            if (mask & (1u << i)) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = uint(int(lq[%d] * 256.0f));\n", d + n, i); n++; }
+            if (mask & (1u << i)) { def_reg(c, d + n); sp(&c->body, "      r%d = uint(int(lq[%d] * 256.0f));\n", d + n, i); n++; }
         sp(&c->body, "    }\n");
     } else if (OPM(0x5080000000000000ull, 0xfff8000000000000ull)) {  // MUFU
         int fn = (int)bits(w, 20, 4);
@@ -1201,7 +1208,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (bits(w, 47, 1)) {
             sp(&c->body, "    { uint s = %s%s; uint t2 = %s%s; uint res = s + t2%s; cc = (res < s) ? 1u : 0u;\n", bits(w, 49, 1) ? "-" : "",
                R(a), bits(w, 48, 1) ? "-" : "", B(false), bits(w, 43, 1) ? " + cc" : "");
-            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = res;\n", d); }
+            if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = res;\n", d); }
             sp(&c->body, "    }\n");
         } else {
             set_reg(c, d, t);
@@ -1211,7 +1218,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (wcc || x) c->uses_cc = true;
         sp(&c->body, "    { ulong sum = ulong(%s%s) + ulong(0x%08xu)%s;%s\n", bits(w, 56, 1) ? "-" : "", R(a), (uint32_t)bits(w, 20, 32),
            x ? " + ulong(cc)" : "", wcc ? " cc = uint(sum >> 32) & 1u;" : "");
-        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
+        if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = uint(sum);\n", d); }
         sp(&c->body, "    }\n");
     } else if (OPM(0x5cc0000000000000ull, 0xfff0000000000000ull) || OPM(0x4cc0000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x38c0000000000000ull, 0xfef0000000000000ull)) {  // IADD3
@@ -1221,7 +1228,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             sp(&c->body, "    { ulong sum = ulong(%s%s) + ulong(%s%s) + ulong(%s%s)%s;\n", bits(w, 51, 1) ? "-" : "", R(a),
                bits(w, 50, 1) ? "-" : "", B(false), bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)), x3 ? " + ulong(cc)" : "");
             if (wcc3) sp(&c->body, "      cc = uint(sum >> 32) & 1u;\n");
-            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
+            if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = uint(sum);\n", d); }
             sp(&c->body, "    }\n");
         } else {
             sprintf(t, "(%s%s + %s%s + %s%s)", bits(w, 51, 1) ? "-" : "", R(a), bits(w, 50, 1) ? "-" : "", B(false),
@@ -1236,7 +1243,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             c->uses_cc = true;
             sp(&c->body, "    { uint s = %s%s << %du; uint t2 = %s%s; uint res = s + t2; cc = (res < s) ? 1u : 0u;\n",
                bits(w, 49, 1) ? "-" : "", R(a), (int)bits(w, 39, 5), bits(w, 48, 1) ? "-" : "", B(false));
-            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = res;\n", d); }
+            if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = res;\n", d); }
             sp(&c->body, "    }\n");
         } else {
             set_reg(c, d, t);
@@ -1244,7 +1251,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x1400000000000000ull, 0xfc00000000000000ull)) {  // ISCADD32I
         sprintf(t, "((%s << %du) + 0x%08xu)", R(a), (int)bits(w, 53, 5), (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
-    } else if (OPM(0x5bd0000000000000ull, 0xfff8000000000000ull) || OPM(0x4bd0000000000000ull, 0xfff0000000000000ull) ||
+    } else if (OPM(0x5bd0000000000000ull, 0xfff8000000000000ull) || OPM(0x4bd0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x36d0000000000000ull, 0xfef8000000000000ull)) {  // LEA (lo): d = b + (+/-a << scale)
         if (bits(w, 46, 2) || bits(w, 48, 3) != PT) fail(c, "LEA.X/.CC/predicate %016llx at %#x", (unsigned long long)w, pc);
         sprintf(t, "(%s + (%s%s << %du))", B(false), bits(w, 45, 1) ? "-" : "", R(a), (int)bits(w, 39, 5));
@@ -1300,7 +1307,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             c->pred_used[pd] = 1;
             int pop = (int)bits(w, 44, 2);
             sp(&c->body, "    { uint res = %s;\n", t);
-            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = res;\n", d); }
+            if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = res;\n", d); }
             sp(&c->body, "      p%d = %s; }\n", pd, pop == 2 ? "(res == 0u)" : pop == 3 ? "(res != 0u)" : pop == 1 ? "true" : "false");
         } else {
             set_reg(c, d, t);
@@ -1393,7 +1400,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else sp(&c->body, "      uint res = prod + cc_;\n");
         if (wcc) sp(&c->body, "      cc = (res < prod) ? 1u : 0u;\n");
         if (mrg) sp(&c->body, "      res = (res & 0xFFFFu) | (xbu << 16);\n");
-        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = res;\n", d); }
+        if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = res;\n", d); }
         sp(&c->body, "    }\n");
     } else if (OPM(0x5090000000000000ull, 0xfff8000000000000ull)) {  // PSETP
         const char *pa = P((int)bits(w, 12, 3), bits(w, 15, 1)), *pb = P((int)bits(w, 29, 3), bits(w, 32, 1));
@@ -1497,7 +1504,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else if (right) sprintf(t, "uint(v >> s)");
         else if (width == 64) sprintf(t, "s >= 64u ? 0u : uint((v << s) >> 32)");
         else sprintf(t, "uint((v << s) >> 32)");
-        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = %s;\n", d, t); }
+        if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = %s;\n", d, t); }
         sp(&c->body, "    }\n");
     } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
@@ -1522,11 +1529,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 "uint(sx16(gmem_.w[uint(ga >> 2)] >> (uint(ga & 2ul) * 8u)))"};
             if (!store) {
                 if (size < 4) {
-                    if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      if (ok) r%d = %s; else r%d = 0u;\n", d, gl_small[size], d); }
+                    if (d != RZ) { def_reg(c, d); sp(&c->body, "      if (ok) r%d = %s; else r%d = 0u;\n", d, gl_small[size], d); }
                 } else {
                     for (int k = 0; k < nw; k++)
                         if (d != RZ && d + k < RZ) {
-                            c->reg_used[d + k] = 1;
+                            def_reg(c, d + k);
                             sp(&c->body, "      if (ok) r%d = gmem_.w[uint(ga >> 2) + %du]; else r%d = 0u;\n", d + k, k, d + k);
                         }
                 }
@@ -1543,10 +1550,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             }
         } else if (!store) {
             if (size < 4) {
-                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = ok ? %s : 0u;\n", d, ld_small[size]); }
+                if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = ok ? %s : 0u;\n", d, ld_small[size]); }
             } else {
                 for (int k = 0; k < nw; k++)
-                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = ok ? *(device uint *)(gmem + ga + %du) : 0u;\n", d + k, k * 4); }
+                    if (d != RZ && d + k < RZ) { def_reg(c, d + k); sp(&c->body, "      r%d = ok ? *(device uint *)(gmem + ga + %du) : 0u;\n", d + k, k * 4); }
             }
         } else {
             if (size == 0 || size == 1) sp(&c->body, "      if (ok) gmem[ga] = uchar(%s);\n", R(d));
@@ -1600,10 +1607,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             if (size < 4) {
                 static const char *const ext[] = {"(v >> sh) & 0xFFu", "uint(int(char((v >> sh) & 0xFFu)))", "(v >> sh) & 0xFFFFu",
                                                   "uint(int(short((v >> sh) & 0xFFFFu)))"};
-                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = %s[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", mem, wmask, d, ext[size]); }
+                if (d != RZ) { def_reg(c, d); sp(&c->body, "      uint v = %s[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", mem, wmask, d, ext[size]); }
             } else {
                 for (int k = 0; k < nw; k++)
-                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = %s[((la >> 2) + %du) & %du];\n", d + k, mem, k, wmask); }
+                    if (d != RZ && d + k < RZ) { def_reg(c, d + k); sp(&c->body, "      r%d = %s[((la >> 2) + %du) & %du];\n", d + k, mem, k, wmask); }
             }
         } else {
             if (size < 4) {
@@ -1655,14 +1662,14 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             c->uses_cc = true;
             sp(&c->body, "    { uint pr = (ccz ? 1u : 0u) | (ccs ? 2u : 0u) | ((cc & 1u) << 2);\n");
             sp(&c->body, "      uint m = (%s & 0xFu) << %du;\n", mask, shift);
-            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
+            if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
             sp(&c->body, "    }\n");
             goto p2r_done;
         }
         sp(&c->body, "    { uint pr = 0u;\n");
         for (int i = 0; i < 7; i++) { c->pred_used[i] = 1; sp(&c->body, "      pr |= (p%d ? 1u : 0u) << %du;\n", i, i); }
         sp(&c->body, "      uint m = (%s & 0x7Fu) << %du;\n", mask, shift);
-        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
+        if (d != RZ) { def_reg(c, d); sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
         sp(&c->body, "    }\n");
     p2r_done:;
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)

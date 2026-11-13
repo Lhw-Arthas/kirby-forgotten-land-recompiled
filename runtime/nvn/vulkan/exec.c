@@ -3136,7 +3136,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             w[n].pImageInfo = &ii[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding >= 32 && (int)b->binding - 32 < si->ntex) {
             ii[n] = (VkDescriptorImageInfo){VK_NULL_HANDLE, shader_image_view(stage, &si->tex[b->binding - 32]), VK_IMAGE_LAYOUT_GENERAL};
-            w[n].pImageInfo = &ii[n];  // (never null: dispatch_compute skips a dispatch whose image is missing)
+            w[n].pImageInfo = &ii[n];  // (never null: dispatch_compute and draw skip work whose image is missing)
         } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
@@ -3689,6 +3689,17 @@ static void draw_(CmdRec *r, bool indexed) {
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (pr) wait_built(&pr->state);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(pr ? 1 + (atomic_load(&pr->state) > 1) : 3); return; }
+    for (int s = 0; s < 2; s++) {  // (as dispatch_compute: never a null storage image in the descriptor set)
+        ShaderInfo *si = s ? pr->fi : pr->vi;
+        for (int i = 0; si && i < si->ntex; i++)
+            if (si->tex[i].is_image && !shader_image_view(s, &si->tex[i])) {
+                static int nlog;
+                if (nlog++ < 10) LOG("[draw] %s %llx: image slot %d has no storage image bound: draw skipped\n", s ? "fs" : "vs",
+                                     (unsigned long long)st.program->stages[s].code_addr, i);
+                stat_skipped++;
+                return;
+            }
+    }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
