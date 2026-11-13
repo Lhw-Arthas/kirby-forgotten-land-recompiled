@@ -417,10 +417,14 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     if (!t->layers) t->layers = 1;
     t->levels = G(uint32_t, b, 0x1C) ? G(uint32_t, b, 0x1C) : 1;
     tegra_layout_init(t);
-    // Packaged textures (BNTX) were swizzled offline with their own block height, which can differ
-    // from the driver default: NVNpackagedTextureLayout's low word is log2(GOBs per block).
+    // Packaged textures (BNTX) were swizzled offline with their own block size, which can differ from the driver
+    // default: NVNpackagedTextureLayout's low byte is log2(GOBs per block), height in bits 0-3, depth in bits 4-7
+    // (Kirby's 16x16x16 grading LUTs: 0x40, one GOB high and 16 deep).
     uint64_t pl = G(uint64_t, b, 0x50);
-    if (pl && (uint32_t)pl <= 5) t->block_height_log2 = (uint32_t)pl;
+    if (pl && (uint32_t)pl <= 0x55 && (pl & 0xF) <= 5) {
+        t->block_height_log2 = (uint32_t)pl & 0xF;
+        if (t->depth > 1) t->block_depth_log2 = ((uint32_t)pl >> 4) & 0xF;
+    }
     if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> default bh %u\n", pl, G(uint32_t, b, 0x20), t->width, t->height, t->levels, t->block_height_log2);
