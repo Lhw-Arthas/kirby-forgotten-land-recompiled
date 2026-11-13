@@ -265,7 +265,9 @@ static void append_arg(char *out, size_t cap, const char *a) {
     out[n] = 0;
 }
 
-// No exec() on Windows: start the new process with the same console / standard handles, then exit.
+// No exec() on Windows: start the new process with the same console / standard handles, wait for it and exit with
+// its code, so whoever started us (the launcher, timeout, a script) sees the real lifetime and result. The child sits
+// in a kill-on-close job: if this process is killed, the child dies with it instead of running on unseen.
 void plat_exec(char *const argv[]) {
     STARTUPINFOW si = {.cb = sizeof si};
     PROCESS_INFORMATION pi;
@@ -273,19 +275,26 @@ void plat_exec(char *const argv[]) {
     fflush(stdout);
     fflush(stderr);
     if (!argv) {
-        ok = CreateProcessW(NULL, GetCommandLineW(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+        ok = CreateProcessW(NULL, GetCommandLineW(), NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
     } else {
         static char cmd[32768];
         cmd[0] = 0;
         for (int i = 0; argv[i]; i++) append_arg(cmd, sizeof cmd, argv[i]);
         static wchar_t wcmd[32768];
         MultiByteToWideChar(CP_UTF8, 0, cmd, -1, wcmd, 32768);
-        ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+        ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
     }
     if (!ok) return;
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+    if (job) SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+    if (job) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    ExitProcess(0);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    ExitProcess(code);
 }
 
 // ---- diagnostics
