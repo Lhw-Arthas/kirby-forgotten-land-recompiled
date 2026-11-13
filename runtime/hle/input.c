@@ -414,16 +414,15 @@ static void host_test_frame(uint64_t frame) {
 
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
-// A presses for the game at given frames (runtime/hle/wildbattle.c: answers that need no question), each held 4 frames
+// A presses for the game at given frames, each held 4 frames
 static uint64_t g_press_a[4];
 void input_press_a_at(uint64_t frame) {
     for (int i = 0; i < 4; i++)
         if (!g_press_a[i] || g_press_a[i] + 4 < frame) { g_press_a[i] = frame; return; }
 }
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
-// Script entries "b<N>:<button>:<len>" count from the last input_mark() (runtime/hle/wildbattle.c marks each battle's
-// start), "c<N>:..." from the last input_mark_capture() (the capture after one of its battles): the encounter's frame
-// changes from run to run, the battle's own timing doesn't.
+// Script entries "b<N>:<button>:<len>" count from the last input_mark(), "c<N>:..." from the last input_mark_capture():
+// nothing calls either in this game, so those entries never fire.
 static uint64_t g_last_frame;
 static long g_mark = -1, g_mark_c = -1;
 void input_mark(void) { g_mark = (long)g_last_frame; }
@@ -456,12 +455,7 @@ void input_frame(uint64_t frame) {
     int32_t lx = 0, ly = 0, rx = 0, ry = 0;
     static char buf[16384];  // (long scripted sessions: the perf walk is ~4 KB)
     snprintf(buf, sizeof buf, "%s", spec);
-    // LARECOMP_INPUT_LOOP=<start>:<period>: from frame <start> on, the script's entries in [start, start + period) repeat
-    // every period frames (long unattended sessions: tools/capture_loop.py walks through the grass and captures for hours)
-    static long loop_start = -1, loop_period;
-    if (loop_start < 0) { loop_start = 0; const char *e = getenv("LARECOMP_INPUT_LOOP"); if (e) sscanf(e, "%ld:%ld", &loop_start, &loop_period); }
     uint64_t real_frame = frame;
-    if (loop_period > 0 && frame >= (uint64_t)loop_start) frame = (uint64_t)loop_start + (frame - (uint64_t)loop_start) % (uint64_t)loop_period;
     for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
         unsigned long start = 0, len = 10;
         char name[32] = "";
@@ -486,26 +480,6 @@ void input_frame(uint64_t frame) {
             lx = (int32_t)lround(cos(r) * 32767), ly = (int32_t)lround(sin(r) * 32767);
         }
         for (int i = 0; i < 16; i++) if (!strcmp(name, names[i])) b |= 1ull << i;
-    }
-    if (loop_period > 0) {  // (the loop holds still for 300 frames once the world is back after a battle / capture: the
-        // capture loop compares that view with the one before the encounter)
-        extern long fps60_world_back(void);
-        long wb = fps60_world_back();
-        if (wb >= 0 && (long)real_frame >= wb && (long)real_frame - wb < 300) b = 0, lx = ly = rx = ry = 0;
-        extern bool fps60_in_scene(void);  // (inside the encounter: run away)
-        static int catch_ = -1;  // LARECOMP_INPUT_LOOP_CATCH=1: A every 40 frames instead (get ready, throw, the screens
-        if (catch_ < 0) catch_ = getenv("LARECOMP_INPUT_LOOP_CATCH") ? atoi(getenv("LARECOMP_INPUT_LOOP_CATCH")) : 0;
-        // after a catch: experience, Pokédex): what a player does, more textures replaced than running away
-        if (fps60_in_scene() && catch_) {
-            lx = ly = rx = ry = 0;
-            b = real_frame % 40 < 6 ? 1ull : 0;
-        } else if (fps60_in_scene()) {  // the encounter menu (Get ready / Bag / Help / Run away): B back to it, down three, A;
-            // "give up catching?" may start on No: up, A
-            uint64_t ph = real_frame % 80;
-            lx = ly = rx = ry = 0;
-            b = ph < 6 ? 1ull << 1 : (ph >= 12 && ph < 18) || (ph >= 22 && ph < 28) || (ph >= 32 && ph < 38) ? 1ull << 15 :
-                (ph >= 42 && ph < 48) || (ph >= 68 && ph < 74) ? 1ull : ph >= 56 && ph < 62 ? 1ull << 13 : 0;
-        }
     }
     script_buttons = b;
     script_lx = lx;

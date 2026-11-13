@@ -76,24 +76,9 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
 }
 
 // ---- the game object being drawn (frame interpolation, docs/PESQUISA-60FPS.md)
-// The game draws each object from a few functions, called once per object (and pass) with the object in x0: hooked
-// while interpolation is on, they name the object around the command lists it calls and the draws it records, so the
-// in-between frame pairs each draw with the same object's draw in the previous frame (the game reorders objects every
-// frame: pairing by order made ghosts).
-void rt_register_fnhook(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));  // runtime/fnhook.c
-void rt_call_original(Cpu *c, uint64_t addr);
+// The in-between frame pairs each draw with the same object's draw in the previous frame (the game reorders objects every
+// frame: pairing by order made ghosts). g_obj_tag names the object being drawn: nothing sets it for this game.
 static __thread uint64_t g_obj_tag;
-static const uint64_t k_obj_fns[] = {
-    0x70006237b0,  // one per object (Viridian: 22 a frame), called by the draw loop f_70006453a0
-    0x7000641190,  // objects drawn in two passes (shadow / colour), via f_7000642990
-};
-static int obj_hook(Cpu *c, uint64_t addr) {
-    uint64_t saved = g_obj_tag;
-    g_obj_tag = c->x[0];
-    rt_call_original(c, addr);
-    g_obj_tag = saved;
-    return 1;  // (the original ran)
-}
 // Before a draw or a command list call: a CMD_OBJECT when the object changed since the list's last one.
 static void obj_mark(Cpu *c, NvnCmdBuf *cb) {
     if (cb->obj_tag == g_obj_tag) return;
@@ -107,13 +92,6 @@ static uint64_t g_trace_cb[16], g_trace_list[64];  // (LARECOMP_TRACE_COUNT, bel
 static int g_ntrace_cb, g_ntrace_list;
 NVN(nvnCommandBufferBeginRecording) {
     draw_chain(c, "begin", 0);
-    static bool hooked;  // (hooks cost every game function a lookup: only with interpolation on)
-    extern bool vk_interp_enabled(void), fps60_enabled(void);
-    // (the 60 fps mode turns interpolation on only in menus: hooked from when it is on - the start, or the F12 menu later)
-    if (!hooked && (vk_interp_enabled() || fps60_enabled()) && !getenv("LARECOMP_INTERP_NOOBJ")) {  // (NOOBJ: pair by order, the old prototype)
-        hooked = true;
-        for (size_t i = 0; i < sizeof k_obj_fns / sizeof k_obj_fns[0]; i++) rt_register_fnhook(k_obj_fns[i], obj_hook);
-    }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;
     cb->recording = true;
