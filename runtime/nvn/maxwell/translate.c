@@ -1211,6 +1211,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x1400000000000000ull, 0xfc00000000000000ull)) {  // ISCADD32I
         sprintf(t, "((%s << %du) + 0x%08xu)", R(a), (int)bits(w, 53, 5), (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
+    } else if (OPM(0x5bd0000000000000ull, 0xfff8000000000000ull) || OPM(0x4bd0000000000000ull, 0xfff0000000000000ull) ||
+               OPM(0x36d0000000000000ull, 0xfef8000000000000ull)) {  // LEA (lo): d = b + (+/-a << scale)
+        if (bits(w, 46, 2) || bits(w, 48, 3) != PT) fail(c, "LEA.X/.CC/predicate %016llx at %#x", (unsigned long long)w, pc);
+        sprintf(t, "(%s + (%s%s << %du))", B(false), bits(w, 45, 1) ? "-" : "", R(a), (int)bits(w, 39, 5));
+        set_reg(c, d, t);
     } else if (OPM(0x5b60000000000000ull, 0xfff0000000000000ull) || OPM(0x4b60000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x3660000000000000ull, 0xfef0000000000000ull)) {  // ISETP
         char cmp[512];
