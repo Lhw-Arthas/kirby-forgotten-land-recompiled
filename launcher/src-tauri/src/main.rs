@@ -36,6 +36,8 @@ struct Job {
     phase: Phase,
     /// Packaged mode: the runtime's own fraction of the whole setup.
     progress: Option<f32>,
+    /// Packaged mode: the file the compiler has been on for a while, as the runtime words it.
+    detail: Option<String>,
     error: String,
     child: Option<Child>,
     cancelled: bool,
@@ -70,7 +72,7 @@ impl Mode {
 /// One stdout line of the runtime's `--setup` (runtime/main.c setup_headless).
 #[derive(Debug, PartialEq)]
 enum SetupLine {
-    Progress(Phase, f32),
+    Progress(Phase, f32, Option<String>),
     Done,
     Failed(String),
 }
@@ -85,7 +87,9 @@ fn parse_setup_line(line: &str) -> Option<SetupLine> {
                 "compiling" | "finishing" => Phase::Compile,
                 _ => return None,
             };
-            Some(SetupLine::Progress(phase, w.next()?.parse().ok()?))
+            let fraction = w.next()?.parse().ok()?;
+            let detail = w.collect::<Vec<_>>().join(" ");
+            Some(SetupLine::Progress(phase, fraction, (!detail.is_empty()).then_some(detail)))
         }
         "done" => Some(SetupLine::Done),
         "failed" => Some(SetupLine::Failed(w.next().unwrap_or("").into())),
@@ -141,6 +145,7 @@ struct Status {
     running: bool,
     phase: Phase,
     progress: Option<f32>,
+    detail: Option<String>,
     error: String,
     settings: Vec<(String, String)>,
     crash: Option<Crash>,
@@ -425,6 +430,7 @@ fn status(app: St) -> Status {
         running,
         phase: job.phase,
         progress,
+        detail: job.detail.clone(),
         error: job.error.clone(),
         settings: app.settings(),
         crash: app.crash.lock().unwrap().clone(),
@@ -487,9 +493,9 @@ fn run_setup(app: &App, mut cmd: Command, log: &mut fs::File) -> Result<(), Stri
     let mut end = None;
     for line in BufReader::new(out).lines().map_while(Result::ok) {
         match parse_setup_line(&line) {
-            Some(SetupLine::Progress(phase, fraction)) => {
+            Some(SetupLine::Progress(phase, fraction, detail)) => {
                 let mut job = app.job.lock().unwrap();
-                (job.phase, job.progress) = (phase, Some(fraction));
+                (job.phase, job.progress, job.detail) = (phase, Some(fraction), detail);
             }
             other => end = other.or(end),
         }
@@ -692,9 +698,13 @@ mod tests {
 
     #[test]
     fn setup_lines_map_onto_the_phases() {
-        assert_eq!(parse_setup_line("phase copying 0.010"), Some(SetupLine::Progress(Phase::Image, 0.01)));
-        assert_eq!(parse_setup_line("phase reading 0.200"), Some(SetupLine::Progress(Phase::Translate, 0.2)));
-        assert_eq!(parse_setup_line("phase finishing 0.990"), Some(SetupLine::Progress(Phase::Compile, 0.99)));
+        assert_eq!(parse_setup_line("phase copying 0.010"), Some(SetupLine::Progress(Phase::Image, 0.01, None)));
+        assert_eq!(parse_setup_line("phase reading 0.200"), Some(SetupLine::Progress(Phase::Translate, 0.2, None)));
+        assert_eq!(parse_setup_line("phase finishing 0.990"), Some(SetupLine::Progress(Phase::Compile, 0.99, None)));
+        assert_eq!(
+            parse_setup_line("phase compiling 0.925 (main_180.c, 7 min)"),
+            Some(SetupLine::Progress(Phase::Compile, 0.925, Some("(main_180.c, 7 min)".into())))
+        );
         assert_eq!(parse_setup_line("done"), Some(SetupLine::Done));
         assert_eq!(parse_setup_line("failed version"), Some(SetupLine::Failed("version".into())));
         assert_eq!(parse_setup_line("[paths] Forgotten Land Recomp 0.1.0"), None);

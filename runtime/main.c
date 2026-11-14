@@ -167,7 +167,7 @@ static void boot(const char *root) {
 }
 
 // --setup <folder>: the start screen's setup (runtime/gamesetup.h) with no window, for the launcher. Prints one stdout
-// line per change, "phase <looking|copying|image|reading|compiling|finishing> <0..1>", then "done" or
+// line per change, "phase <looking|copying|image|reading|compiling|finishing> <0..1> [(<slow file>, <n> min)]", then "done" or
 // "failed <reason>" (the SETUP_FAIL_* names below); the details go to stderr. Killing it is safe: the next run starts
 // the setup over (it clears <data root>/extracted first).
 static int setup_headless(const char *folder) {
@@ -175,19 +175,23 @@ static int setup_headless(const char *folder) {
                                        "not_found", "package", "version", "copy", "build", "tools", "bad_image"};
     setup_start(folder);
     int shown_state = -1, shown_permille = -1;
+    char step[200], shown_step[200] = "";
     for (;;) {
         bool running = setup_running();  // (read before the state: the setup sets its last state, then stops running)
         int st = setup_state(), permille = (int)(setup_progress() * 1000);
+        setup_step(step, sizeof step);
+        const char *slow = strchr(step, '(');
         if (!running) {
             if (st == SETUP_DONE) printf("done\n");
             else printf("failed %s\n", st > SETUP_DONE ? NAME[st] : "build");
             fflush(stdout);
             return st == SETUP_DONE ? 0 : 1;
         }
-        if (st < SETUP_DONE && (st != shown_state || permille != shown_permille)) {
-            printf("phase %s %.3f\n", NAME[st], permille / 1000.0);
+        if (st < SETUP_DONE && (st != shown_state || permille != shown_permille || strcmp(step, shown_step))) {
+            printf("phase %s %.3f%s%s\n", NAME[st], permille / 1000.0, slow ? " " : "", slow ? slow : "");
             fflush(stdout);
             shown_state = st, shown_permille = permille;
+            snprintf(shown_step, sizeof shown_step, "%s", step);
         }
         SDL_Delay(100);
     }

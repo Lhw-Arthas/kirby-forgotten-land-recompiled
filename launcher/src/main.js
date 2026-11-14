@@ -58,7 +58,7 @@ function progress(s) {
   if (!busy(s)) return '';
   const pct = s.progress == null ? null : Math.min(100, Math.round(s.progress * 100));
   return `<div class="task glass">
-    <span class="task-msg">${esc(PHASE_LABEL[s.phase])}</span>
+    <span class="task-msg">${esc(PHASE_LABEL[s.phase])}${s.detail ? ` ${esc(s.detail)}` : ''}</span>
     <span class="task-pct">${pct == null ? '' : `${pct}%`}</span>
     <progress max="100" ${pct == null ? '' : `value="${pct}"`}></progress>
     <button class="btn sm" data-act="cancel">Cancel</button>
