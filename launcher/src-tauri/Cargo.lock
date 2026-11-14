@@ -1675,6 +1675,7 @@ dependencies = [
 name = "kfl-recomp-launcher"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "junction",
  "serde",
  "serde_json",

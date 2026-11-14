@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -32,12 +32,30 @@ struct Job {
     cancelled: bool,
 }
 
+/// How the game ended, from its exit code and the end of game.log.
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    Quit,
+    /// Non-zero exit with no crash report: the player or Windows ended it, or it failed at startup with its own message box.
+    Stopped,
+    /// The one-line reason.
+    Crashed(String),
+}
+
+/// The last crash, until the player dismisses it or presses Play. `log` is a file name inside the work folder.
+#[derive(Clone, Serialize)]
+struct Crash {
+    reason: String,
+    log: String,
+}
+
 struct App {
     repo: PathBuf,
     work: PathBuf,
     msys: PathBuf,
     job: Arc<Mutex<Job>>,
     game: Mutex<Option<Child>>,
+    crash: Mutex<Option<Crash>>,
 }
 
 #[derive(Serialize)]
@@ -52,6 +70,7 @@ struct Status {
     progress: Option<f32>,
     error: String,
     settings: Vec<(String, String)>,
+    crash: Option<Crash>,
 }
 
 fn find_repo() -> PathBuf {
@@ -108,7 +127,75 @@ fn count(dir: &Path, ext: &str) -> usize {
         .sum()
 }
 
+// The runtime prints one of two markers on a crash (runtime/rt.h FATAL, runtime/dispatch.c rt_fault_report) and then abort()s,
+// which exits with code 3. A normal close (window closed, or the game asking to exit) exits with code 0.
+fn classify(code: i32, tail: &str) -> Outcome {
+    let marker = tail.lines().map(str::trim).find(|l| l.starts_with("FATAL:") || l.starts_with("*** exception"));
+    match (marker, code) {
+        (Some(line), _) => Outcome::Crashed(line.chars().take(300).collect()),
+        (None, 0) => Outcome::Quit,
+        (None, 3) => Outcome::Crashed("The game aborted without a report (exit code 3).".into()),
+        // an NTSTATUS exit code is a native fault the runtime's handler never saw
+        (None, c) if c as u32 >= 0xC000_0000 => Outcome::Crashed(format!("Windows ended the game with error {:08X}.", c as u32)),
+        _ => Outcome::Stopped,
+    }
+}
+
+const KEPT_CRASH_LOGS: usize = 5;
+
+fn log_tail(path: &Path) -> String {
+    let read = || -> std::io::Result<Vec<u8>> {
+        let mut f = fs::File::open(path)?;
+        f.seek(SeekFrom::End(-(1 << 16)))
+            .or_else(|_| f.seek(SeekFrom::Start(0)))?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
+    };
+    String::from_utf8_lossy(&read().unwrap_or_default()).into_owned()
+}
+
+fn is_crash_log(name: &str) -> bool {
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    name.strip_prefix("crash-")
+        .and_then(|r| r.strip_suffix(".log"))
+        .and_then(|r| r.split_once('-'))
+        .is_some_and(|(d, t)| digits(d, 8) && digits(t, 6))
+}
+
+// Copies game.log aside, because the next Play overwrites it. Returns the copy's name (game.log itself if the copy fails).
+fn keep_crash_log(work: &Path) -> String {
+    let name = format!("crash-{}.log", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    if fs::copy(work.join("game.log"), work.join(&name)).is_err() {
+        return "game.log".into();
+    }
+    let mut all: Vec<String> = fs::read_dir(work).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| is_crash_log(n)).collect();
+    all.sort();
+    let old = all.len().saturating_sub(KEPT_CRASH_LOGS);
+    for f in &all[..old] {
+        let _ = fs::remove_file(work.join(f));
+    }
+    name
+}
+
 impl App {
+    // true while the game runs; when it has just ended, records a crash for the status
+    fn poll_game(&self) -> bool {
+        let mut g = self.game.lock().unwrap();
+        let Some(child) = g.as_mut() else { return false };
+        let ended = match child.try_wait() {
+            Ok(None) => return true,
+            Ok(Some(st)) => Some(st.code().unwrap_or(1)),
+            Err(_) => None,
+        };
+        *g = None;
+        if let Some(code) = ended {
+            if let Outcome::Crashed(reason) = classify(code, &log_tail(&self.work.join("game.log"))) {
+                *self.crash.lock().unwrap() = Some(Crash { reason, log: keep_crash_log(&self.work) });
+            }
+        }
+        false
+    }
     fn game(&self) -> PathBuf {
         self.work.join("extracted")
     }
@@ -206,14 +293,7 @@ fn status(app: St) -> Status {
     } else {
         (None, None)
     };
-    let running = {
-        let mut g = app.game.lock().unwrap();
-        let alive = g.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
-        if !alive {
-            *g = None;
-        }
-        alive
-    };
+    let running = app.poll_game();
     let job = app.job.lock().unwrap();
     let progress = match job.phase {
         Phase::Compile => {
@@ -233,6 +313,7 @@ fn status(app: St) -> Status {
         progress,
         error: job.error.clone(),
         settings: app.settings(),
+        crash: app.crash.lock().unwrap().clone(),
     }
 }
 
@@ -347,6 +428,7 @@ fn play(app: St) -> Result<(), String> {
     if game.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))) {
         return Ok(());
     }
+    *app.crash.lock().unwrap() = None;
     let log = fs::File::create(app.work.join("game.log")).map_err(|e| e.to_string())?;
     let child = Command::new(app.exe())
         .args(["extracted", "--play"])
@@ -375,11 +457,21 @@ fn set_setting(app: St, key: String, value: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn dismiss_crash(app: St) {
+    *app.crash.lock().unwrap() = None;
+}
+
+#[tauri::command]
 fn open_path(app: St, which: String) -> Result<(), String> {
     let p = match which.as_str() {
         "work" => app.work.clone(),
         "setup_log" => app.work.join("setup.log"),
         "game_log" => app.work.join("game.log"),
+        // the file name is the one the backend recorded, never a path from the page
+        "crash_log" => match &*app.crash.lock().unwrap() {
+            Some(c) => app.work.join(&c.log),
+            None => return Err("There is no crash log.".into()),
+        },
         _ => return Err("Unknown path.".into()),
     };
     if !p.exists() {
@@ -397,11 +489,12 @@ fn main() {
         msys: std::env::var("KFL_MSYS2").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(r"C:\msys64")),
         job: Arc::new(Mutex::new(Job { phase: Phase::Idle, error: String::new(), child: None, cancelled: false })),
         game: Mutex::new(None),
+        crash: Mutex::new(None),
     });
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(app)
-        .invoke_handler(tauri::generate_handler![status, set_game_dir, start_setup, cancel_setup, play, set_setting, open_path])
+        .invoke_handler(tauri::generate_handler![status, set_game_dir, start_setup, cancel_setup, play, set_setting, open_path, dismiss_crash])
         .run(tauri::generate_context!())
         .expect("launcher failed to start");
 }
@@ -411,7 +504,7 @@ mod tests {
     use super::*;
 
     fn app(repo: &str, work: &str) -> App {
-        App { repo: repo.into(), work: work.into(), msys: PathBuf::new(), job: Arc::new(Mutex::new(Job { phase: Phase::Idle, error: String::new(), child: None, cancelled: false })), game: Mutex::new(None) }
+        App { repo: repo.into(), work: work.into(), msys: PathBuf::new(), job: Arc::new(Mutex::new(Job { phase: Phase::Idle, error: String::new(), child: None, cancelled: false })), game: Mutex::new(None), crash: Mutex::new(None) }
     }
 
     #[test]
@@ -459,6 +552,69 @@ mod tests {
         fs::write(link.join("keep.bin"), "x").unwrap();
         assert!(link_game_dir(&link, &new).is_err());
         assert!(link.join("keep.bin").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    const START: &str = "[paths] Forgotten Land Recomp 0.1.0, data: E:\\work\\kfl\n[gamelib] E:\\work\\kfl\\build\\lasgame.dll: main, 24961 functions\n[vk] t=2.1 frame 120 60.1 fps\n";
+
+    #[test]
+    fn a_fatal_report_is_a_crash() {
+        let log = format!("{START}FATAL: LARECOMP_GAME_LIB: no file E:\\work\\kfl\\build\\lasgame.dll\nhost backtrace (guest functions are f_<addr>):\n  #0  00007ff6288c8208 lasrecomp+68208\n");
+        assert_eq!(classify(3, &log), Outcome::Crashed("FATAL: LARECOMP_GAME_LIB: no file E:\\work\\kfl\\build\\lasgame.dll".into()));
+    }
+
+    #[test]
+    fn an_exception_report_is_a_crash() {
+        let log = format!("{START}\n*** exception c0000005 accessing 0xffffffffffffffff\n    host pc 7ff6288c8208 (?+0)\n    host lr 7ff6288617b8 (?)\nhost backtrace (guest functions are f_<addr>):\n  #0  00007ff6288c8208 lasrecomp+68208\nguest: sp=723fffe910 lr=700051f500\n");
+        assert_eq!(classify(3, &log), Outcome::Crashed("*** exception c0000005 accessing 0xffffffffffffffff".into()));
+    }
+
+    #[test]
+    fn the_marker_decides_even_when_the_exit_code_looks_normal() {
+        assert!(matches!(classify(0, "FATAL: out of memory\n"), Outcome::Crashed(_)));
+    }
+
+    #[test]
+    fn closing_the_window_is_a_normal_quit() {
+        assert_eq!(classify(0, &format!("{START}window closed\n")), Outcome::Quit);
+    }
+
+    #[test]
+    fn a_kill_without_a_report_is_not_a_crash() {
+        assert_eq!(classify(1, START), Outcome::Stopped);
+        assert_eq!(classify(-1073741510, START), Outcome::Crashed("Windows ended the game with error C000013A.".into()));
+    }
+
+    #[test]
+    fn an_abort_without_a_report_is_a_crash() {
+        assert!(matches!(classify(3, START), Outcome::Crashed(_)));
+    }
+
+    #[test]
+    fn only_the_newest_crash_logs_are_kept() {
+        let root = scratch("crashlogs");
+        for i in 1..=7 {
+            fs::write(root.join(format!("crash-20200101-00000{i}.log")), "old").unwrap();
+        }
+        for other in ["crash-notes.log", "crash-20200101-00000.log", "setup.log", "game.log"] {
+            fs::write(root.join(other), "x").unwrap();
+        }
+        let name = keep_crash_log(&root);
+        assert!(is_crash_log(&name) && fs::read_to_string(root.join(&name)).unwrap() == "x");
+        let mut left: Vec<String> = fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).filter(|n| is_crash_log(n)).collect();
+        left.sort();
+        assert_eq!(left, ["crash-20200101-000004.log", "crash-20200101-000005.log", "crash-20200101-000006.log", "crash-20200101-000007.log", name.as_str()]);
+        assert!(root.join("crash-notes.log").is_file() && root.join("setup.log").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_tail_of_a_huge_log_is_read() {
+        let root = scratch("tail");
+        fs::write(root.join("game.log"), "x".repeat(300_000) + "\nFATAL: late\n").unwrap();
+        assert!(log_tail(&root.join("game.log")).ends_with("FATAL: late\n"));
+        assert!(log_tail(&root.join("game.log")).len() <= 1 << 16);
+        assert_eq!(log_tail(&root.join("nope")), "");
         fs::remove_dir_all(&root).unwrap();
     }
 
