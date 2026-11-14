@@ -166,6 +166,33 @@ static void boot(const char *root) {
     kernel_run_main(t, t->handle, 0, hle_register("<rtld_exception_ready>", rtld_exception_ready), init_fn, fini_fn);
 }
 
+// --setup <folder>: the start screen's setup (runtime/gamesetup.h) with no window, for the launcher. Prints one stdout
+// line per change, "phase <looking|copying|image|reading|compiling|finishing> <0..1>", then "done" or
+// "failed <reason>" (the SETUP_FAIL_* names below); the details go to stderr. Killing it is safe: the next run starts
+// the setup over (it clears <data root>/extracted first).
+static int setup_headless(const char *folder) {
+    static const char *const NAME[] = {"idle", "looking", "copying", "image", "reading", "compiling", "finishing", "done",
+                                       "not_found", "package", "version", "copy", "build", "tools", "bad_image"};
+    setup_start(folder);
+    int shown_state = -1, shown_permille = -1;
+    for (;;) {
+        bool running = setup_running();  // (read before the state: the setup sets its last state, then stops running)
+        int st = setup_state(), permille = (int)(setup_progress() * 1000);
+        if (!running) {
+            if (st == SETUP_DONE) printf("done\n");
+            else printf("failed %s\n", st > SETUP_DONE ? NAME[st] : "build");
+            fflush(stdout);
+            return st == SETUP_DONE ? 0 : 1;
+        }
+        if (st < SETUP_DONE && (st != shown_state || permille != shown_permille)) {
+            printf("phase %s %.3f\n", NAME[st], permille / 1000.0);
+            fflush(stdout);
+            shown_state = st, shown_permille = permille;
+        }
+        SDL_Delay(100);
+    }
+}
+
 int main(int argc, char **argv) {
     plat_init();
 #ifdef _WIN32
@@ -175,15 +202,19 @@ int main(int argc, char **argv) {
 #endif
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
-    static char arg_root[1024];
+    static char arg_root[1024], arg_setup[1024];
     bool build_romfs = false;
+    const char *setup_dir = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
         else if (!strcmp(argv[i], "--build-romfs")) build_romfs = true;
+        else if (!strcmp(argv[i], "--setup") && i + 1 < argc)  // (resolved here: rt_paths_init changes directory)
+            setup_dir = realpath(argv[++i], arg_setup) ? arg_setup : argv[i];
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    if (setup_dir) return setup_headless(setup_dir);
     if (build_romfs) {  // --build-romfs: <root>/romfs.bin, the image the game reads, from <root>/romfs/ (the launcher's setup)
         char dir[1100], img[1100], why[256] = "";
         snprintf(dir, sizeof dir, "%s/romfs", root);
