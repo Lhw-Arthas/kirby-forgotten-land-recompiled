@@ -250,6 +250,7 @@ dist: launcher
 	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"  # (in-game menu font, OFL)
 	cp third_party/fidelityfx/bin/amd_fidelityfx_vk.dll "$(DIST)/"  # (FSR 3.1, loaded at run time: without it, FSR 1)
 	cp LICENSE "$(DIST)/LICENSE.txt"
+	cp recomplauncher.json "$(DIST)/"  # (RecompLauncher: how it sets the release up, starts it and shows its settings)
 	# (the FFmpeg version and configure line it was built with: what the LGPL asks to make it rebuildable)
 	ffconf=$$(sed -n 's/^#define FFMPEG_CONFIGURATION "--prefix=[^ ]* \(.*\)"$$/  .\/configure --prefix=<prefix> \1/p' $(DW)/deps-win/src/ffmpeg/config.h); \
 	sed -e "s|__FFVER__|$$(cat $(DW)/deps-win/src/ffmpeg/RELEASE)|g" -e "s|__FFCONF__|$$ffconf|" docs/release-README.txt \

@@ -1,5 +1,7 @@
 # Kirby and the Forgotten Land Recompiled
 
+<a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 An early, work-in-progress static recompilation of **Kirby and the Forgotten Land** (Nintendo Switch) for Windows.
 The game's ARM64 code is translated to C and compiled for your PC, and a runtime stands in for the Switch. It is not
 an emulator.
@@ -17,6 +19,17 @@ that and not playable yet**.
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`). The
 launcher and the runtime accept any version of the game by program id, but only v1.0.0 has been built and run.
+
+## Download
+
+Get `ForgottenLandRecomp-<version>-Windows-x64.zip` from the
+[latest release](https://github.com/scarxity/kirby-forgotten-land-recompiled/releases/latest), unzip it, open
+`ForgottenLandLauncher.exe`, pick the folder that holds your `exefs` and `romfs`, then Build and Play. The zip holds
+tools only: the game code is built on your PC from your own copy, in about 16 minutes on a 16-thread PC, and needs
+about 6.5 GB of disk. Its `README.txt` has the details. [CHANGELOG.md](CHANGELOG.md) lists what changed.
+
+The zip also carries a `recomplauncher.json`, so [RecompLauncher](https://recomplauncher.com) can set the game up
+from the same folder, show its settings and start it.
 
 ## Layout
 
