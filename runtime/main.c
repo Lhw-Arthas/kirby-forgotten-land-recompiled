@@ -170,7 +170,11 @@ static void boot(const char *root) {
 // line per change, "phase <looking|copying|image|reading|compiling|finishing> <0..1> [(<slow file>, <n> min)]", then "done" or
 // "failed <reason>" (the SETUP_FAIL_* names below); the details go to stderr. Killing it is safe: the next run starts
 // the setup over (it clears <data root>/extracted first).
-static int setup_headless(const char *folder) {
+// --prepare <folder>: the same for RecompLauncher (recomplauncher.json): the lines are "progress <0..1> <text>", and a
+// failure is its exit code (the SETUP_FAIL_* value, explained to the player by the file's exit_codes).
+static int setup_headless(const char *folder, bool prepare) {
+    static const char *const TEXT[] = {"", "Looking for the game files", "Copying the game files", "Writing the game data image",
+                                       "Reading the game code", "Compiling the game code", "Finishing"};
     static const char *const NAME[] = {"idle", "looking", "copying", "image", "reading", "compiling", "finishing", "done",
                                        "not_found", "package", "version", "copy", "build", "tools", "bad_image"};
     setup_start(folder);
@@ -182,13 +186,15 @@ static int setup_headless(const char *folder) {
         setup_step(step, sizeof step);
         const char *slow = strchr(step, '(');
         if (!running) {
-            if (st == SETUP_DONE) printf("done\n");
+            if (prepare) { if (st == SETUP_DONE) printf("progress 1 Ready\n"); }
+            else if (st == SETUP_DONE) printf("done\n");
             else printf("failed %s\n", st > SETUP_DONE ? NAME[st] : "build");
             fflush(stdout);
-            return st == SETUP_DONE ? 0 : 1;
+            return st == SETUP_DONE ? 0 : prepare && st > SETUP_DONE ? st : 1;
         }
         if (st < SETUP_DONE && (st != shown_state || permille != shown_permille || strcmp(step, shown_step))) {
-            printf("phase %s %.3f%s%s\n", NAME[st], permille / 1000.0, slow ? " " : "", slow ? slow : "");
+            if (prepare) printf("progress %.3f %s\n", permille / 1000.0, step[0] ? step : TEXT[st]);
+            else printf("phase %s %.3f%s%s\n", NAME[st], permille / 1000.0, slow ? " " : "", slow ? slow : "");
             fflush(stdout);
             shown_state = st, shown_permille = permille;
             snprintf(shown_step, sizeof shown_step, "%s", step);
@@ -207,18 +213,25 @@ int main(int argc, char **argv) {
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
     static char arg_root[1024], arg_setup[1024];
-    bool build_romfs = false;
+    bool build_romfs = false, prepare = false;
     const char *setup_dir = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
         else if (!strcmp(argv[i], "--build-romfs")) build_romfs = true;
-        else if (!strcmp(argv[i], "--setup") && i + 1 < argc)  // (resolved here: rt_paths_init changes directory)
-            setup_dir = realpath(argv[++i], arg_setup) ? arg_setup : argv[i];
+        else if ((!strcmp(argv[i], "--setup") || !strcmp(argv[i], "--prepare")) && i + 1 < argc) {
+            prepare = argv[i][2] == 'p';
+            setup_dir = realpath(argv[++i], arg_setup) ? arg_setup : argv[i];  // (resolved here: rt_paths_init changes directory)
+        }
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
+    if (prepare && !getenv("LARECOMP_DATA_ROOT")) {  // next to the exe, wherever it was started from (as our launcher sets it)
+        static char dir[1024];
+        char *s = plat_exe_path(dir, sizeof dir) ? strrchr(dir, '\\') : NULL;
+        if (s) *s = 0, setenv("LARECOMP_DATA_ROOT", dir, 1);
+    }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
-    if (setup_dir) return setup_headless(setup_dir);
+    if (setup_dir) return setup_headless(setup_dir, prepare);
     if (build_romfs) {  // --build-romfs: <root>/romfs.bin, the image the game reads, from <root>/romfs/ (the launcher's setup)
         char dir[1100], img[1100], why[256] = "";
         snprintf(dir, sizeof dir, "%s/romfs", root);
