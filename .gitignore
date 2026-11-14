@@ -1,4 +1,4 @@
-# Arquivos do jogo e chaves: NUNCA versionar
+# Game files and keys: NEVER commit
 *.xci
 *.nsp
 *.nca
@@ -10,6 +10,12 @@ extracted/
 extracted-*/
 generated/
 generated-*/
+romfs.bin
+romfs/
+exefs/
+work/
+runs/
+test-save/
 
 # Build
 build/
@@ -34,3 +40,6 @@ NVIDIA Corporation/
 fonts/*.bfttf
 fonts/*.ttf
 
+
+# Agent worktrees
+.claude/

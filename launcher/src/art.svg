@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <!-- Original art: an overgrown skyline at dusk. No game assets. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b1d55"/>
+      <stop offset="0.45" stop-color="#8a4a8f"/>
+      <stop offset="0.75" stop-color="#f58aa6"/>
+      <stop offset="1" stop-color="#ffd0a8"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff6d8"/>
+      <stop offset="0.35" stop-color="#ffd9a0" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#ffb08a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a0649c"/>
+      <stop offset="1" stop-color="#c77aa0"/>
+    </linearGradient>
+    <linearGradient id="mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b3f86"/>
+      <stop offset="1" stop-color="#3f6a78"/>
+    </linearGradient>
+    <linearGradient id="near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f7a6a"/>
+      <stop offset="1" stop-color="#1c3d4a"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <circle cx="1130" cy="560" r="330" fill="url(#sun)"/>
+  <circle cx="1130" cy="560" r="74" fill="#fff3d0"/>
+  <g fill="#fff" opacity="0.85">
+    <circle cx="210" cy="120" r="2.2"/><circle cx="420" cy="70" r="1.6"/><circle cx="640" cy="150" r="2"/>
+    <circle cx="860" cy="60" r="1.5"/><circle cx="1010" cy="130" r="2.4"/><circle cx="1290" cy="90" r="1.8"/>
+    <circle cx="1460" cy="180" r="2"/><circle cx="110" cy="250" r="1.4"/><circle cx="1380" cy="270" r="1.4"/>
+    <path d="M745 215l5 13 13 5-13 5-5 13-5-13-13-5 13-5z"/>
+    <path d="M1232 198l4 10 10 4-10 4-4 10-4-10-10-4 10-4z"/>
+  </g>
+  <g fill="#fff" opacity="0.2">
+    <ellipse cx="380" cy="330" rx="210" ry="26"/><ellipse cx="520" cy="352" rx="150" ry="18"/>
+    <ellipse cx="1390" cy="400" rx="190" ry="22"/>
+  </g>
+  <!-- far towers -->
+  <g fill="url(#far)" opacity="0.75">
+    <path d="M700 640V430h46v-40h34v40h30v210zM860 640V470h70v170zM960 640V380h28v-50h22v50h34v260zM1260 640V450h60v190zM1350 640V500h80v140zM560 640V520h90v120zM1470 640V430h50v210z"/>
+  </g>
+  <!-- mid ruins with vines -->
+  <g fill="url(#mid)">
+    <path d="M0 720V560h70v-70h60v70h50v160zM230 720V470h40l22-36h36l22 36h20v250zM430 720V590h120v130zM1050 720V520h56v-34h44v34h40v200zM1240 720V600h150v120zM1440 720V540h160v180z"/>
+    <path d="M0 700c220-60 420-50 640-10s520 40 960-20v230H0z"/>
+  </g>
+  <g fill="#7fd6a0" opacity="0.55">
+    <path d="M250 470c14 50-10 90 6 150h-14c-10-56 0-104-8-150zM1066 520c16 60-8 96 8 160h-14c-12-62 2-110-8-160zM90 490c12 44-6 80 6 130H82c-8-48 2-90-6-130zM1470 540c14 50-10 84 6 140h-14c-10-54 2-96-8-140z"/>
+  </g>
+  <!-- near hills -->
+  <path d="M0 790c180-90 380-70 560-20s360 70 560 10 320-60 480-20v140H0z" fill="url(#near)"/>
+  <path d="M0 850c260-70 520-40 800-10s540 10 800-40v100H0z" fill="#142c3a"/>
+  <g fill="#ff9dbd" opacity="0.9">
+    <circle cx="180" cy="812" r="6"/><circle cx="236" cy="826" r="4.5"/><circle cx="1320" cy="806" r="6"/>
+    <circle cx="1378" cy="818" r="4.5"/><circle cx="930" cy="842" r="5"/>
+  </g>
+</svg>

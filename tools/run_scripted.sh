@@ -1,0 +1,27 @@
+#!/bin/bash
+# run_scripted.sh <name> <seconds> <shot frames> [VAR=value ...]: run the game from the work folder with a fresh scratch
+# save, a hidden window and scripted input, then copy the frame captures to $WORK/runs/<name>/ (log: runs/<name>.log).
+# LARECOMP_INPUT defaults to the script that reaches the first stage on a new save and walks Kirby forward:
+#   880:LEFT:8,950:A:8,1400:A:8,1800:A:8,2600:A:8,2700:PLUS:8,2800:B:8,3400:A:8,3550:A:8,3700:A:8,3850:A:8,
+#   4000:A:8,4150:A:8,4300:A:8,4450:A:8,4750:STICK_UP:300
+# ("Do Not Use" online, difficulty, opening movie skipped with PLUS, the cutscenes and tutorial with A, then the stick).
+# LARECOMP_DEBUG_FRAME=<frame> also saves every render pass of that frame as $WORK/build/pass_NNN.png (the largest is
+# the g-buffer: the scene stays visible there while the final image is still white). Run from the repository root in
+# Git Bash; WORK defaults to ../work/kfl. Never point WORK inside the repository.
+set -u
+WORK=${WORK:-../work/kfl}
+NAME=$1 SECS=$2 SHOTS=$3
+shift 3
+export PATH="/c/msys64/ucrt64/bin:$PATH"
+cd "$WORK" || exit 2
+rm -rf test-save build/frames/*.png build/pass_*.png
+mkdir -p test-save runs/"$NAME"
+export LARECOMP_GAME_LIB=build/lasgame.dll LARECOMP_SAVE_DIR=test-save LARECOMP_NO_AUDIO=1 LARECOMP_NO_USER_INPUT=1 LARECOMP_HIDDEN=1
+export LARECOMP_INPUT="880:LEFT:8,950:A:8,1400:A:8,1800:A:8,2600:A:8,2700:PLUS:8,2800:B:8,3400:A:8,3550:A:8,3700:A:8,3850:A:8,4000:A:8,4150:A:8,4300:A:8,4450:A:8,4750:STICK_UP:300"
+[ -n "$SHOTS" ] && export LARECOMP_WINDOW_SHOTS="$SHOTS"
+for kv in "$@"; do export "$kv"; done
+timeout "$SECS" ./build/lasrecomp.exe extracted --play > runs/"$NAME".log 2>&1
+echo "exit $?"
+cp build/frames/*.png build/pass_*.png runs/"$NAME"/ 2>/dev/null
+ls runs/"$NAME"
+grep -a -m1 -A3 '^FATAL' runs/"$NAME".log | cut -c1-200

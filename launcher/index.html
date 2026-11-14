@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Forgotten Land Recomp</title>
+  </head>
+  <body>
+    <div id="bg" aria-hidden="true"><div class="art"></div><div class="scrim"></div></div>
+    <div id="app">
+      <nav id="nav" class="glass" aria-label="Main"></nav>
+      <main id="view" tabindex="-1"></main>
+    </div>
+    <div id="titlebar" data-tauri-drag-region>
+      <button class="win" id="win-min" aria-label="Minimize">&#x2013;</button>
+      <button class="win" id="win-close" aria-label="Close">&#x2715;</button>
+    </div>
+    <div id="toast" role="status"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
