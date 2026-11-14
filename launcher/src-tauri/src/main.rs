@@ -1,22 +1,28 @@
-// Launcher backend. It never copies, uploads or bundles game files: the folder the player picks is linked into the
-// work folder (a directory junction), and the game code is generated and compiled on this PC from that folder.
+// Launcher backend. It never uploads or bundles game files: the game code is generated and compiled on this PC from the
+// folder the player picks. Beside a source checkout that folder is linked into the work folder (a directory junction);
+// in the release zip the runtime's own setup copies or hard-links it into the install folder.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 /// Kirby and the Forgotten Land, any region build of the base game (main.npdm's program id).
 const PROGRAM_ID: u64 = 0x0100_4D30_0C5A_E000;
 const MODULES: [&str; 3] = ["main", "sdk", "subsdk0"];
 const SETTING_KEYS: [&str; 3] = ["fullscreen", "render_height", "volume"];
+/// The release runtime, next to the launcher in the zip.
+const PACKAGED_EXE: &str = "ForgottenLandRecomp.exe";
+/// Packaged mode: the folder the player picked, remembered until Build reads it.
+const PICKED_FILE: &str = "game-folder.txt";
 
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
+    #[default]
     Idle,
     Runtime,
     Image,
@@ -25,11 +31,79 @@ enum Phase {
     Failed,
 }
 
+#[derive(Default)]
 struct Job {
     phase: Phase,
+    /// Packaged mode: the runtime's own fraction of the whole setup.
+    progress: Option<f32>,
     error: String,
     child: Option<Child>,
     cancelled: bool,
+}
+
+/// Beside a source checkout: the runtime and the game code are built with make through MSYS2.
+struct Dev {
+    repo: PathBuf,
+    msys: PathBuf,
+}
+
+/// Decided once at startup from what sits next to the launcher.
+enum Mode {
+    Dev(Dev),
+    /// The release zip: the runtime and the tools it builds the game code with are next to the launcher, and the
+    /// install folder is the work folder (game files, saves, settings, logs).
+    Packaged,
+}
+
+impl Mode {
+    fn detect(exe_dir: &Path) -> Mode {
+        if exe_dir.join("lasgen").join("lasgen.exe").is_file() && exe_dir.join("zig").join("zig.exe").is_file() {
+            return Mode::Packaged;
+        }
+        Mode::Dev(Dev {
+            repo: find_repo(),
+            msys: std::env::var("KFL_MSYS2").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(r"C:\msys64")),
+        })
+    }
+}
+
+/// One stdout line of the runtime's `--setup` (runtime/main.c setup_headless).
+#[derive(Debug, PartialEq)]
+enum SetupLine {
+    Progress(Phase, f32),
+    Done,
+    Failed(String),
+}
+
+fn parse_setup_line(line: &str) -> Option<SetupLine> {
+    let mut w = line.split_whitespace();
+    match w.next()? {
+        "phase" => {
+            let phase = match w.next()? {
+                "looking" | "copying" | "image" => Phase::Image,
+                "reading" => Phase::Translate,
+                "compiling" | "finishing" => Phase::Compile,
+                _ => return None,
+            };
+            Some(SetupLine::Progress(phase, w.next()?.parse().ok()?))
+        }
+        "done" => Some(SetupLine::Done),
+        "failed" => Some(SetupLine::Failed(w.next().unwrap_or("").into())),
+        _ => None,
+    }
+}
+
+fn setup_failure(reason: &str) -> String {
+    match reason {
+        "not_found" => "No game files were found in that folder. Pick the folder that holds exefs and romfs.",
+        "package" => "Those are packed game files (.xci, .nsp). Extract them first (exefs and romfs).",
+        "version" => "That is not Kirby and the Forgotten Land.",
+        "copy" => "The game files could not be copied. Check the free disk space and try again.",
+        "tools" => "The game code builder is missing from this folder. Unzip the release again.",
+        "bad_image" => "The game data image (romfs.bin) cannot be read. Pick a folder with the romfs folder itself.",
+        _ => "The game code did not build. Open the setup log for the details.",
+    }
+    .into()
 }
 
 /// How the game ended, from its exit code and the end of game.log.
@@ -50,9 +124,8 @@ struct Crash {
 }
 
 struct App {
-    repo: PathBuf,
+    mode: Mode,
     work: PathBuf,
-    msys: PathBuf,
     job: Arc<Mutex<Job>>,
     game: Mutex<Option<Child>>,
     crash: Mutex<Option<Crash>>,
@@ -71,6 +144,7 @@ struct Status {
     error: String,
     settings: Vec<(String, String)>,
     crash: Option<Crash>,
+    packaged: bool,
 }
 
 fn find_repo() -> PathBuf {
@@ -200,10 +274,16 @@ impl App {
         self.work.join("extracted")
     }
     fn exe(&self) -> PathBuf {
-        self.work.join("build").join("lasrecomp.exe")
+        match self.mode {
+            Mode::Dev(_) => self.work.join("build").join("lasrecomp.exe"),
+            Mode::Packaged => self.work.join(PACKAGED_EXE),
+        }
     }
     fn lib(&self) -> PathBuf {
-        self.work.join("build").join("lasgame.dll")
+        match self.mode {
+            Mode::Dev(_) => self.work.join("build").join("lasgame.dll"),
+            Mode::Packaged => self.game().join("lasgame.dll"),
+        }
     }
     fn image(&self) -> PathBuf {
         self.game().join("romfs.bin")
@@ -211,51 +291,50 @@ impl App {
     fn ini(&self) -> PathBuf {
         self.work.join("larecomp.ini")
     }
-    fn tool_path(&self) -> String {
-        let old = std::env::var("PATH").unwrap_or_default();
-        format!("{};{};{old}", self.msys.join("ucrt64\\bin").display(), self.msys.join("usr\\bin").display())
+    fn built(&self) -> bool {
+        self.exe().is_file() && self.lib().is_file() && self.image().is_file()
+    }
+    /// The game files the player picked: the junction in developer mode, the remembered folder in packaged mode (or,
+    /// once that is forgotten, the install folder's own copy).
+    fn game_source(&self) -> Option<PathBuf> {
+        let set_up = self.game().join("exefs").is_dir().then(|| self.game());
+        match self.mode {
+            Mode::Dev(_) => set_up,
+            Mode::Packaged => fs::read_to_string(self.work.join(PICKED_FILE)).ok().map(|s| PathBuf::from(s.trim())).or(set_up),
+        }
     }
     fn tools_missing(&self) -> Vec<String> {
-        let mut missing = Vec::new();
-        for (name, path) in [
-            ("MSYS2 make", self.msys.join("usr\\bin\\make.exe")),
-            ("MSYS2 clang", self.msys.join("ucrt64\\bin\\clang.exe")),
-            ("Python environment (.venv)", self.repo.join(".venv\\Scripts\\python.exe")),
-        ] {
-            if !path.is_file() {
-                missing.push(name.to_string());
-            }
-        }
-        missing
+        let needed = match &self.mode {
+            Mode::Dev(dev) => vec![
+                ("MSYS2 make", dev.msys.join("usr\\bin\\make.exe")),
+                ("MSYS2 clang", dev.msys.join("ucrt64\\bin\\clang.exe")),
+                ("Python environment (.venv)", dev.repo.join(".venv\\Scripts\\python.exe")),
+            ],
+            Mode::Packaged => vec![
+                ("the game runtime (ForgottenLandRecomp.exe)", self.exe()),
+                ("the game code generator (lasgen)", self.work.join("lasgen\\lasgen.exe")),
+                ("the compiler (zig)", self.work.join("zig\\zig.exe")),
+                ("the game code headers (gamelib-src)", self.work.join("gamelib-src\\cpu.h")),
+                ("the runtime's import library (lasrecomp.dll.a)", self.work.join("lasrecomp.dll.a")),
+            ],
+        };
+        needed.into_iter().filter(|(_, path)| !path.is_file()).map(|(name, _)| name.to_string()).collect()
     }
-    // WORK relative to the repo, on one drive: the link line carries about 540 object paths, which only fit what Windows
-    // allows (Argument list too long) while WORK is a short relative path
-    fn work_from_repo(&self) -> PathBuf {
-        let repo = fs::canonicalize(&self.repo).unwrap_or(self.repo.clone());
-        let strip = |p: &Path| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase());
-        let (r, w) = (strip(&repo), strip(&self.work));
-        let (rc, wc): (Vec<_>, Vec<_>) = (r.components().collect(), w.components().collect());
-        if rc.first() != wc.first() {
-            return self.work.clone();
-        }
-        let same = rc.iter().zip(&wc).take_while(|(a, b)| a == b).count();
-        let mut rel = PathBuf::new();
-        (same..rc.len()).for_each(|_| rel.push(".."));
-        self.work.components().skip(same).for_each(|c| rel.push(c));
-        rel
-    }
-    fn make(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(self.msys.join("usr\\bin\\make.exe"));
-        // MSYS make wants forward slashes
-        let work = self.work_from_repo().to_string_lossy().replace('\\', "/");
-        c.current_dir(&self.repo).env("PATH", self.tool_path()).env("MSYSTEM", "UCRT64").arg(format!("WORK={work}")).args(args);
-        hide_window(&mut c);
+    /// The runtime, started in the work folder. Packaged mode pins its data root there: without it, a folder named
+    /// `extracted` next to the install folder would be taken for a source checkout's.
+    fn runtime(&self) -> Command {
+        let mut c = Command::new(self.exe());
+        c.current_dir(&self.work);
+        match &self.mode {
+            Mode::Dev(dev) => c.env("PATH", dev.tool_path()),
+            Mode::Packaged => c.env("LARECOMP_DATA_ROOT", &self.work),
+        };
         c
     }
     // returns at once when a valid image exists
     fn build_image(&self) -> Command {
-        let mut c = Command::new(self.exe());
-        c.args(["extracted", "--build-romfs"]).current_dir(&self.work).env("PATH", self.tool_path());
+        let mut c = self.runtime();
+        c.args(["extracted", "--build-romfs"]);
         hide_window(&mut c);
         c
     }
@@ -274,6 +353,37 @@ impl App {
     }
 }
 
+impl Dev {
+    fn tool_path(&self) -> String {
+        let old = std::env::var("PATH").unwrap_or_default();
+        format!("{};{};{old}", self.msys.join("ucrt64\\bin").display(), self.msys.join("usr\\bin").display())
+    }
+    // WORK relative to the repo, on one drive: the link line carries about 540 object paths, which only fit what Windows
+    // allows (Argument list too long) while WORK is a short relative path
+    fn work_from_repo(&self, work: &Path) -> PathBuf {
+        let repo = fs::canonicalize(&self.repo).unwrap_or(self.repo.clone());
+        let strip = |p: &Path| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase());
+        let (r, w) = (strip(&repo), strip(work));
+        let (rc, wc): (Vec<_>, Vec<_>) = (r.components().collect(), w.components().collect());
+        if rc.first() != wc.first() {
+            return work.to_path_buf();
+        }
+        let same = rc.iter().zip(&wc).take_while(|(a, b)| a == b).count();
+        let mut rel = PathBuf::new();
+        (same..rc.len()).for_each(|_| rel.push(".."));
+        work.components().skip(same).for_each(|c| rel.push(c));
+        rel
+    }
+    fn make(&self, work: &Path, args: &[&str]) -> Command {
+        let mut c = Command::new(self.msys.join("usr\\bin\\make.exe"));
+        // MSYS make wants forward slashes
+        let work = self.work_from_repo(work).to_string_lossy().replace('\\', "/");
+        c.current_dir(&self.repo).env("PATH", self.tool_path()).env("MSYSTEM", "UCRT64").arg(format!("WORK={work}")).args(args);
+        hide_window(&mut c);
+        c
+    }
+}
+
 #[cfg(windows)]
 fn hide_window(c: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -286,17 +396,21 @@ type St<'a> = tauri::State<'a, Arc<App>>;
 
 #[tauri::command]
 fn status(app: St) -> Status {
-    let game = app.game();
-    let (game_dir, game_error) = if game.join("exefs").is_dir() {
-        let shown = fs::canonicalize(&game).unwrap_or(game.clone());
-        (Some(shown.to_string_lossy().trim_start_matches(r"\\?\").to_string()), check_game(&game).err())
-    } else {
-        (None, None)
+    let built = app.built();
+    let (game_dir, game_error) = match app.game_source() {
+        Some(game) => {
+            let shown = fs::canonicalize(&game).unwrap_or(game.clone());
+            // packaged mode plays from its own copy: the picked folder may be gone once the game code is built
+            let check = !(built && matches!(app.mode, Mode::Packaged));
+            (Some(shown.to_string_lossy().trim_start_matches(r"\\?\").to_string()), check.then(|| check_game(&game).err()).flatten())
+        }
+        None => (None, None),
     };
     let running = app.poll_game();
     let job = app.job.lock().unwrap();
-    let progress = match job.phase {
-        Phase::Compile => {
+    let progress = match (&app.mode, job.phase) {
+        (Mode::Packaged, _) => job.progress,
+        (Mode::Dev(_), Phase::Compile) => {
             let total = count(&app.work.join("generated"), "c").max(1);
             Some(count(&app.work.join("build").join("obj"), "o") as f32 / total as f32)
         }
@@ -307,13 +421,14 @@ fn status(app: St) -> Status {
         game_dir,
         game_error,
         tools_missing: app.tools_missing(),
-        built: app.exe().is_file() && app.lib().is_file() && app.image().is_file(),
+        built,
         running,
         phase: job.phase,
         progress,
         error: job.error.clone(),
         settings: app.settings(),
         crash: app.crash.lock().unwrap().clone(),
+        packaged: matches!(app.mode, Mode::Packaged),
     }
 }
 
@@ -321,6 +436,9 @@ fn status(app: St) -> Status {
 fn set_game_dir(app: St, path: String) -> Result<(), String> {
     let src = PathBuf::from(path);
     check_game(&src)?;
+    if let Mode::Packaged = app.mode {
+        return fs::write(app.work.join(PICKED_FILE), src.to_string_lossy().as_bytes()).map_err(|e| e.to_string());
+    }
     let link = app.game();
     if fs::canonicalize(&link).ok() == fs::canonicalize(&src).ok() {
         return Ok(());
@@ -339,20 +457,50 @@ fn link_game_dir(link: &Path, src: &Path) -> Result<(), String> {
     junction::create(src, link).map_err(|e| e.to_string())
 }
 
+// Starts the step as the job's child and hands back its stdout when piped
+fn spawn_step(app: &App, phase: Phase, cmd: &mut Command) -> Result<Option<ChildStdout>, String> {
+    // the flag check and the registration share one lock hold, so a cancel never lands between spawn and registration
+    let mut job = app.job.lock().unwrap();
+    if job.cancelled {
+        return Err("Cancelled.".into());
+    }
+    let mut child = cmd.stdin(Stdio::null()).spawn().map_err(|e| format!("{cmd:?}: {e}"))?;
+    job.phase = phase;
+    let out = child.stdout.take();
+    job.child = Some(child);
+    Ok(out)
+}
+
 fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Result<(), String> {
     let out = log.try_clone().map_err(|e| e.to_string())?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let _ = writeln!(log, "\n== {cmd:?}");
-    {
-        // the flag check and the registration share one lock hold, so a cancel never lands between spawn and registration
-        let mut job = app.job.lock().unwrap();
-        if job.cancelled {
-            return Err("Cancelled.".into());
+    spawn_step(app, phase, cmd.stdout(out).stderr(err))?;
+    wait_step(app)
+}
+
+// Packaged mode's Build: the runtime's headless setup, its progress lines mapped onto the phases
+fn run_setup(app: &App, mut cmd: Command, log: &mut fs::File) -> Result<(), String> {
+    let err = log.try_clone().map_err(|e| e.to_string())?;
+    let _ = writeln!(log, "== {cmd:?}");
+    let out = spawn_step(app, Phase::Image, cmd.stdout(Stdio::piped()).stderr(err))?.ok_or("no setup output")?;
+    let mut end = None;
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+        match parse_setup_line(&line) {
+            Some(SetupLine::Progress(phase, fraction)) => {
+                let mut job = app.job.lock().unwrap();
+                (job.phase, job.progress) = (phase, Some(fraction));
+            }
+            other => end = other.or(end),
         }
-        let child = cmd.stdin(Stdio::null()).stdout(out).stderr(err).spawn().map_err(|e| format!("{cmd:?}: {e}"))?;
-        job.phase = phase;
-        job.child = Some(child);
     }
+    match (wait_step(app), end) {
+        (Err(_), Some(SetupLine::Failed(reason))) => Err(setup_failure(&reason)),
+        (result, _) => result,
+    }
+}
+
+fn wait_step(app: &App) -> Result<(), String> {
     loop {
         std::thread::sleep(std::time::Duration::from_millis(200));
         let mut job = app.job.lock().unwrap();
@@ -366,7 +514,8 @@ fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Re
 
 #[tauri::command]
 fn start_setup(app: St) -> Result<(), String> {
-    check_game(&app.game())?;
+    let game = app.game_source().ok_or("Select your game folder first.")?;
+    check_game(&game)?;
     let missing = app.tools_missing();
     if !missing.is_empty() {
         return Err(format!("Missing build tools: {}.", missing.join(", ")));
@@ -376,17 +525,26 @@ fn start_setup(app: St) -> Result<(), String> {
         if !matches!(job.phase, Phase::Idle | Phase::Failed) {
             return Ok(());
         }
-        *job = Job { phase: Phase::Runtime, error: String::new(), child: None, cancelled: false };
+        let phase = if let Mode::Packaged = app.mode { Phase::Image } else { Phase::Runtime };
+        *job = Job { phase, ..Job::default() };
     }
     let app = Arc::clone(&app);
     std::thread::spawn(move || {
         let jobs = format!("-j{}", std::thread::available_parallelism().map_or(4, |n| n.get()));
-        let result = fs::File::create(app.work.join("setup.log")).map_err(|e| e.to_string()).and_then(|mut log| {
-            let exe = format!("{}/build/lasrecomp.exe", app.work_from_repo().to_string_lossy().replace('\\', "/"));
-            run_step(&app, Phase::Runtime, app.make(&[&jobs, &exe]), &mut log)?;
-            run_step(&app, Phase::Image, app.build_image(), &mut log)?;
-            run_step(&app, Phase::Translate, app.make(&["gen"]), &mut log)?;
-            run_step(&app, Phase::Compile, app.make(&[&jobs]), &mut log)
+        let result = fs::File::create(app.work.join("setup.log")).map_err(|e| e.to_string()).and_then(|mut log| match &app.mode {
+            Mode::Dev(dev) => {
+                let exe = format!("{}/build/lasrecomp.exe", dev.work_from_repo(&app.work).to_string_lossy().replace('\\', "/"));
+                run_step(&app, Phase::Runtime, dev.make(&app.work, &[&jobs, &exe]), &mut log)?;
+                run_step(&app, Phase::Image, app.build_image(), &mut log)?;
+                run_step(&app, Phase::Translate, dev.make(&app.work, &["gen"]), &mut log)?;
+                run_step(&app, Phase::Compile, dev.make(&app.work, &[&jobs]), &mut log)
+            }
+            Mode::Packaged => {
+                let mut c = app.runtime();
+                c.arg("--setup").arg(&game);
+                hide_window(&mut c);
+                run_setup(&app, c, &mut log)
+            }
         });
         let mut job = app.job.lock().unwrap();
         match result {
@@ -430,10 +588,9 @@ fn play(app: St) -> Result<(), String> {
     }
     *app.crash.lock().unwrap() = None;
     let log = fs::File::create(app.work.join("game.log")).map_err(|e| e.to_string())?;
-    let child = Command::new(app.exe())
+    let child = app
+        .runtime()
         .args(["extracted", "--play"])
-        .current_dir(&app.work)
-        .env("PATH", app.tool_path())
         .env("LARECOMP_GAME_LIB", app.lib())
         .stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
@@ -481,13 +638,16 @@ fn open_path(app: St, which: String) -> Result<(), String> {
 }
 
 fn main() {
-    let repo = find_repo();
-    let work = std::env::var("KFL_WORK").map(PathBuf::from).unwrap_or_else(|_| repo.join("..").join("work").join("kfl"));
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).unwrap_or_default();
+    let mode = Mode::detect(&exe_dir);
+    let work = match &mode {
+        Mode::Dev(dev) => std::env::var("KFL_WORK").map(PathBuf::from).unwrap_or_else(|_| dev.repo.join("..").join("work").join("kfl")),
+        Mode::Packaged => exe_dir,
+    };
     let app = Arc::new(App {
         work: fs::canonicalize(&work).map(|p| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\"))).unwrap_or(work),
-        repo,
-        msys: std::env::var("KFL_MSYS2").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(r"C:\msys64")),
-        job: Arc::new(Mutex::new(Job { phase: Phase::Idle, error: String::new(), child: None, cancelled: false })),
+        mode,
+        job: Arc::new(Mutex::new(Job::default())),
         game: Mutex::new(None),
         crash: Mutex::new(None),
     });
@@ -503,15 +663,55 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn dev(repo: &str) -> Dev {
+        Dev { repo: repo.into(), msys: PathBuf::new() }
+    }
+
     fn app(repo: &str, work: &str) -> App {
-        App { repo: repo.into(), work: work.into(), msys: PathBuf::new(), job: Arc::new(Mutex::new(Job { phase: Phase::Idle, error: String::new(), child: None, cancelled: false })), game: Mutex::new(None), crash: Mutex::new(None) }
+        App { mode: Mode::Dev(dev(repo)), work: work.into(), job: Arc::new(Mutex::new(Job::default())), game: Mutex::new(None), crash: Mutex::new(None) }
     }
 
     #[test]
     fn work_from_repo_is_relative_on_one_drive() {
-        assert_eq!(app(r"E:\a\repo", r"E:\a\kfl-e2e").work_from_repo(), PathBuf::from(r"..\kfl-e2e"));
-        assert_eq!(app(r"E:\a\repo", r"E:\b\w").work_from_repo(), PathBuf::from(r"..\..\b\w"));
-        assert_eq!(app(r"E:\a\repo", r"D:\w").work_from_repo(), PathBuf::from(r"D:\w"));
+        assert_eq!(dev(r"E:\a\repo").work_from_repo(Path::new(r"E:\a\kfl-e2e")), PathBuf::from(r"..\kfl-e2e"));
+        assert_eq!(dev(r"E:\a\repo").work_from_repo(Path::new(r"E:\b\w")), PathBuf::from(r"..\..\b\w"));
+        assert_eq!(dev(r"E:\a\repo").work_from_repo(Path::new(r"D:\w")), PathBuf::from(r"D:\w"));
+    }
+
+    #[test]
+    fn the_bundled_tools_select_packaged_mode() {
+        let root = scratch("mode");
+        assert!(matches!(Mode::detect(&root), Mode::Dev(_)));
+        for tool in ["lasgen\\lasgen.exe", "zig\\zig.exe"] {
+            fs::create_dir_all(root.join(tool).parent().unwrap()).unwrap();
+            fs::write(root.join(tool), "").unwrap();
+        }
+        assert!(matches!(Mode::detect(&root), Mode::Packaged));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn setup_lines_map_onto_the_phases() {
+        assert_eq!(parse_setup_line("phase copying 0.010"), Some(SetupLine::Progress(Phase::Image, 0.01)));
+        assert_eq!(parse_setup_line("phase reading 0.200"), Some(SetupLine::Progress(Phase::Translate, 0.2)));
+        assert_eq!(parse_setup_line("phase finishing 0.990"), Some(SetupLine::Progress(Phase::Compile, 0.99)));
+        assert_eq!(parse_setup_line("done"), Some(SetupLine::Done));
+        assert_eq!(parse_setup_line("failed version"), Some(SetupLine::Failed("version".into())));
+        assert_eq!(parse_setup_line("[paths] Forgotten Land Recomp 0.1.0"), None);
+        assert_eq!(parse_setup_line("phase someday 0.5"), None);
+        assert!(setup_failure("version").contains("not Kirby"));
+    }
+
+    #[test]
+    fn a_failed_setup_reports_its_reason() {
+        let root = scratch("setupfail");
+        let app = app("", "");
+        let mut c = Command::new("cmd");
+        c.args(["/C", "echo phase compiling 0.500& echo failed copy& exit 1"]);
+        let r = run_setup(&app, c, &mut fs::File::create(root.join("log")).unwrap());
+        assert_eq!(r, Err(setup_failure("copy")));
+        assert_eq!(app.job.lock().unwrap().progress, Some(0.5));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     fn scratch(name: &str) -> PathBuf {

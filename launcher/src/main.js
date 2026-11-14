@@ -10,6 +10,7 @@ const PAGES = [
   ['settings', 'Settings'],
   ['about', 'About'],
 ];
+const PACKAGED_BUILD = 'Copies your game files into this folder (about 6 GB, or hard links on the same drive), then translates the game code and compiles it for this PC. The first build takes a long time.';
 const HEIGHTS = [['0', 'Match the window'], ['720', '720p'], ['1080', '1080p'], ['1440', '1440p'], ['2160', '4K']];
 
 const $ = (sel) => document.querySelector(sel);
@@ -103,9 +104,9 @@ const views = {
         <button class="btn" data-act="pick" ${busy(s) ? 'disabled' : ''}>Select game folder</button>`)}
       ${step(2, 'Build tools', !s.tools_missing.length, s.tools_missing.length
         ? `<p class="bad" role="alert">Missing: ${esc(s.tools_missing.join(', '))}. See the README for the install commands.</p>`
-        : '<p>MSYS2 clang, make and the Python environment are installed.</p>')}
+        : `<p>${s.packaged ? 'The bundled game code generator and compiler are in this folder.' : 'MSYS2 clang, make and the Python environment are installed.'}</p>`)}
       ${step(3, 'Game code', s.built, `
-        <p>${s.built ? 'The game code is built for this PC.' : 'Builds the runtime, writes a game data image of about 6 GB next to the romfs folder, then translates the game code from your files and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
+        <p>${s.built ? 'The game code is built for this PC.' : s.packaged ? PACKAGED_BUILD : 'Builds the runtime, writes a game data image of about 6 GB next to the romfs folder, then translates the game code from your files and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
         ${s.phase === 'failed' ? `<p class="bad" role="alert">${esc(s.error)}</p>` : ''}
         ${progress(s)}
         <div class="row">
