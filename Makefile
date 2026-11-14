@@ -250,7 +250,11 @@ dist: launcher
 	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"  # (in-game menu font, OFL)
 	cp third_party/fidelityfx/bin/amd_fidelityfx_vk.dll "$(DIST)/"  # (FSR 3.1, loaded at run time: without it, FSR 1)
 	cp LICENSE "$(DIST)/LICENSE.txt"
-	cp docs/release-README.txt "$(DIST)/README.txt"
+	# (the FFmpeg version and configure line it was built with: what the LGPL asks to make it rebuildable)
+	ffconf=$$(sed -n 's/^#define FFMPEG_CONFIGURATION "--prefix=[^ ]* \(.*\)"$$/  .\/configure --prefix=<prefix> \1/p' $(DW)/deps-win/src/ffmpeg/config.h); \
+	sed -e "s|__FFVER__|$$(cat $(DW)/deps-win/src/ffmpeg/RELEASE)|g" -e "s|__FFCONF__|$$ffconf|" docs/release-README.txt \
+	    > "$(DIST)/README.txt"
+	! grep '__[A-Z]*__' "$(DIST)/README.txt"
 	for exe in ForgottenLandRecomp ForgottenLandLauncher; do \
 	    PATH="$(DW)/deps-win/bin:$$PATH" ldd "$(DIST)/$$exe.exe" | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}'; \
 	done | sort -u | xargs -I{} cp -u {} "$(DIST)/"
