@@ -27,7 +27,8 @@ Reproduce the furthest point with `bash tools/run_scripted.sh <name> 170 "3400,5
 - 3D scenes run at about 30 fps, with long stalls the first time a pipeline is compiled.
 - Audio has only been checked for not crashing. Nobody has listened to it.
 - Input has only been tested through the scripted path, not with a real controller or keyboard.
-- One boot in four exited by itself with code 0 in an earlier session. It did not happen again in 44 later runs.
+- One boot in four exited by itself with code 0 in an earlier session. A restart path that did exactly that is
+  fixed, but nobody has shown it was the cause, and it did not happen again in 44 later runs.
 - The launcher's build can fail to link when the work folder is on another drive or behind a long path.
 - Closing the launcher during a build may leave the compile running.
 
@@ -44,7 +45,7 @@ Reproduce the furthest point with `bash tools/run_scripted.sh <name> 170 "3400,5
 
 - The frame time handed to the graphics code is 33.3 ms (30 fps). Kirby runs at 60.
 - Ambient occlusion runs at half strength, because a title-screen check is always true.
-- The built-in start screen and F12 menu still carry Let's Go options and text. The launcher starts the game with
-  `--play`, which skips the start screen.
-- The release packaging in the Makefile (`make dist`) is still named and laid out for Let's Go Recomp, and it has
-  not been run for this project.
+- The built-in start screen and F12 menu are letsgo-recomp's, with its graphics options (tuned for that game and
+  untested here). The launcher starts the game with `--play`, which skips the start screen.
+- The release packaging in the Makefile (`make dist`) has never been run for this project.
+- Many code comments still describe Let's Go behaviour.
