@@ -47,6 +47,8 @@ const actions = {
   'open-work': () => call('open_path', { which: 'work' }),
   'open-setup-log': () => call('open_path', { which: 'setup_log' }),
   'open-game-log': () => call('open_path', { which: 'game_log' }),
+  'open-crash-log': () => call('open_path', { which: 'crash_log' }),
+  'dismiss-crash': () => call('dismiss_crash'),
 };
 
 const busy = (s) => BUSY_PHASES.includes(s.phase);
@@ -62,6 +64,20 @@ function progress(s) {
   </div>`;
 }
 
+function crashCard(c) {
+  if (!c) return '';
+  return `<section class="card glass crash" role="alert">
+    <h2>The game stopped unexpectedly</h2>
+    <p class="bad">${esc(c.reason)}</p>
+    <p class="fine">Saved as <code>${esc(c.log)}</code></p>
+    <div class="row">
+      <button class="btn" data-act="open-crash-log">Open crash log</button>
+      <button class="btn quiet" data-act="open-work">Open work folder</button>
+      <button class="btn quiet" data-act="dismiss-crash">Dismiss</button>
+    </div>
+  </section>`;
+}
+
 const views = {
   home(s) {
     const a = primaryAction(s);
@@ -71,6 +87,7 @@ const views = {
         <button class="btn primary big" data-act="${a.act ?? ''}" ${a.act ? '' : 'disabled'} aria-busy="${!!a.busy}">${esc(a.label)}</button>
       </div>
       ${a.detail ? `<p class="detail glass" role="alert">${esc(a.detail)}</p>` : ''}
+      ${crashCard(s.crash)}
       ${progress(s)}
       <p class="fine">Bring your own copy of the game. Nothing here contains or shares game files.</p>
     </div>`;
