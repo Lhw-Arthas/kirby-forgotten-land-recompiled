@@ -166,9 +166,10 @@ HLE_FUNC("_ZN5movie6Buffer12SetInt32DataEi", buf_set_i32) { BUF(c->x[0])->i32 = 
 // user), user). Let's Go converts the decoded NV12 frames into its textures on the GPU, reading the output buffers
 // as GPU memory: they have to be in the game's heap (imported for the GPU) - the HLE heap reads back as zeros (a
 // green movie). Zelda never reads them on the GPU, so LAS ignored this.
-static uint64_t g_movie_alloc_fn, g_movie_alloc_user;
+static uint64_t g_movie_alloc_fn, g_movie_free_fn, g_movie_alloc_user;
 HLE_FUNC("_ZN5movie12SetAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", movie_set_allocator) {
     g_movie_alloc_fn = c->x[0];
+    g_movie_free_fn = c->x[1];
     g_movie_alloc_user = c->x[3];
     LOG("[movie] game allocator %llx\n", (unsigned long long)g_movie_alloc_fn);
 }
@@ -525,11 +526,14 @@ typedef struct {
     bool eos_pending;
     int64_t eos_time;
     bool stopped;  // Stop / destroyed: no more events (see dec_stop)
+    uint64_t free_fn, free_user;  // the game allocator the buffers came from (buf_put)
     pthread_mutex_t lock;
 } Decoder;
 
-// Input / output buffers live in the HLE heap, which only a reboot frees: buffers of destroyed decoders are kept
-// for the next movie (the title's attract loop replays the opening, ~37 MB of buffers per showing).
+// Input / output buffers in the HLE heap, which only a reboot frees, are kept for the next movie when their decoder is
+// destroyed (the title's attract loop replays the opening, ~37 MB of buffers per showing). Buffers from the game's
+// allocator go back to it: Kirby reuses that memory once the movie ends, and the next movie's packets and frames
+// written there overwrote its objects (a crash at a guide clip in the first stage).
 static struct { uint8_t *mem; uint32_t size; } g_buf_pool[64];
 static int g_nbuf_pool;
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -556,8 +560,15 @@ static uint8_t *buf_get(Cpu *c, uint32_t size) {
     }
     return hle_alloc(size);
 }
-static void buf_put(uint8_t *m, uint32_t size) {
+static void buf_put(Cpu *c, const Decoder *d, uint8_t *m, uint32_t size) {
     if (!m) return;
+    uint64_t a = (uint64_t)(uintptr_t)m;
+    if (a < HLE_HEAP || a >= HLE_HEAP + HLE_HEAP_SIZE) {
+        c->x[0] = a;
+        c->x[1] = d->free_user;
+        guest_call(c, d->free_fn);
+        return;
+    }
     pthread_mutex_lock(&g_pool_lock);
     if (g_nbuf_pool < 64) g_buf_pool[g_nbuf_pool++].mem = m, g_buf_pool[g_nbuf_pool - 1].size = size;
     pthread_mutex_unlock(&g_pool_lock);
@@ -611,6 +622,7 @@ static void dec_configure(Cpu *c) {
     d->channels = p->ch_layout.nb_channels;
     d->in_cap = d->video ? 4 << 20 : 256 << 10;
     d->out_cap = d->video ? (uint32_t)(d->stride * d->height * 3 / 2) : 64 << 10;
+    d->free_fn = g_movie_free_fn, d->free_user = g_movie_alloc_user;
     for (int i = 0; i < NIN; i++) d->in_mem[i] = buf_get(c, d->in_cap);
     for (int i = 0; i < NOUT; i++) d->out_mem[i] = buf_get(c, d->out_cap);
     LOG("[movie] decoder %s configured: %dx%d %d Hz %d ch\n", codec->name, d->width, d->height, d->sample_rate, d->channels);
@@ -952,8 +964,8 @@ static void dec_dtor(Cpu *c) {
     dec_stop(c);
     pthread_mutex_lock(&d->lock);
     if (d->ctx) avcodec_free_context(&d->ctx);
-    for (int i = 0; i < NIN; i++) buf_put(d->in_mem[i], d->in_cap), d->in_mem[i] = NULL;
-    for (int i = 0; i < NOUT; i++) buf_put(d->out_mem[i], d->out_cap), d->out_mem[i] = NULL;
+    for (int i = 0; i < NIN; i++) buf_put(c, d, d->in_mem[i], d->in_cap), d->in_mem[i] = NULL;
+    for (int i = 0; i < NOUT; i++) buf_put(c, d, d->out_mem[i], d->out_cap), d->out_mem[i] = NULL;
     for (int i = 0; i < d->npending; i++) av_frame_free(&d->pending[i]);
     d->npending = d->nready = 0;
     av_frame_free(&d->frame);
@@ -977,7 +989,7 @@ RT_ON_RESET(movie_reset) {
     }
     g_ex_vt = g_dec_vt = 0;
     g_nbuf_pool = 0;  // (the HLE heap and the game heap start over)
-    g_movie_alloc_fn = g_movie_alloc_user = 0;
+    g_movie_alloc_fn = g_movie_free_fn = g_movie_alloc_user = 0;
     g_skip_held = false, g_skip_pressed_at = 0;
 }
 
