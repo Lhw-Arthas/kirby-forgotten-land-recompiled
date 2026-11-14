@@ -198,52 +198,77 @@ $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico ru
 	@mkdir -p $(dir $@)
 	$(WINDRES) -I docs/icon -I runtime/platform -O coff $< -o $@
 
-# Windows release: build/dist/ForgottenLandRecomp-<version>-windows.zip, top folder "ForgottenLandRecomp/": ForgottenLandRecomp.exe, the
-# DLLs it loads (runs without MSYS2) and what its start screen builds the game code with on the player's machine
-# (runtime/gamebuild.c): the frozen generator (make gen-helper), zig (tools/fetch_zig.sh slimmed by tools/zig_slim.sh:
-# its runtime built ahead of time), gamelib-src/ and the exe's import library. No game code, no game files. The exe is
-# a release build in $(WIN_B): linked against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build) and
-# without a console window (RELEASE=1: the log goes to lasrecomp.log next to the exe). vulkan-1.dll is left out: every
-# Vulkan driver installs the loader in System32. Saves, settings, game files and mods go next to the exe at run time.
+# Windows release: $(DISTWORK)/ForgottenLandRecomp-<version>-Windows-x64.zip, top folder "ForgottenLandRecomp/":
+# ForgottenLandLauncher.exe (what the player starts: make launcher), ForgottenLandRecomp.exe (the runtime), the DLLs
+# they load (they run without MSYS2) and what the runtime's setup (`--setup`, runtime/gamesetup.c) builds the game code
+# with on the player's machine (runtime/gamebuild.c): the frozen generator (make gen-helper), zig (make zig, slimmed
+# by tools/zig_slim.sh: its runtime built ahead of time), gamelib-src/ and the exe's import library. Licences in
+# licenses/ (tools/dist_licenses.sh). No game code, no game files: both are checked below. The runtime is a release
+# build in $(WIN_B): linked against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build) and without a
+# console window (RELEASE=1). vulkan-1.dll is left out: every Vulkan driver installs the loader in System32. Game
+# files, saves, settings and logs go next to the exes at run time. Order: make deps-windows gen-helper zig dist.
 VERSION  := $(shell sed -n 's/^\#define RT_APP_VERSION "\(.*\)".*/\1/p' runtime/paths.h)
-DIST     := build/dist/ForgottenLandRecomp
-WIN_B    := build/win-release
+# DISTWORK: everything the release is built from or into (FFmpeg, the frozen generator, zig, the release runtime and
+# launcher, the staged folder, the zip), outside the repository like WORK
+DISTWORK ?= ../work/dist
+DW       := $(abspath $(DISTWORK))
+DIST     := $(DW)/stage/ForgottenLandRecomp
+WIN_B    := $(DW)/win-release
+ZIP      := $(DW)/ForgottenLandRecomp-$(VERSION)-Windows-x64.zip
 deps-windows:
-	tools/build_deps_windows.sh
-dist:
-	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
-	@[ -d build/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
-	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 EXE_NAME=ForgottenLandRecomp $(WIN_B)/ForgottenLandRecomp.exe
+	DISTWORK=$(DW) tools/build_deps_windows.sh
+zig:
+	DISTWORK=$(DW) tools/fetch_zig.sh
+
+# The launcher: its page built into it (tauri/custom-protocol, what `tauri build` adds: without it the exe loads the
+# dev server's URL), the C runtime linked statically (no Visual C++ redistributable needed). TMP: a Windows path for
+# MSVC's link.exe (an MSYS shell can hand it one it can't write to)
+launcher:
+	[ -d launcher/node_modules ] || (cd launcher && npm ci)
+	cd launcher && node node_modules/vite/bin/vite.js build --logLevel warn --emptyOutDir --outDir "$(DW)/launcher-web"
+	mkdir -p "$(DW)/tmp"
+	# (relative to src-tauri: an absolute E:/... would be read as a URL)
+	cd launcher/src-tauri && TAURI_CONFIG='{"build":{"frontendDist":"$(shell realpath -m --relative-to=launcher/src-tauri $(shell cygpath -u $(DW))/launcher-web)"}}' \
+	    TMP="$(shell cygpath -w $(DW)/tmp)" TEMP="$(shell cygpath -w $(DW)/tmp)" \
+	    RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --locked --features tauri/custom-protocol --target-dir "$(DW)/launcher-target"
+
+dist: launcher
+	@[ -f $(DW)/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
+	@[ -d $(DW)/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
+	@[ -x $(DW)/zig/zig.exe ] || { echo "make zig first (the compiler)"; exit 1; }
+	$(MAKE) B=$(WIN_B) DEPS=$(DW)/deps-win RELEASE=1 EXE_NAME=ForgottenLandRecomp $(WIN_B)/ForgottenLandRecomp.exe
 	! nm $(WIN_B)/ForgottenLandRecomp.exe | grep ' f_70' >/dev/null  # (no game code inside)
-	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
+	rm -rf $(DW)/stage "$(ZIP)" && mkdir -p "$(DIST)/gamelib-src"
 	cp $(WIN_B)/ForgottenLandRecomp.exe $(WIN_B)/lasrecomp.dll.a "$(DIST)/"
-	tools/zig_slim.sh $(GAMELIB_CFLAGS)  # (zig with its runtime built ahead of time)
-	cp -R build/helper/lasgen "$(DIST)/"
-	cp -R build/zig-slim "$(DIST)/zig"
+	cp $(DW)/launcher-target/release/kfl-recomp-launcher.exe "$(DIST)/ForgottenLandLauncher.exe"
+	DISTWORK=$(DW) tools/zig_slim.sh $(GAMELIB_CFLAGS)  # (zig with its runtime built ahead of time)
+	cp -R $(DW)/helper/lasgen "$(DIST)/"
+	cp -R $(DW)/zig-slim "$(DIST)/zig"
 	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
 	    "$(DIST)/gamelib-src/"
 	cp docs/icon/icon_1024.png "$(DIST)/icon.png"  # (window icon)
 	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"  # (in-game menu font, OFL)
-	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
 	cp third_party/fidelityfx/bin/amd_fidelityfx_vk.dll "$(DIST)/"  # (FSR 3.1, loaded at run time: without it, FSR 1)
-	cp third_party/fidelityfx/LICENSE.txt "$(DIST)/FidelityFX-LICENSE.txt"
 	cp LICENSE "$(DIST)/LICENSE.txt"
-	cp LICENSE-LASRecomp "$(DIST)/LICENSE-LASRecomp.txt"
 	cp docs/release-README.txt "$(DIST)/README.txt"
-	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/ForgottenLandRecomp.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
-	    xargs -I{} cp -u {} "$(DIST)/"
+	for exe in ForgottenLandRecomp ForgottenLandLauncher; do \
+	    PATH="$(DW)/deps-win/bin:$$PATH" ldd "$(DIST)/$$exe.exe" | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}'; \
+	done | sort -u | xargs -I{} cp -u {} "$(DIST)/"
+	DISTWORK=$(DW) PY=$(abspath $(PY)) tools/dist_licenses.sh "$(DIST)"
 	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
-	cd build/dist && zip -qr "ForgottenLandRecomp-$(VERSION)-windows.zip" ForgottenLandRecomp
-	@echo "build/dist/ForgottenLandRecomp-$(VERSION)-windows.zip"
+	! find "$(DIST)" -iname '*.nso' -o -iname '*.nca' -o -iname '*.nsp' -o -iname '*.xci' -o -iname '*.keys' \
+	    -o -iname 'romfs*' -o -iname 'exefs' -o -iname 'lasgame.*' -o -iname 'generated' | grep .  # (nothing of the game)
+	cd $(DW)/stage && $(abspath $(PY)) -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', '.', 'ForgottenLandRecomp')" \
+	    "$(basename $(ZIP))"
+	@echo "$(ZIP)"
 
-# The game code generator as a standalone helper, so players need no Python (tools/lasgen.spec): build/helper/lasgen/,
-# shipped as lasgen/ next to the exe. The start screen's setup runs it on the player's own game files.
+# The game code generator as a standalone helper, so players need no Python (tools/lasgen.spec): $(DW)/helper/lasgen/,
+# shipped as lasgen/ next to the exe. The runtime's setup runs it on the player's own game files.
 gen-helper:
 	USERPROFILE="$$(cygpath -w ~ 2>/dev/null || echo $$HOME)" \
-	$(PY) -m PyInstaller --noconfirm --clean --log-level WARN --distpath build/helper --workpath build/pyinstaller \
+	$(PY) -m PyInstaller --noconfirm --clean --log-level WARN --distpath $(DW)/helper --workpath $(DW)/pyinstaller \
 	    tools/lasgen.spec
-	$(PY) tools/pe_no_cfg.py build/helper/lasgen/lasgen.exe
-	@du -sh build/helper/lasgen
+	$(PY) tools/pe_no_cfg.py $(DW)/helper/lasgen/lasgen.exe
+	@du -sh $(DW)/helper/lasgen
 
-.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper
+.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper zig launcher
