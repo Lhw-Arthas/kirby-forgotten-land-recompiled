@@ -10,6 +10,7 @@ const PAGES = [
   ['settings', 'Settings'],
   ['about', 'About'],
 ];
+const PACKAGED_BUILD = 'Copies your game files into this folder (about 6 GB, or hard links on the same drive), then translates the game code and compiles it for this PC. The first build takes a long time.';
 const HEIGHTS = [['0', 'Match the window'], ['720', '720p'], ['1080', '1080p'], ['1440', '1440p'], ['2160', '4K']];
 
 const $ = (sel) => document.querySelector(sel);
@@ -47,6 +48,8 @@ const actions = {
   'open-work': () => call('open_path', { which: 'work' }),
   'open-setup-log': () => call('open_path', { which: 'setup_log' }),
   'open-game-log': () => call('open_path', { which: 'game_log' }),
+  'open-crash-log': () => call('open_path', { which: 'crash_log' }),
+  'dismiss-crash': () => call('dismiss_crash'),
 };
 
 const busy = (s) => BUSY_PHASES.includes(s.phase);
@@ -55,11 +58,25 @@ function progress(s) {
   if (!busy(s)) return '';
   const pct = s.progress == null ? null : Math.min(100, Math.round(s.progress * 100));
   return `<div class="task glass">
-    <span class="task-msg">${esc(PHASE_LABEL[s.phase])}</span>
+    <span class="task-msg">${esc(PHASE_LABEL[s.phase])}${s.detail ? ` ${esc(s.detail)}` : ''}</span>
     <span class="task-pct">${pct == null ? '' : `${pct}%`}</span>
     <progress max="100" ${pct == null ? '' : `value="${pct}"`}></progress>
     <button class="btn sm" data-act="cancel">Cancel</button>
   </div>`;
+}
+
+function crashCard(c) {
+  if (!c) return '';
+  return `<section class="card glass crash" role="alert">
+    <h2>The game stopped unexpectedly</h2>
+    <p class="bad">${esc(c.reason)}</p>
+    <p class="fine">Saved as <code>${esc(c.log)}</code></p>
+    <div class="row">
+      <button class="btn" data-act="open-crash-log">Open crash log</button>
+      <button class="btn quiet" data-act="open-work">Open work folder</button>
+      <button class="btn quiet" data-act="dismiss-crash">Dismiss</button>
+    </div>
+  </section>`;
 }
 
 const views = {
@@ -71,6 +88,7 @@ const views = {
         <button class="btn primary big" data-act="${a.act ?? ''}" ${a.act ? '' : 'disabled'} aria-busy="${!!a.busy}">${esc(a.label)}</button>
       </div>
       ${a.detail ? `<p class="detail glass" role="alert">${esc(a.detail)}</p>` : ''}
+      ${crashCard(s.crash)}
       ${progress(s)}
       <p class="fine">Bring your own copy of the game. Nothing here contains or shares game files.</p>
     </div>`;
@@ -86,9 +104,9 @@ const views = {
         <button class="btn" data-act="pick" ${busy(s) ? 'disabled' : ''}>Select game folder</button>`)}
       ${step(2, 'Build tools', !s.tools_missing.length, s.tools_missing.length
         ? `<p class="bad" role="alert">Missing: ${esc(s.tools_missing.join(', '))}. See the README for the install commands.</p>`
-        : '<p>MSYS2 clang, make and the Python environment are installed.</p>')}
+        : `<p>${s.packaged ? 'The bundled game code generator and compiler are in this folder.' : 'MSYS2 clang, make and the Python environment are installed.'}</p>`)}
       ${step(3, 'Game code', s.built, `
-        <p>${s.built ? 'The game code is built for this PC.' : 'Builds the runtime, writes a game data image of about 6 GB next to the romfs folder, then translates the game code from your files and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
+        <p>${s.built ? 'The game code is built for this PC.' : s.packaged ? PACKAGED_BUILD : 'Builds the runtime, writes a game data image of about 6 GB next to the romfs folder, then translates the game code from your files and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
         ${s.phase === 'failed' ? `<p class="bad" role="alert">${esc(s.error)}</p>` : ''}
         ${progress(s)}
         <div class="row">

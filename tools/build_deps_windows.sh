@@ -1,15 +1,15 @@
 #!/bin/bash
 # make deps-windows (MSYS2 UCRT64 shell): what the shipped Windows build links against instead of MSYS2's packages,
-# built from pinned sources into build/deps-win. MSYS2's FFmpeg is a GPLv3 build (x264, x265, xvid, ...); the
+# built from pinned sources into $DISTWORK/deps-win (outside the repository). MSYS2's FFmpeg is a GPLv3 build (x264, x265, xvid, ...); the
 # release uses an LGPL-only FFmpeg with just what the game's movies need - WebM: VP9 video + Vorbis audio, plus
 # VP8 / Opus / H.264 / AAC in WebM or MP4 - and swscale. swresample stays: FFmpeg's Opus decoder depends on it (without it
 # configure drops Opus silently, and Let's Go's music and sound effects - hwopus - need it). Checked below.
 # SDL3 (zlib licence) and the compiler runtime DLLs still come from MSYS2.
 # Needs: the packages from tools/setup_windows.ps1 (clang, make, nasm). Skipped when its output exists
-# (delete build/deps-win to redo).
+# (delete $DISTWORK/deps-win to redo).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-P=$PWD/build/deps-win
+P=${DISTWORK:?run it through make deps-windows}/deps-win
 S=$P/src
 mkdir -p "$S"
 JOBS=$(nproc)

@@ -128,7 +128,17 @@ static float g_phase0, g_phase1;
 static void copy_progress(uint64_t done, uint64_t total) {
     if (total) g_progress = g_phase0 + (g_phase1 - g_phase0) * (float)((double)done / (double)total);
 }
+static pthread_mutex_t g_step_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_step[200];
+void setup_step(char *out, size_t n) {
+    pthread_mutex_lock(&g_step_lock);
+    snprintf(out, n, "%s", g_step);
+    pthread_mutex_unlock(&g_step_lock);
+}
 static void build_progress(double f, const char *step) {
+    pthread_mutex_lock(&g_step_lock);
+    snprintf(g_step, sizeof g_step, "%s", step);
+    pthread_mutex_unlock(&g_step_lock);
     g_progress = 0.15f + 0.85f * (float)f;
     g_state = !strncmp(step, "Reading", 7) ? SETUP_READING : !strncmp(step, "Finishing", 9) ? SETUP_FINISHING
                                                                                            : SETUP_COMPILING;

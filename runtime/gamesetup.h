@@ -4,6 +4,7 @@
 // (runtime/gamebuild.c). Runs on a background thread; the launcher polls its state.
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,8 @@ void setup_start(const char *folder);
 int setup_state(void);         // SETUP_*
 float setup_progress(void);    // 0..1 while running
 bool setup_running(void);
+// What the game code build is doing, in words (runtime/gamebuild.c; with the file that takes longest, once it is slow).
+void setup_step(char *out, size_t n);
 
 #ifdef __cplusplus
 }

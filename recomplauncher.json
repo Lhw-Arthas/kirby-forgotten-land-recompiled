@@ -1,0 +1,76 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Forgotten Land Recomp",
+  "repo": "scarxity/kirby-forgotten-land-recompiled",
+  "game": {
+    "kind": "folder",
+    "label": "The folder with the exefs and romfs you extracted from your own copy of Kirby and the Forgotten Land for Nintendo Switch, version 1.0.0.",
+    "check": { "nup_build_id": "d9ba7db72ffafecd07f5f5535dec05734e59bce1" }
+  },
+  "prepare": {
+    "program": ["ForgottenLandRecomp.exe"],
+    "args": ["--prepare", "{game}"],
+    "label": "Translating the game code from your copy and compiling it for this PC. About 15 minutes, and about 6 GB of disk.",
+    "timeout": 7200
+  },
+  "start": {
+    "program": ["ForgottenLandRecomp.exe"],
+    "args": ["extracted", "--play"],
+    "env": { "LARECOMP_DATA_ROOT": "{install}" }
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{install}/larecomp.ini" }]
+    }
+  ],
+  "settings": [
+    {
+      "id": "window", "label": "Window",
+      "help": "Fullscreen fills your screen. Windowed opens the game in a window.",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "0" } },
+        { "label": "Fullscreen", "set": { "fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0" }
+    },
+    {
+      "id": "resolution", "label": "Resolution",
+      "help": "What the game draws at. Match the window follows the window's size. 4K needs a fast graphics card.",
+      "choices": [
+        { "label": "Match the window", "set": { "render_height": "0" } },
+        { "label": "720p", "set": { "render_height": "720" } },
+        { "label": "1080p", "set": { "render_height": "1080" } },
+        { "label": "1440p", "set": { "render_height": "1440" } },
+        { "label": "4K", "set": { "render_height": "2160" } }
+      ],
+      "defaults": { "render_height": "0" }
+    },
+    {
+      "id": "volume", "label": "Volume",
+      "help": "How loud the game is.",
+      "slider": { "key": "volume", "min": 0, "max": 1, "step": 0.05, "format": "%.2f" }
+    }
+  ],
+  "saves": ["{install}/save"],
+  "folders": {
+    "saves": [{ "path": "{install}/save" }],
+    "logs": [{ "path": "{install}" }]
+  },
+  "exit_codes": {
+    "8": "No exefs and romfs were found in that folder. Pick the folder you extracted them into.",
+    "9": "That folder holds a game package (.nsp or .xci), not extracted files. Extract its exefs and romfs first.",
+    "10": "That is not Kirby and the Forgotten Land.",
+    "11": "The game files could not be copied. Check that the disk has about 6.5 GB free.",
+    "12": "The game code did not build. The log in the game's folder says why.",
+    "13": "The build tools are missing from this copy. Install the recomp again.",
+    "14": "The game data image (romfs.bin) could not be read. Extract the romfs again."
+  },
+  "looks": { "graphics": "vulkan" },
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your save data.", "open": "saves" },
+    { "id": "logs", "label": "Logs", "help": "The game's log, to send when something breaks.", "open": "logs" }
+  ]
+}
