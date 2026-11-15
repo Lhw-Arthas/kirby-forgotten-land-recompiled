@@ -1,5 +1,5 @@
 // Game file setup (runtime/gamesetup.h). The picked folder is searched a few levels deep (dump tools nest the files):
-// exefs/ is the folder with main and main.npdm, the RomFS either a romfs.bin image or the folder with bin/message.
+// exefs/ is the folder with main and main.npdm, the RomFS either a romfs.bin image or the folder with msg/ and gfx/.
 // exefs/ is copied into <data root>/extracted (hard links where the file system allows), the RomFS image is copied
 // or built (runtime/romfs_build.c), then the game code is recompiled from exefs/ (runtime/gamebuild.c).
 #include "gamesetup.h"
@@ -85,6 +85,14 @@ bool setup_needs_build(void) {
 
 typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
 
+static bool is_romfs(const char *dir) {  // Kirby's RomFS: its top level holds msg/ and gfx/
+    char p[1100];
+    snprintf(p, sizeof p, "%s/msg", dir);
+    if (!is_dir(p)) return false;
+    snprintf(p, sizeof p, "%s/gfx", dir);
+    return is_dir(p);
+}
+
 static void find_game(const char *dir, int depth, Found *f) {
     if (depth > 5 || (f->exefs[0] && (f->romfs[0] || f->romfs_bin[0]))) return;
     char p[1100];
@@ -93,14 +101,13 @@ static void find_game(const char *dir, int depth, Found *f) {
         snprintf(p, sizeof p, "%s/main", dir);
         if (is_file(p)) snprintf(f->exefs, sizeof f->exefs, "%s", dir);
     }
-    snprintf(p, sizeof p, "%s/bin/message", dir);
-    if (!f->romfs[0] && is_dir(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
+    bool romfs = is_romfs(dir);
+    if (romfs && !f->romfs[0]) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
     snprintf(p, sizeof p, "%s/romfs.bin", dir);
     if (!f->romfs_bin[0] && is_file(p)) snprintf(f->romfs_bin, sizeof f->romfs_bin, "%s", p);
+    if (romfs) return;  // (a huge tree with nothing to find in it)
     DIR *d = opendir(dir);
     if (!d) return;
-    char sub[64][256];
-    int nsub = 0;
     for (struct dirent *e; (e = readdir(d));) {
         const char *n = e->d_name;
         if (n[0] == '.') continue;
@@ -114,13 +121,9 @@ static void find_game(const char *dir, int depth, Found *f) {
                 f->package = true;
         }
         snprintf(p, sizeof p, "%s/%s", dir, n);
-        if (nsub < 64 && strcmp(n, "bin") && is_dir(p)) snprintf(sub[nsub++], sizeof sub[0], "%s", n);
+        if (is_dir(p)) find_game(p, depth + 1, f);
     }
     closedir(d);
-    for (int i = 0; i < nsub; i++) {
-        snprintf(p, sizeof p, "%s/%s", dir, sub[i]);
-        find_game(p, depth + 1, f);
-    }
 }
 
 // The search and the verdict, shared by the setup and --check: SETUP_IDLE when the folder holds the game, else the failure.
@@ -203,7 +206,7 @@ static void *setup_thread(void *arg) {
     g_state = SETUP_COPYING;
     g_phase0 = 0, g_phase1 = 0.01f;
     bool ok = true;
-    if (!strcmp(f.exefs, f.romfs)) {  // (a flat dump, main next to bin/: only the six code files, not the whole RomFS)
+    if (!strcmp(f.exefs, f.romfs)) {  // (a flat dump, main next to msg/ and gfx/: only the six code files, not the whole RomFS)
         static const char *const code[] = {"main", "main.npdm", "rtld", "sdk", "subsdk0"};
         mkdir(ROOT "/exefs", 0755);
         for (size_t i = 0; ok && i < sizeof code / sizeof *code; i++) {
