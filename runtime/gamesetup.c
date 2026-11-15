@@ -123,6 +123,31 @@ static void find_game(const char *dir, int depth, Found *f) {
     }
 }
 
+// The search and the verdict, shared by the setup and --check: SETUP_IDLE when the folder holds the game, else the failure.
+static int find_verdict(const char *folder, Found *f) {
+    find_game(folder, 0, f);
+    LOG("[setup] %s: exefs %s, romfs %s, romfs.bin %s\n", folder, f->exefs[0] ? f->exefs : "-", f->romfs[0] ? f->romfs : "-",
+        f->romfs_bin[0] ? f->romfs_bin : "-");
+    if (!f->exefs[0] || (!f->romfs[0] && !f->romfs_bin[0])) return f->package ? SETUP_FAIL_PACKAGE : SETUP_FAIL_NOT_FOUND;
+    if (!game_ok(f->exefs)) return SETUP_FAIL_VERSION;
+    // (the picked folder can't be our own copy: setting up again deletes that first)
+    char a[4096], b[4096];
+    if (realpath(f->exefs, a) && realpath(ROOT, b) && !strncmp(a, b, strlen(b))) return SETUP_FAIL_NOT_FOUND;
+    return SETUP_IDLE;
+}
+
+static void slashes(char *path) {
+    for (char *c = path; *c; c++) if (*c == '\\') *c = '/';
+}
+
+int setup_check(const char *folder) {
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", folder);
+    slashes(dir);
+    Found f = {0};
+    return find_verdict(dir, &f);
+}
+
 // progress: copying + the image are the first 15%, the game code the rest
 static float g_phase0, g_phase1;
 static void copy_progress(uint64_t done, uint64_t total) {
@@ -169,20 +194,10 @@ static void *setup_thread(void *arg) {
     }
     g_state = SETUP_LOOKING;
     Found f = {0};
-    find_game(g_folder, 0, &f);
-    LOG("[setup] %s: exefs %s, romfs %s, romfs.bin %s\n", g_folder, f.exefs[0] ? f.exefs : "-", f.romfs[0] ? f.romfs : "-",
-        f.romfs_bin[0] ? f.romfs_bin : "-");
-    if (!f.exefs[0] || (!f.romfs[0] && !f.romfs_bin[0])) g_state = f.package ? SETUP_FAIL_PACKAGE : SETUP_FAIL_NOT_FOUND;
-    else if (!game_ok(f.exefs)) g_state = SETUP_FAIL_VERSION;
-    else {
-        // (the picked folder can't be our own copy: setting up again deletes that first)
-        char a[4096], b[4096];
-        mkdir(ROOT, 0755);
-        if (realpath(f.exefs, a) && realpath(ROOT, b) && !strncmp(a, b, strlen(b)))
-            snprintf(f.exefs, sizeof f.exefs, "%s", ""), g_state = SETUP_FAIL_NOT_FOUND;
-    }
-    if (g_state >= SETUP_FAIL_NOT_FOUND) { g_running = false; return NULL; }
+    int verdict = find_verdict(g_folder, &f);
+    if (verdict != SETUP_IDLE) { g_state = verdict; g_running = false; return NULL; }
 
+    mkdir(ROOT, 0755);
     rt_remove_game_files(ROOT);  // (an earlier or interrupted setup's)
     mkdir(ROOT, 0755);
     g_state = SETUP_COPYING;
@@ -223,7 +238,7 @@ static void *setup_thread(void *arg) {
 void setup_start(const char *folder) {
     if (g_running) return;
     snprintf(g_folder, sizeof g_folder, "%s", folder ? folder : "");
-    for (char *c = g_folder; *c; c++) if (*c == '\\') *c = '/';
+    slashes(g_folder);
     g_running = true;
     g_state = SETUP_LOOKING;
     pthread_t t;

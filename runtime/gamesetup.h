@@ -36,6 +36,9 @@ bool setup_ready(void);
 bool setup_needs_build(void);
 // Starts a setup from the picked folder (NULL: only rebuild the game code from files set up already).
 void setup_start(const char *folder);
+// Whether the folder holds the game, as a setup would find it, changing nothing: SETUP_IDLE when it does, else the
+// SETUP_FAIL_NOT_FOUND / _PACKAGE / _VERSION reason. Blocks while it searches.
+int setup_check(const char *folder);
 int setup_state(void);         // SETUP_*
 float setup_progress(void);    // 0..1 while running
 bool setup_running(void);
