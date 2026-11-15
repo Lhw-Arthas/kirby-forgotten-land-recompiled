@@ -60,7 +60,7 @@
     "logs": [{ "path": "{install}" }]
   },
   "exit_codes": {
-    "8": "No exefs and romfs were found in that folder. Pick the folder you extracted them into.",
+    "8": "No exefs and romfs were found in that folder. The exefs holds main and main.npdm, the romfs holds the folders msg and gfx. Pick the folder you extracted them into.",
     "9": "That folder holds a game package (.nsp or .xci), not extracted files. Extract its exefs and romfs first.",
     "10": "That is not Kirby and the Forgotten Land.",
     "11": "The game files could not be copied. Check that the disk has about 6.5 GB free.",

@@ -69,7 +69,7 @@ impl Mode {
     }
 }
 
-/// One stdout line of the runtime's `--setup` (runtime/main.c setup_headless).
+/// One stdout line of the runtime's `--setup` (runtime/main.c setup_headless) or `--check`.
 #[derive(Debug, PartialEq)]
 enum SetupLine {
     Progress(Phase, f32, Option<String>),
@@ -91,7 +91,7 @@ fn parse_setup_line(line: &str) -> Option<SetupLine> {
             let detail = w.collect::<Vec<_>>().join(" ");
             Some(SetupLine::Progress(phase, fraction, (!detail.is_empty()).then_some(detail)))
         }
-        "done" => Some(SetupLine::Done),
+        "done" | "ok" => Some(SetupLine::Done),
         "failed" => Some(SetupLine::Failed(w.next().unwrap_or("").into())),
         _ => None,
     }
@@ -99,7 +99,7 @@ fn parse_setup_line(line: &str) -> Option<SetupLine> {
 
 fn setup_failure(reason: &str) -> String {
     match reason {
-        "not_found" => "No game files were found in that folder. Pick the folder that holds exefs and romfs.",
+        "not_found" => "No game files were found in that folder. It needs your extracted exefs (it holds main and main.npdm) and romfs (it holds the folders msg and gfx), in it or in folders inside it.",
         "package" => "Those are packed game files (.xci, .nsp). Extract them first (exefs and romfs).",
         "version" => "That is not Kirby and the Forgotten Land.",
         "copy" => "The game files could not be copied. Check the free disk space and try again.",
@@ -189,6 +189,23 @@ fn check_game(dir: &Path) -> Result<(), String> {
         Some(PROGRAM_ID) => Ok(()),
         Some(id) => Err(format!("These files are another game (program id {id:016X}).")),
         None => Err("exefs\\main.npdm is missing or unreadable.".into()),
+    }
+}
+
+/// Packaged mode: the runtime's own search decides (`--check`), so the launcher never disagrees with the setup.
+fn runtime_check(app: &App, dir: &Path) -> Result<(), String> {
+    let mut c = app.runtime();
+    c.arg("--check").arg(dir).stderr(Stdio::null());
+    hide_window(&mut c);
+    let out = c.output().map_err(|e| format!("Could not check that folder: {e}"))?;
+    check_verdict(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn check_verdict(stdout: &str) -> Result<(), String> {
+    match stdout.lines().find_map(parse_setup_line) {
+        Some(SetupLine::Done) => Ok(()),
+        Some(SetupLine::Failed(reason)) => Err(setup_failure(&reason)),
+        _ => Err("The game runtime could not check that folder.".into()),
     }
 }
 
@@ -405,8 +422,8 @@ fn status(app: St) -> Status {
     let (game_dir, game_error) = match app.game_source() {
         Some(game) => {
             let shown = fs::canonicalize(&game).unwrap_or(game.clone());
-            // packaged mode plays from its own copy: the picked folder may be gone once the game code is built
-            let check = !(built && matches!(app.mode, Mode::Packaged));
+            // packaged mode asks the runtime, a process: once when the folder is picked and again by the setup itself
+            let check = matches!(app.mode, Mode::Dev(_));
             (Some(shown.to_string_lossy().trim_start_matches(r"\\?\").to_string()), check.then(|| check_game(&game).err()).flatten())
         }
         None => (None, None),
@@ -438,10 +455,14 @@ fn status(app: St) -> Status {
     }
 }
 
-#[tauri::command]
+// (async: the runtime's search of a big folder must not freeze the window)
+#[tauri::command(async)]
 fn set_game_dir(app: St, path: String) -> Result<(), String> {
     let src = PathBuf::from(path);
-    check_game(&src)?;
+    match app.mode {
+        Mode::Dev(_) => check_game(&src)?,
+        Mode::Packaged => runtime_check(&app, &src)?,
+    }
     if let Mode::Packaged = app.mode {
         return fs::write(app.work.join(PICKED_FILE), src.to_string_lossy().as_bytes()).map_err(|e| e.to_string());
     }
@@ -521,7 +542,9 @@ fn wait_step(app: &App) -> Result<(), String> {
 #[tauri::command]
 fn start_setup(app: St) -> Result<(), String> {
     let game = app.game_source().ok_or("Select your game folder first.")?;
-    check_game(&game)?;
+    if let Mode::Dev(_) = app.mode {
+        check_game(&game)?;
+    }
     let missing = app.tools_missing();
     if !missing.is_empty() {
         return Err(format!("Missing build tools: {}.", missing.join(", ")));
@@ -710,6 +733,15 @@ mod tests {
         assert_eq!(parse_setup_line("[paths] Forgotten Land Recomp 0.1.0"), None);
         assert_eq!(parse_setup_line("phase someday 0.5"), None);
         assert!(setup_failure("version").contains("not Kirby"));
+    }
+
+    #[test]
+    fn the_runtime_check_decides_the_folder() {
+        assert_eq!(check_verdict("ok\r\n"), Ok(()));
+        assert_eq!(check_verdict("[paths] Forgotten Land Recomp 0.2.0\nfailed not_found\n"), Err(setup_failure("not_found")));
+        assert_eq!(check_verdict("failed version\n"), Err(setup_failure("version")));
+        assert!(check_verdict("").is_err());
+        assert!(setup_failure("not_found").contains("msg and gfx"));
     }
 
     #[test]
