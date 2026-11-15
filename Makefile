@@ -276,4 +276,8 @@ gen-helper:
 	$(PY) tools/pe_no_cfg.py $(DW)/helper/lasgen/lasgen.exe
 	@du -sh $(DW)/helper/lasgen
 
-.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper zig launcher
+# The runtime's search for the game files, on synthetic dumps (tools/test_find_game.sh): make test-find-game
+test-find-game: $(EXE)
+	bash tools/test_find_game.sh $(EXE)
+
+.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper zig launcher test-find-game

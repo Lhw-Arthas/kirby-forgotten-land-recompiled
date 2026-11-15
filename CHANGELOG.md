@@ -2,6 +2,37 @@
 
 Versions are tagged `vX.Y.Z`. Small fixes bump the last number; features and large fixes bump the middle one.
 
+## 0.2.0
+
+**0.1.1 could not be set up from a normal dump. This version fixes that.** The game is still not playable: it has
+only been run through the opening and the start of the first stage.
+
+No game files and no game code are included. The zip holds tools only; the game code is built on your PC from your
+own extracted copy (base game, v1.0.0).
+
+### Fixed
+- "No game files were found in that folder" for a folder that holds `exefs` and `romfs`
+  ([#4](https://github.com/scarxity/kirby-forgotten-land-recompiled/issues/4)). The setup looked for a folder that
+  this game's data does not have, so only a folder with a ready-made `romfs.bin` was accepted
+- The launcher refused folders the setup accepts: `exefs` and `romfs` under other names, or one level further down
+- A folder with more than 64 folders in it (a Downloads folder) could hide the game from the search
+
+### Changed
+- The launcher and the setup now use one search, so they always agree on a folder
+- The "no game files" message says what a valid folder holds: `exefs` with `main` and `main.npdm`, `romfs` with the
+  folders `msg` and `gfx`
+
+### Added
+- `--check <folder>` in the runtime: says whether a folder holds the game, without changing anything
+
+### Known issues
+- Each tutorial clip's window stays black for its first few seconds
+- Frame generation does not work: leave it off
+- Online features do not work: choose "Do Not Use" at the prompt
+- Performance: about 30 fps in 3D, with pauses while graphics pipelines compile
+- Only extracted `exefs` and `romfs` folders are accepted, not `.nsp` or `.xci` files
+- After unzipping a new version over an old one, build the game code again from the Set up page
+
 ## 0.1.1
 
 The first version with a download. **The game is still not playable**: it has only been run through the opening and
