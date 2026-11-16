@@ -1973,21 +1973,22 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 // ================================================================== programs
 #define MAX_BIND 96
 typedef struct {
-    ShaderInfo *vi, *fi;
-    uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
-    uint32_t csize[2];          // (their compiler constants' size, at code + cmax: maxwell_const_data)
-    ShaderKey vkey, fkey;
-    VkShaderModule vs, fs;
+    ShaderInfo *vi, *fi, *gi;   // (gi: the geometry stage, or NULL)
+    uint64_t code[3], cmax[3];  // translation inputs (copied: translated on the translator thread); [2]: geometry, or 0
+    uint32_t csize[3];          // (their compiler constants' size, at code + cmax: maxwell_const_data)
+    ShaderKey vkey, fkey, gkey; // (with a geometry stage the clip space epilogue is in gkey, not vkey: shader.h)
+    VkShaderModule vs, fs, gs;
     VkShaderModule fs_late;  // (lazy chunks) fs without early fragment tests, for alpha to coverage pipelines; or NULL
     VkBindingInfo binds[MAX_BIND];
     int nbinds;
-    VkDescriptorSetLayout set_layout[3];  // [2] (compute: [1]): the heap chunk set (gmem_chunk_layout)
+    VkDescriptorSetLayout set_layout[4];  // [2] (compute: [1]): the heap chunk set (gmem_chunk_layout; with a geometry
+                                          // stage and no heap: empty); [3]: the geometry stage's
     VkPipelineLayout layout;
     bool vs_uses_vid;
     _Atomic int state;  // 0 building, 1 ready, 2 failed
     uint64_t prep_vh, prep_fh;  // (prepared programs: their code hashes, for LARECOMP_PREP_CHECK)
     uint64_t fs_rt_hash;        // (LARECOMP_VK_SHADER_STATS: the fragment hash the GPU profile shows)
-    ShaderFp fp[2];             // (stale-program detector, shader_prep.h; compute: [0]; touched by the replay only)
+    ShaderFp fp[3];             // (stale-program detector, shader_prep.h; compute: [0]; touched by the replay only)
     struct PipeMemo *pmemo;     // (render thread) draw_'s pipeline key memo for this program
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
     struct SetCache *scache[2]; // (render thread) stage_set's last set per set index
@@ -2035,8 +2036,12 @@ static void mark_dynamic(Prog *p) {
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
     p->set_layout[0] = vk_set_layout(p->binds, p->nbinds, 0, s0);
     if (nsets > 1) p->set_layout[1] = vk_set_layout(p->binds, p->nbinds, 1, s1);
-    bool gm = gc_shift && ((p->vi && p->vi->uses_gmem) || (p->fi && p->fi->uses_gmem));
+    bool gm = gc_shift && ((p->vi && p->vi->uses_gmem) || (p->fi && p->fi->uses_gmem) || (p->gi && p->gi->uses_gmem));
     if (gm) p->set_layout[nsets++] = gmem_chunk_layout();
+    if (p->gi) {  // (set 3, after the chunk set or an empty one)
+        if (!gm) p->set_layout[nsets++] = vk_set_layout(p->binds, p->nbinds, 2, 0);
+        p->set_layout[nsets++] = vk_set_layout(p->binds, p->nbinds, 3, VK_SHADER_STAGE_GEOMETRY_BIT);
+    }
     // (lazy chunks, vertex / fragment: the storage buffers' chunks as push constants, shader.h GMEM_DIRECT_MAX)
     VkPushConstantRange gd = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 * GMEM_DIRECT_MAX};
     bool direct = gm && gc_lazy && s1 == VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -2106,19 +2111,26 @@ static void compile_program(void *arg) {
     size_t nv = 0, nf = 0;
     uint32_t *sv = vk_glsl_to_spirv(p->vi->msl, STAGE_VERTEX, "vs", &nv);
     uint32_t *sf = sv ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
-    if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); build_end(bs); return; }
+    size_t ng = 0;
+    uint32_t *sg = sf && p->gi ? vk_glsl_to_spirv(p->gi->msl, STAGE_GEOMETRY, "gs", &ng) : NULL;
+    if (!sv || !sf || (p->gi && !sg)) { free(sv); free(sf); free(sg); atomic_store(&p->state, 2); build_end(bs); return; }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
+    if (sg) p->nbinds += vk_reflect(sg, ng, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
     p->fs = vk_module(sf, nf);
+    if (sg) p->gs = vk_module(sg, ng);
     if (spirv_strip_early_tests(sf, &nf)) p->fs_late = vk_module(sf, nf);
     free(sv);
     free(sf);
+    free(sg);
     mark_dynamic(p);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
-    if (!p->vs || !p->fs) LOG("[shader] vs/fs %llx %llx: shader module creation failed\n", (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
-    atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
+    bool ok = p->vs && p->fs && (!p->gi || p->gs);
+    if (!ok) LOG("[shader] vs/fs %llx %llx (gs %llx): shader module creation failed\n", (unsigned long long)p->code[0],
+                 (unsigned long long)p->code[1], (unsigned long long)p->code[2]);
+    atomic_store(&p->state, ok ? 1 : 2);
     build_end(bs);
     slow_build(t0, "modules vs/fs", p->code[0], p->code[1]);
 }
@@ -2135,8 +2147,13 @@ static bool translate_program_now(Prog *p) {
     uint32_t pc_words = g_vk.props.limits.maxPushConstantsSize / 4;
     maxwell_push_base = 0, maxwell_push_cap = pc_words < 64 ? pc_words : 64;
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
-    if (p->vi->msl) {
-        p->fkey.vs_out_mask = p->vi->out_mask;
+    if (p->vi->msl && p->code[2]) {  // (geometry: between them, its inputs the vertex shader's outputs)
+        p->gkey.vs_out_mask = p->vi->out_mask;
+        maxwell_const_data = (const uint8_t *)(uintptr_t)(p->code[2] + p->cmax[2]), maxwell_const_size = p->cmax[2] != 0x10000 ? p->csize[2] : 0;
+        p->gi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[2], p->cmax[2], STAGE_GEOMETRY, &p->gkey);
+    }
+    if (p->vi->msl && (!p->gi || p->gi->msl)) {
+        p->fkey.vs_out_mask = p->gi ? p->gi->out_mask : p->vi->out_mask;
         maxwell_const_data = (const uint8_t *)(uintptr_t)(p->code[1] + p->cmax[1]), maxwell_const_size = p->cmax[1] != 0x10000 ? p->csize[1] : 0;
         maxwell_push_base = p->vi->npush * 4u;  // (the fragment shader's words after them)
         p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey);
@@ -2145,6 +2162,11 @@ static bool translate_program_now(Prog *p) {
     pthread_mutex_unlock(&translate_lock);
     if (!p->vi->msl) {
         LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
+        atomic_store(&p->state, 2);
+        return false;
+    }
+    if (p->gi && !p->gi->msl) {
+        LOG("[shader] GS translate failed: %s (code %llx)\n", p->gi->error, (unsigned long long)p->code[2]);
         atomic_store(&p->state, 2);
         return false;
     }
@@ -2162,6 +2184,11 @@ static void translate_program(void *arg) {
     if (!translate_program_now(p)) return;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
+    if (p->gi) {
+        save_glsl(p->gi->msl, p->code[2], "gs");
+        LOG("[shader] geometry stage program: vs %llx gs %llx fs %llx (gs %u instructions, heap %s)\n", (unsigned long long)p->code[0],
+            (unsigned long long)p->code[2], (unsigned long long)p->code[1], p->gi->num_insts, p->gi->uses_gmem_store ? "stores" : "no");
+    }
     run_job(compile_program, p);
 }
 
@@ -2220,6 +2247,7 @@ static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
 static void prog_fp_check(Prog *p, NvnProgram *np) {  // (the lookups below are by code address: shader_prep.h)
     shader_fp_check(&p->fp[0], &np->stages[0], "vs");
     shader_fp_check(&p->fp[1], &np->stages[1], "fs");
+    if (np->stage_mask & 4) shader_fp_check(&p->fp[2], &np->stages[2], "gs");
 }
 
 // Key memo: draws mostly repeat the program and pipeline state of a recent draw. draw_ compares the inputs of the
@@ -2236,17 +2264,17 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    static struct { uint64_t code[3]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
     bool on = key_memo_on();
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
-        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8)) {
+        m.code[1] == np->stages[1].code_addr && m.code[2] == np->stages[2].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8)) {
         prof_prog_memo++;
         prog_fp_check(m.prog, np);  // (as a table hit)
         return m.prog;
     }
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
-        m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr;
+        m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr; m.code[2] = np->stages[2].code_addr;
         m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
     }
     return p;
@@ -2254,8 +2282,10 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
+    bool gs = np->stage_mask & 4;
+    if (gs && !g_vk.geometry) return NULL;
     uint64_t h = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
+    for (int i = 0; i < (gs ? 3 : 2); i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
@@ -2266,7 +2296,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         prog_fp_check(prog_tab[slot].prog, np);
         return prog_tab[slot].prog;
     }
-    {   // prepared before the game (the same code and keys)
+    if (!gs) {  // prepared before the game (the same code and keys; never with a geometry stage)
         uint64_t vh = shader_stage_hash(&np->stages[0]), fh = shader_stage_hash(&np->stages[1]);
         uint64_t ck = prog_content_key(vh, fh, vkey, fkey);
         Prog *pp = vh && fh && prep_progs_n ? PREP_GET(prep_progs, ck) : NULL;
@@ -2282,13 +2312,17 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     prog_fp_check(p, np);  // (takes the fingerprint)
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < (gs ? 3 : 2); i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
         p->csize[i] = np->stages[i].const_size;
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
+    if (gs) {  // (the clip space epilogue at each vertex the geometry stage emits instead: shader.h)
+        p->gkey = *vkey;
+        p->vkey.flip_x = p->vkey.flip_y = p->vkey.depth_minus_one = false;
+    }
     run_translate(translate_program, p);
     return p;
 }
@@ -2598,7 +2632,7 @@ static void pipe_key_fill(PipeKey *k, Prog *pr, const PipeIn *in, const VkFormat
 
 // A pipeline's create info from its key (the structures point into each other and into the key: filled in place)
 typedef struct {
-    VkPipelineShaderStageCreateInfo stages[2];
+    VkPipelineShaderStageCreateInfo stages[3];  // (vertex, fragment, geometry when the program has one)
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDescription vb[17];
     VkVertexInputBindingDivisorDescriptionEXT vd[17];
@@ -2632,6 +2666,9 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
         c->spi = (VkSpecializationInfo){1, &c->spe, sizeof c->spv, &c->spv};
         c->stages[1].pSpecializationInfo = &c->spi;
     }
+    if (k->prog->gs)
+        c->stages[2] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_GEOMETRY_BIT, .module = k->prog->gs, .pName = "main"};
     uint32_t na = 0, nb = 0, nd = 0;
     for (int i = 0; i < 32; i++)
         if (k->attr_mask & (1u << i)) c->va[na++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
@@ -2676,7 +2713,7 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
                                             .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                             .stencilAttachmentFormat = k->stencil};
-    c->pi = (VkGraphicsPipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &c->ri, .stageCount = 2,
+    c->pi = (VkGraphicsPipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &c->ri, .stageCount = k->prog->gs ? 3 : 2,
                                            .pStages = c->stages, .pVertexInputState = g_vk.vids ? NULL : &c->vi,
                                            .pInputAssemblyState = &c->ia, .pViewportState = &c->vs, .pRasterizationState = &c->rs,
                                            .pMultisampleState = &c->ms, .pDepthStencilState = &c->ds, .pColorBlendState = &c->cb,
@@ -3751,9 +3788,9 @@ static void snap_apply(int stage, uint32_t read_mask) {
 // The driver constants of a graphics stage (cbuf 0, size bytes): zero but for the stage's storage buffer table at
 // base (16 bytes an entry: address low, high, size). Compared by the entries within size.
 static VkSpan drv_dedupe(int stage, uint64_t size) {
-    static struct { uint64_t seq, size; int stage; Range sb[16]; VkSpan span; } last[2];
-    int slot = stage == 1;
-    uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
+    static struct { uint64_t seq, size; int stage; Range sb[16]; VkSpan span; } last[3];
+    int slot = stage < 3 ? stage : 0;
+    uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : stage == 2 ? 3 : 0);  // (hardware stage order: vertex, 2 tessellation, geometry, fragment)
     int ne = size > base ? (int)((size - base + 15) / 16) : 0;
     if (ne > 16) ne = 16;
     uint64_t seq = vk_pending_seq();
@@ -3797,7 +3834,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 e[0] = (uint32_t)sb[i].addr; e[1] = (uint32_t)(sb[i].addr >> 32); e[2] = (uint32_t)sb[i].size;
             }
         } else {
-            uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
+            uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : stage == 2 ? 3 : 0);  // (hardware stage order: vertex, 2 tessellation, geometry, fragment)
             for (int i = 0; i < 16; i++) {
                 uint32_t *e = &drv[(base + 16 * i) / 4];
                 e[0] = (uint32_t)sb[i].addr;
@@ -4568,7 +4605,8 @@ static VkDescriptorSetLayout gmem_chunk_layout(void) {
 }
 static void gmem_chunk_layout_make(void) {
     gmem_chunk_shift();  // (gc_lazy / gc_n decided)
-    VkShaderStageFlags st_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+    VkShaderStageFlags st_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT |
+                             (g_vk.geometry ? VK_SHADER_STAGE_GEOMETRY_BIT : 0);
     static VkDescriptorSetLayoutBinding lb[GC_MAX];
     uint32_t nb = 0;
     if (gc_lazy) {
@@ -6684,6 +6722,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
     snap_apply(1, pr->fi->ssbo_read);
+    if (pr->gi) snap_apply(2, pr->gi->uses_gmem_store ? 0 : pr->gi->ssbo_read);  // (its atomics must land in the game's buffer, not a copy)
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -6721,6 +6760,7 @@ static void draw_(CmdRec *r, bool indexed) {
     uint8_t cls;
     bool native = topology(mode, &topo, &cls);
     if (!native && mode != 6 && mode != 7 && mode != 9) { SKIP(SK_TOPOLOGY); return; }
+    if (pr->gi && cls != 2) { SKIP(SK_TOPOLOGY); return; }  // (geometry stages take triangles: shader.h GS_IN_VERTICES)
 
     uint64_t prof_tk_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_pre += prof_tk_ - prof_tp_;
@@ -6755,7 +6795,7 @@ static void draw_(CmdRec *r, bool indexed) {
         while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
         pp = pipe_tab[pslot].pipe;
         if (!pp) {
-            if (shader_rec_recording()) {
+            if (shader_rec_recording() && !pr->gi) {  // (variant records: vertex + fragment programs only)
                 ShaderRec rec;
                 rec_from_state(&rec, vkey.flip_x, mode);
                 shader_rec_note(&rec);
@@ -6991,6 +7031,10 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
     VkDescriptorSet sets[2] = {vset, fset};
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, ndyn, ndyn ? dyn : NULL);
+    if (pr->gi) {  // (set 3, the geometry stage's resources: no dynamic buffers, mark_dynamic)
+        VkDescriptorSet gset = stage_set(pr, pr->set_layout[3], 3, 2, pr->gi, NULL, NULL, 0, 0, 0, NULL, NULL, NULL);
+        rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 3, 1, &gset, 0, NULL);
+    }
     for (int sg = 0; sg < 2; sg++) {  // (LARECOMP_VK_PUSH_CB) the promoted words, from the bound ranges as the draw sees them now
         const ShaderInfo *si = sg ? pr->fi : pr->vi;
         if (!si->npush) continue;
@@ -7004,11 +7048,14 @@ static void draw_(CmdRec *r, bool indexed) {
                              si->npush * 4u, pw);
     }
     st.ubuf[0][0] = hud_ubuf;
-    if (gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem))
+    bool ggm = pr->gi && pr->gi->uses_gmem;
+    if (gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem || ggm))
         gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, GMEM_CHUNK_SET(STAGE_FRAGMENT),
-                        (pr->vi->uses_gmem ? 1u << STAGE_VERTEX : 0) | (pr->fi->uses_gmem ? 1u << STAGE_FRAGMENT : 0));
+                        (pr->vi->uses_gmem ? 1u << STAGE_VERTEX : 0) | (pr->fi->uses_gmem ? 1u << STAGE_FRAGMENT : 0) |
+                        (ggm ? 1u << STAGE_GEOMETRY : 0));
     if (pr->vi->uses_gmem_store) vc_mark_sbufs(0);
     if (pr->fi->uses_gmem_store) vc_mark_sbufs(1);
+    if (pr->gi && pr->gi->uses_gmem_store) vc_mark_sbufs(2);
 
     uint64_t prof_t2_ = prof ? SDL_GetTicksNS() : 0;
     // ---- indices (copied; the largest index bounds the vertex data copied below)

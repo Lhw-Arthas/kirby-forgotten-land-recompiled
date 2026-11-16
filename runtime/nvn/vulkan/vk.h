@@ -62,6 +62,7 @@ typedef struct {
     bool cb_release;  // command buffers reset with RELEASE_RESOURCES before each begin: Arm's driver (device.c; LARECOMP_VK_CB_RELEASE)
     bool cb_early_reset;  // a slot's command buffers reset once its submission completes: PanVK (device.c; LARECOMP_VK_CB_EARLY_RESET)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
+    bool geometry;     // geometry shaders (exec.c: programs with one; without it their draws are skipped)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
     bool heap_probe;      // one import tried at the start, lazy chunks if it runs out of memory (exec.c whole_import_probe_oom)
     // on by default on integrated GPUs only (device.c; LARECOMP_VK_LEAN_USAGE / LARECOMP_VK_SMAA_STENCIL /
