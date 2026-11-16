@@ -14,7 +14,10 @@ const char *game_level_name(void) { return "-"; }
 bool world_on_screen(void) { return false; }
 uint64_t game_camera_zone(void) { return 0; }
 bool game_camera_zone_id(uint32_t *id) { (void)id; return false; }
-void romfs_file_read_hook(const char *path) { (void)path; }  // (services/fs.c: each RomFS file as the game reads it)
+void romfs_file_read_hook(const char *path) {  // (services/fs.c: each RomFS file as the game reads it)
+    extern void input_event(const char *what);
+    input_event(path);
+}
 
 // Debug: who calls vector::at() out of range? Log the guest return address and frame chain, then stop.
 HLE_FUNC("_ZNKSt3__120__vector_base_commonILb1EE20__throw_out_of_rangeEv", rt_vector_oor) {

@@ -10,6 +10,19 @@
 # and spat: the Jump, Inhale and Spit guide clips play in turn (around frames 5000-6100; give it 500 s or more). Kirby
 # lands on either side of the gap depending on the frame rate (at ~12 fps a block is caught before frame 5820, at ~28 fps
 # the 315-degree steps reach the left one): check the log has "GuideMovie/InhaleAndSpit_Spit".
+# LARECOMP_INPUT=@tools/input/stage1.txt: further into the first stage; a script file has one entry per word and #
+# comments, and its @<event>+<frames> entries count from a movie the game opens or a RomFS file it reads (an event
+# is a part of the file name: "GuideMovie/Jump", "EventMovie/Opening"; runtime/hle/input.c). Once an event has
+# happened the plain frame entries stop, so anchor everything after the first event. LARECOMP_INPUT=none: no button
+# script, for the runs that drive the game some other way: LARECOMP_VPAD=<frame>:<button>:<frames>,... (an SDL virtual
+# gamepad: also pass LARECOMP_NO_USER_INPUT=0, or its events are ignored) and LARECOMP_HOST_INPUT=<frame>:sdlkey:<SDL key
+# name>:<frames>,... (real key events; sdlpad for controller buttons: LAS's own hook, formats in runtime/hle/input.c).
+# Add LARECOMP_LOCKSTEP=1 (the game clock stays within one frame of the last present: the same game steps whatever the
+# host's speed) and LARECOMP_TICK_SCALE=2 (runs as fast as the host allows).
+# LARECOMP_LOG_FILES=1 logs each RomFS file the game reads. SDL_AUDIO_DRIVER=disk SDL_AUDIO_DISK_OUTPUT_FILE=<file>.raw
+# LARECOMP_NO_AUDIO=0 captures the sound for tools/audio_check.py. LARECOMP_SAVE_DIR=save is the game's real save path
+# (the work folder's save/), kept across runs: for a restart that loads the save.
+# LARECOMP_SCREENSHOT_EVERY=30 LARECOMP_SCREENSHOT_FROM=<frame> saves the game image every 30 frames from there.
 # LARECOMP_DEBUG_FRAME=<frame> also saves every render pass of that frame as $WORK/build/pass_NNN.png (the largest is
 # the g-buffer: the scene stays visible there while the final image is still white). Run from the repository root in
 # Git Bash; WORK defaults to ../work/kfl. Never point WORK inside the repository.
@@ -25,7 +38,10 @@ export LARECOMP_NO_LAUNCHER=1 LARECOMP_GAME_LIB=build/lasgame.dll LARECOMP_SAVE_
 export LARECOMP_INPUT="880:LEFT:8,950:A:8,1400:A:8,1800:A:8,2600:A:8,2700:PLUS:8,2800:B:8,3400:A:8,3550:A:8,3700:A:8,3850:A:8,4000:A:8,4150:A:8,4300:A:8,4450:A:8,4750:STICK_UP:300"
 [ -n "$SHOTS" ] && export LARECOMP_SHOT_AT="$SHOTS"
 for kv in "$@"; do export "$kv"; done
+case $LARECOMP_INPUT in @/*) f=${LARECOMP_INPUT#@} ;; @*) f=$OLDPWD/${LARECOMP_INPUT#@} ;; *) f= ;; esac
+[ -n "$f" ] && export LARECOMP_INPUT="$(sed 's/#.*//' "$f" | tr -s ' \t\r\n' ',' | sed 's/^,//;s/,$//')"
 [ "$LARECOMP_INPUT" = guide ] && export LARECOMP_INPUT="880:LEFT:8,950:A:8,1400:A:8,1800:A:8,2600:A:8,2700:PLUS:8,2760:PLUS:8,2800:B:8,3400:A:8,3550:A:8,3700:A:8,3850:A:8,4000:A:8,4150:A:8,4300:A:8,4450:A:8,4750:STICK_UP:700,5150:A:8,5300:A:8,5450:STICK_RIGHT:215,5560:A:10,5585:A:10,5610:A:10,5635:A:10,5700:B:10,5730:STICK_200:25,5760:B:50,5820:STICK_315:25,5850:B:50,5910:STICK_315:25,5940:B:50,6000:STICK_315:25,6030:B:50,6090:STICK_315:25,6120:B:50,6180:STICK_200:25,6210:B:50,6270:STICK_200:25,6300:B:50,6360:STICK_RIGHT:2000"
+[ "$LARECOMP_INPUT" = none ] && unset LARECOMP_INPUT
 timeout "$SECS" ./build/ForgottenLandRecomp.exe extracted --play > runs/"$NAME".log 2>&1
 echo "exit $?"
 cp build/frames/*.png build/pass_*.png runs/"$NAME"/ 2>/dev/null

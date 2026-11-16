@@ -1,0 +1,66 @@
+# First stage on a new save, for tools/run_scripted.sh (LARECOMP_INPUT=@tools/input/stage1.txt, with LARECOMP_LOCKSTEP=1,
+# and LARECOMP_TICK_SCALE=2 to run faster).
+# <frame>:<button>:<frames>, or @<event>+<frames>:<button>:<frames> counted from a movie the game opens or a file it
+# reads; each event starts a part and ends the one before (runtime/hle/input.c).
+
+# "Do Not Use" online and the difficulty, with plain frame numbers (the loads before the opening movie are short).
+880:LEFT:8  950:A:8  1400:A:8  1800:A:8
+# The opening movie skip works only once it has played for about 6 s (it plays in real time, so a plain frame number
+# lands at another moment at another frame rate): count from its opening. Then the cutscenes and the tutorial text, then
+# walk to the Jump guide.
+@EventMovie/Opening+1000:PLUS:8  @EventMovie/Opening+1060:PLUS:8  @EventMovie/Opening+1100:B:8
+@EventMovie/Opening+1700:A:8  @EventMovie/Opening+1850:A:8  @EventMovie/Opening+2000:A:8  @EventMovie/Opening+2150:A:8
+@EventMovie/Opening+2300:A:8  @EventMovie/Opening+2450:A:8  @EventMovie/Opening+2600:A:8  @EventMovie/Opening+2750:A:8
+@EventMovie/Opening+3050:STICK_UP:1000
+
+# jump, then right and over the gap to the star blocks
+@GuideMovie/Jump+0:STICK_UP:150  @GuideMovie/Jump+150:A:8  @GuideMovie/Jump+300:A:8
+@GuideMovie/Jump+450:STICK_RIGHT:400  @GuideMovie/Jump+560:A:10  @GuideMovie/Jump+585:A:10  @GuideMovie/Jump+610:A:10
+@GuideMovie/Jump+635:A:10
+
+# walk at a block and inhale until one is caught
+@InhaleAndSpit_Inhale+0:STICK_RIGHT:100  @InhaleAndSpit_Inhale+0:A:10  @InhaleAndSpit_Inhale+25:A:10
+@InhaleAndSpit_Inhale+50:A:10  @InhaleAndSpit_Inhale+75:A:10
+@InhaleAndSpit_Inhale+135:B:10  @InhaleAndSpit_Inhale+165:STICK_200:25  @InhaleAndSpit_Inhale+195:B:50
+@InhaleAndSpit_Inhale+255:STICK_315:25  @InhaleAndSpit_Inhale+285:B:50  @InhaleAndSpit_Inhale+345:STICK_315:25
+@InhaleAndSpit_Inhale+375:B:50  @InhaleAndSpit_Inhale+435:STICK_315:25  @InhaleAndSpit_Inhale+465:B:50
+@InhaleAndSpit_Inhale+525:STICK_315:25  @InhaleAndSpit_Inhale+555:B:50  @InhaleAndSpit_Inhale+615:STICK_200:25
+@InhaleAndSpit_Inhale+645:B:50  @InhaleAndSpit_Inhale+705:STICK_200:25  @InhaleAndSpit_Inhale+735:B:50
+
+# caught: spit it; Kirby is down in the ditch below the bridge by then: right, jumping and floating out of it
+@InhaleAndSpit_Spit+30:B:10
+@InhaleAndSpit_Spit+120:STICK_RIGHT:330
+@InhaleAndSpit_Spit+130:A:8  @InhaleAndSpit_Spit+148:A:8  @InhaleAndSpit_Spit+166:A:8  @InhaleAndSpit_Spit+184:A:8  @InhaleAndSpit_Spit+202:A:8  @InhaleAndSpit_Spit+220:A:8  @InhaleAndSpit_Spit+238:A:8  @InhaleAndSpit_Spit+256:A:8  @InhaleAndSpit_Spit+274:A:8  @InhaleAndSpit_Spit+292:A:8  @InhaleAndSpit_Spit+310:A:8  @InhaleAndSpit_Spit+328:A:8  @InhaleAndSpit_Spit+346:A:8  @InhaleAndSpit_Spit+364:A:8  @InhaleAndSpit_Spit+382:A:8
+
+# past the tree: back up-left along the path, inhale the Awoofy and spit it, then on
+@InhaleAndSpit_Spit+450:STICK_160:80  @InhaleAndSpit_Spit+530:B:40  @InhaleAndSpit_Spit+600:B:10
+@InhaleAndSpit_Spit+620:STICK_120:250
+@InhaleAndSpit_Spit+700:A:8  @InhaleAndSpit_Spit+760:A:8  @InhaleAndSpit_Spit+820:A:8
+
+# the first checkpoint: into the forest, toward the light
+@InhaleAndSpit_Spit+870:STICK_45:150  @InhaleAndSpit_Spit+1020:STICK_UP:460
+@InhaleAndSpit_Spit+1100:A:8  @InhaleAndSpit_Spit+1180:A:8  @InhaleAndSpit_Spit+1260:A:8  @InhaleAndSpit_Spit+1340:A:8  @InhaleAndSpit_Spit+1420:A:8  @InhaleAndSpit_Spit+1500:A:8  @InhaleAndSpit_Spit+1580:A:8  @InhaleAndSpit_Spit+1660:A:8  @InhaleAndSpit_Spit+1740:A:8  @InhaleAndSpit_Spit+1820:A:8
+
+# out of the forest into the city: right, past the fountain
+@InhaleAndSpit_Spit+1480:STICK_30:200  @InhaleAndSpit_Spit+1680:STICK_RIGHT:1200
+@InhaleAndSpit_Spit+1900:A:8  @InhaleAndSpit_Spit+1990:A:8  @InhaleAndSpit_Spit+2080:A:8  @InhaleAndSpit_Spit+2170:A:8  @InhaleAndSpit_Spit+2260:A:8  @InhaleAndSpit_Spit+2350:A:8  @InhaleAndSpit_Spit+2440:A:8  @InhaleAndSpit_Spit+2530:A:8  @InhaleAndSpit_Spit+2620:A:8  @InhaleAndSpit_Spit+2710:A:8  @InhaleAndSpit_Spit+2800:A:8  @InhaleAndSpit_Spit+2890:A:8
+
+# The Sword guide opens at the second checkpoint, by the plaza where a Blade Knight patrols. NOT DONE: none of the
+# tries below has caught it yet (Kirby ends up away from it); the Swallow part has never run.
+@AbilityGetSword_InhaleAndSwallow+0:STICK_RIGHT:60
+# (it patrols the path up and to the left: walk at it a little, inhale, again)
+@AbilityGetSword_InhaleAndSwallow+60:STICK_165:35  @AbilityGetSword_InhaleAndSwallow+98:B:90
+@AbilityGetSword_InhaleAndSwallow+190:STICK_150:35  @AbilityGetSword_InhaleAndSwallow+228:B:90
+@AbilityGetSword_InhaleAndSwallow+320:STICK_175:35  @AbilityGetSword_InhaleAndSwallow+358:B:90
+@AbilityGetSword_InhaleAndSwallow+450:STICK_140:35  @AbilityGetSword_InhaleAndSwallow+488:B:90
+@AbilityGetSword_InhaleAndSwallow+580:STICK_165:35  @AbilityGetSword_InhaleAndSwallow+618:B:90
+@AbilityGetSword_InhaleAndSwallow+710:STICK_150:35  @AbilityGetSword_InhaleAndSwallow+748:B:90
+@AbilityGetSword_InhaleAndSwallow+840:STICK_175:35  @AbilityGetSword_InhaleAndSwallow+878:B:90
+@AbilityGetSword_InhaleAndSwallow+970:STICK_140:35  @AbilityGetSword_InhaleAndSwallow+1008:B:90
+@AbilityGetSword_InhaleAndSwallow+1100:STICK_165:35  @AbilityGetSword_InhaleAndSwallow+1138:B:90
+@AbilityGetSword_InhaleAndSwallow+1230:STICK_150:35  @AbilityGetSword_InhaleAndSwallow+1268:B:90
+@AbilityGetSword_InhaleAndSwallow+1360:STICK_175:35  @AbilityGetSword_InhaleAndSwallow+1398:B:90
+@AbilityGetSword_InhaleAndSwallow+1490:STICK_140:35  @AbilityGetSword_InhaleAndSwallow+1528:B:90
+@AbilityGetSword_InhaleAndSwallow+1620:STICK_165:35  @AbilityGetSword_InhaleAndSwallow+1658:B:90
+# swallow it: Sword
+@AbilityGetSword_Swallow+30:STICK_DOWN:20  @AbilityGetSword_Swallow+120:ZL:10  @AbilityGetSword_Swallow+200:Y:10
