@@ -784,7 +784,18 @@ static void create_device(void) {
 
     // features the backend relies on (all present on current desktop drivers)
     VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
+    VkPhysicalDeviceVulkan11Features have11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &have12};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have11};
+    // (an extension listed doesn't mean its features are: asking for one the GPU lacks fails vkCreateDevice)
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT have_cbc = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
+    if (g_vk.custom_border) have_cbc.pNext = have.pNext, have.pNext = &have_cbc;
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT have_div = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT};
+    if (g_vk.divisor) have_div.pNext = have.pNext, have.pNext = &have_div;
+    VkPhysicalDeviceFaultFeaturesEXT have_ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    if (fault) have_ff.pNext = have.pNext, have.pNext = &have_ff;
+    VkPhysicalDeviceAddressBindingReportFeaturesEXT have_va = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT};
+    if (g_va_report) have_va.pNext = have.pNext, have.pNext = &have_va;
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
     if (placed_ext) have12.pNext = &have_placed;
@@ -808,6 +819,11 @@ static void create_device(void) {
     if (pbin_ext) have_pbin.pNext = &have_m5, have_m5.pNext = have.pNext, have.pNext = &have_pbin;
 #endif
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    // (custom border colours: our samplers don't know their image's format)
+    g_vk.custom_border = g_vk.custom_border && have_cbc.customBorderColors && have_cbc.customBorderColorWithoutFormat;
+    g_vk.divisor = g_vk.divisor && have_div.vertexAttributeInstanceRateDivisor;
+    g_fault_ext = fault = fault && have_ff.deviceFault;
+    g_va_report = g_va_report && fault && have_va.reportAddressBinding;
     {   // what the driver offers for building pipelines (one line, for #92 reports)
         VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         VkPhysicalDeviceProperties2 pr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
@@ -963,7 +979,7 @@ static void create_device(void) {
                                             .storageBuffer8BitAccess = have12.storageBuffer8BitAccess,
                                             .scalarBlockLayout = have12.scalarBlockLayout, .bufferDeviceAddress = g_vk.bda, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
+                                            .storageBuffer16BitAccess = have11.storageBuffer16BitAccess, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
@@ -992,7 +1008,8 @@ static void create_device(void) {
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
     b->fillModeNonSolid = h->fillModeNonSolid;
-    b->samplerAnisotropy = h->samplerAnisotropy;
+    b->samplerAnisotropy = g_vk.aniso = h->samplerAnisotropy;
+    g_vk.mirror_clamp = have12.samplerMirrorClampToEdge;
     b->textureCompressionBC = h->textureCompressionBC;
 #if PLAT_TOUCH
     b->textureCompressionASTC_LDR = h->textureCompressionASTC_LDR;  // (phones: the game's UI icons are ASTC, sampled natively)
