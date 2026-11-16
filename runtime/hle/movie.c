@@ -508,11 +508,11 @@ static void dec_configure(Cpu *c) {
     d->video = p->codec_type == AVMEDIA_TYPE_VIDEO;
     d->width = p->width;
     d->height = p->height;
-    d->stride = (p->width + 255) & ~255;
+    d->stride = (p->width + 1) & ~1;  // tight NV12 rows: Kirby sizes its frame buffers w * h * 3 / 2
     d->sample_rate = p->sample_rate;
     d->channels = p->ch_layout.nb_channels;
     d->in_cap = d->video ? 4 << 20 : 256 << 10;
-    d->out_cap = d->video ? (uint32_t)(d->stride * ((d->height + 15) & ~15) * 3 / 2) : 64 << 10;
+    d->out_cap = d->video ? (uint32_t)(d->stride * d->height * 3 / 2) : 64 << 10;
     for (int i = 0; i < NIN; i++) d->in_mem[i] = buf_get(d->in_cap);
     for (int i = 0; i < NOUT; i++) d->out_mem[i] = buf_get(d->out_cap);
     LOG("[movie] decoder %s configured: %dx%d %d Hz %d ch\n", codec->name, d->width, d->height, d->sample_rate, d->channels);
@@ -533,7 +533,7 @@ static void dec_output_format(Decoder *d, MediaData *m) {
         md_set_int(m, "height", d->height);
         md_set_int(m, "nv12-y-stride", d->stride);
         md_set_int(m, "nv12-y-offset", 0);
-        md_set_int(m, "nv12-uv-offset", d->stride * ((d->height + 15) & ~15));
+        md_set_int(m, "nv12-uv-offset", d->stride * d->height);
         md_set_int(m, "nv12-colorspace", 0);
     } else {
         md_set_str(m, "mime", "audio/raw");
@@ -627,7 +627,7 @@ static bool emit_frame(Decoder *d, AVFrame *f, int64_t time, uint32_t flags) {
     if (flags & MOVIE_EOS) {
         size = 0;
     } else if (d->video) {
-        int h = d->height, w = d->width, uv_off = d->stride * ((h + 15) & ~15);
+        int h = d->height, w = d->width, uv_off = d->stride * h;
         for (int y = 0; y < h; y++) memcpy(o + y * d->stride, f->data[0] + y * f->linesize[0], w);
         for (int y = 0; y < h / 2; y++) {  // interleave U and V into NV12
             uint8_t *uv = o + uv_off + y * d->stride;
@@ -746,19 +746,28 @@ static void dec_get_output_buffer(Cpu *c) {
         static int gpu = -1;
         if (gpu < 0) gpu = !getenv("LARECOMP_MOVIE_CPU_CONVERT");
         if (gpu && renderer_upload_nv12(t, d->out_mem[i], (uint32_t)w, (uint32_t)h, (uint32_t)d->stride,
-                                        (uint32_t)(d->stride * ((h + 15) & ~15)))) {
+                                        (uint32_t)(d->stride * h))) {
             c->x[0] = 0;
             return;
         }
         if (!d->sws)
             d->sws = sws_getContext(w, h, AV_PIX_FMT_NV12, w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
         if (!d->rgba) d->rgba = malloc((size_t)w * h * 4);
-        const uint8_t *src[2] = {d->out_mem[i], d->out_mem[i] + d->stride * ((h + 15) & ~15)};
+        const uint8_t *src[2] = {d->out_mem[i], d->out_mem[i] + d->stride * h};
         int src_stride[2] = {d->stride, d->stride};
         uint8_t *dst[1] = {d->rgba};
         int dst_stride[1] = {w * 4};
         sws_scale(d->sws, src, src_stride, 0, h, dst, dst_stride);
         renderer_upload_rgba(t, d->rgba, (uint32_t)w, (uint32_t)h, (uint32_t)w * 4);
+        c->x[0] = 0;
+        return;
+    }
+    if (d->video && b->base >= GUEST_LO && b->base < GUEST_HI && b->capacity >= d->out_size[i]) {
+        // the game passes its own frame buffer (Kirby: w * h * 3 / 2, tight NV12) and builds its Y / UV textures from
+        // it: the frame goes there (handing back ours left the game's buffer as it was: a black movie)
+        memcpy((void *)(uintptr_t)b->base, d->out_mem[i], d->out_size[i]);
+        b->size = (int32_t)d->out_size[i];
+        b->offset = 0;
         c->x[0] = 0;
         return;
     }
