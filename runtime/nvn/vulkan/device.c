@@ -195,13 +195,28 @@ static void va_explain(uint64_t a) {
     pthread_mutex_unlock(&va_lk);
 }
 
+// Each distinct validation message (by its VUID) and how often it came: its first 3 are logged in full, the counts at
+// the end of the run (validation_exit), so runs before and after a fix compare by number.
+static struct { int32_t id; uint32_t count; bool error; char name[96]; } va_ids[256];
+static int va_nids;
+static pthread_mutex_t va_ids_lk = PTHREAD_MUTEX_INITIALIZER;
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
     (void)type, (void)user;
-    static atomic_uint n;
     bool stop = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && getenv("LARECOMP_VK_VALIDATION_STOP");
-    if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT &&
-        (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) LOG("[vk] %s\n", d->pMessage);
+    if (sev < VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) return VK_FALSE;
+    pthread_mutex_lock(&va_ids_lk);
+    int i = 0;
+    while (i < va_nids && va_ids[i].id != d->messageIdNumber) i++;
+    if (i == va_nids && i < 256) {
+        va_ids[i].id = d->messageIdNumber;
+        va_ids[i].error = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        snprintf(va_ids[i].name, sizeof va_ids[i].name, "%s", d->pMessageIdName ? d->pMessageIdName : "?");
+        va_nids++;
+    }
+    uint32_t seen = i < 256 ? va_ids[i].count++ : 0;
+    pthread_mutex_unlock(&va_ids_lk);
+    if (stop || seen < 3) LOG("[vk] %s\n", d->pMessage);
     if (stop) {
         LOG("[vk] stopping at the first validation error\n");
         fflush(stderr);
@@ -2136,6 +2151,11 @@ static _Noreturn void validation_exit(void) {
         messenger = VK_NULL_HANDLE;
         if (f) f(g_vk.inst, m, NULL);
     }
+    pthread_mutex_lock(&va_ids_lk);
+    LOG("[vk] validation: %d distinct messages\n", va_nids);
+    for (int i = 0; i < va_nids; i++)
+        LOG("[vk] validation: %6u x %s %s\n", va_ids[i].count, va_ids[i].error ? "error  " : "warning", va_ids[i].name);
+    pthread_mutex_unlock(&va_ids_lk);
     LOG("[vk] validation run: ending without GPU teardown\n");
     fflush(stdout);
     fflush(stderr);
