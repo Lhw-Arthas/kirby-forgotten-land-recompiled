@@ -700,12 +700,6 @@ void renderer_mark_gpu_owned(NvnTexture *t) {
     b->gpu_owned = true;
     if (b->scalable && !b->ao && !b->shadow) { b->sx = g_rs_x; b->sy = g_rs_y; }
 }
-// The tap scale of the ambient occlusion's own blurs (translate.c ao_grid_fix): the AO's scale for a draw into one of
-// its 480x270 targets (the two blurs after the AO pass), 0 for any other target.
-float renderer_ao_blur_scale(NvnTexture *t) {
-    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    return b && b->ao && t->format == 0x1 && t->width == 480 ? b->sx : 0;
-}
 // The part of a scalable texture its contents occupy (Dynamic: the render scale over the allocation scale; 1 otherwise).
 void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;

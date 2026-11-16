@@ -5886,7 +5886,6 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
 static float g_mirror_w;  // mirror mode's composite: its render target width (rscale[65].x; 0 otherwise)
-static float g_ao_taps;   // the AO's blurs: its scale (rscale[65].y, maxwell/translate.c ao_grid_fix; 0 otherwise)
 
 // (set reuse) what a set holds, one entry per descriptor written, in stage_set's order (fixed per program)
 typedef struct { uint32_t binding, type; uint64_t a, b, c; } SetEnt;
@@ -5908,7 +5907,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     if (!lean) memset(rs, 0, sizeof rs);
     rs[0][0] = rs[0][1] = 1; rs[0][2] = rs[0][3] = 0;
     if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
-    rs[65][0] = g_mirror_w; rs[65][1] = g_ao_taps; rs[65][2] = g_settings.ao_quality == AO_OFF; rs[65][3] = 0;  // ([65].z: AO Off)
+    rs[65][0] = g_mirror_w; rs[65][1] = rs[65][2] = rs[65][3] = 0;
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
@@ -6670,8 +6669,6 @@ static void draw_(CmdRec *r, bool indexed) {
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
     g_mirror_w = 0;
-    extern float renderer_ao_blur_scale(NvnTexture *t);
-    g_ao_taps = pr->fi->uses_ao_taps && st.rt.ncolor ? renderer_ao_blur_scale(st.rt.color[0]) : 0;
     if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames - renderer.m's key)
         static int kmask = -1;  // LARECOMP_INTERP_KEY=<mask> (renderer.m)
         if (kmask < 0) kmask = getenv("LARECOMP_INTERP_KEY") ? atoi(getenv("LARECOMP_INTERP_KEY")) : 37;
