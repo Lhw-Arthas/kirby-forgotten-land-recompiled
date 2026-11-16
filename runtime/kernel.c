@@ -1,5 +1,4 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
-#include <SDL3/SDL.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -7,6 +6,7 @@
 
 #include "hle.h"
 #include "kernel.h"
+#include "../game/game.h"
 #ifdef _WIN32
 #include "platform/windows_threads.h"
 #endif
@@ -68,11 +68,7 @@ static void handle_close(uint32_t h) {
 // Threads blocked in WaitSynchronization; object signals wake only these (caller holds g_klock).
 static KThread *g_syncwaiters;
 
-static int g_prof_cv = -1;  // LARECOMP_PROF_CONDVAR (svc_wait_process_wide_key below)
-static void wake(KThread *t) {
-    if (g_prof_cv > 0) t->woken_ns = plat_now_ns();
-    pthread_cond_signal(&t->cond);
-}
+static void wake(KThread *t) { pthread_cond_signal(&t->cond); }
 
 void kernel_signal(KObject *o) {
     // caller holds g_klock
@@ -82,12 +78,48 @@ void kernel_signal(KObject *o) {
 
 // ------------------------------------------------------------------ time
 
-uint64_t rt_ticks(void) {
-    // 19.2 MHz system tick
-    uint64_t ns = plat_now_ns();
+// LARECOMP_LOCKSTEP=1 (scripted runs): the clock gets at most one 30 fps frame (33.3 ms) ahead of the last present.
+// The game times its frames by this clock, so on a slow or busy host a frame still advances the world one step, not
+// two or three, and an input script lands Kirby in the same place whatever the frame rate. After 1 s without a
+// present (a load) it runs freely again. With LARECOMP_TICK_SCALE > 1 the game runs as fast as the host allows.
+static pthread_mutex_t lockstep_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t lockstep_virt, lockstep_real;  // the clock and the scaled host time at the last present
+static int lockstep_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOCKSTEP") && atoi(getenv("LARECOMP_LOCKSTEP"));
+    return on;
+}
+static uint64_t scaled_now_ns(void) {
     static double scale = -1;
     if (scale < 0) scale = getenv("LARECOMP_TICK_SCALE") ? atof(getenv("LARECOMP_TICK_SCALE")) : 1.0;
-    if (scale != 1.0) ns = (uint64_t)(ns * scale);
+    uint64_t ns = plat_now_ns();
+    return scale != 1.0 ? (uint64_t)(ns * scale) : ns;
+}
+static uint64_t clock_ns(uint64_t ns) {
+    if (!lockstep_real) return ns;
+    const uint64_t frame = 33333333, free_after = 1000000000;
+    uint64_t d = ns - lockstep_real;
+    return lockstep_virt + (d < frame ? d : frame) + (d > free_after ? d - free_after : 0);
+}
+void rt_ticks_present(void) {  // (hle/input.c input_frame: once per presented frame)
+    if (!lockstep_on()) return;
+    pthread_mutex_lock(&lockstep_mu);
+    uint64_t ns = scaled_now_ns();
+    lockstep_virt = clock_ns(ns);
+    lockstep_real = ns;
+    pthread_mutex_unlock(&lockstep_mu);
+}
+
+uint64_t rt_ticks(void) {
+    // 19.2 MHz system tick
+    uint64_t ns;
+    if (lockstep_on()) {
+        pthread_mutex_lock(&lockstep_mu);
+        ns = clock_ns(scaled_now_ns());
+        pthread_mutex_unlock(&lockstep_mu);
+    } else {
+        ns = scaled_now_ns();
+    }
     return (uint64_t)((__uint128_t)ns * 192 / 10000);
 }
 
@@ -100,13 +132,18 @@ static void deadline(struct timespec *ts, int64_t timeout_ns) {
 
 // Sleep on the current thread's condition. Returns false on timeout. Caller holds g_klock.
 static pthread_cond_t g_nothread_cond = PTHREAD_COND_INITIALIZER;
+// Time this thread spent blocked in the kernel (waits, sleeps): idle, not work. Frame pacing (nvn/pace.c)
+// takes the presenting thread's: a frame's busy time is its period minus this.
+__thread uint64_t g_blocked_ns;
+
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
-    if (timeout_ns < 0) {
-        pthread_cond_wait(cv, &g_klock);
-        return true;
-    }
-    return pthread_cond_timedwait(cv, &g_klock, ts) == 0;
+    uint64_t t0 = plat_now_ns();
+    bool r = true;
+    if (timeout_ns < 0) pthread_cond_wait(cv, &g_klock);
+    else r = pthread_cond_timedwait(cv, &g_klock, ts) == 0;
+    g_blocked_ns += plat_now_ns() - t0;
+    return r;
 }
 
 // ------------------------------------------------------------------ memory map
@@ -114,9 +151,7 @@ typedef struct { uint64_t addr, size; uint32_t type, perm; } Region;
 static Region regions[1024];
 static int nregions;
 static uint64_t heap_size;
-static uint64_t tls_next = TLS_BASE;
-uint64_t g_program_id;  // from main.npdm's ACI0 (runtime/main.c)
-static uint64_t g_user_exception_ctx;  // (HLE heap: wiped by a reboot, kernel_reset forgets it)
+static uint64_t tls_used;  // (from TLS_BASE: an offset, as the window can move - rt.h)
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
@@ -192,6 +227,8 @@ void rt_unwind_point(void) {
 static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
+    plat_thread_guest(t->prio);
+    if (t->is_main) plat_thread_perf_core(PLAT_PERF_GAME);  // (the game's frame runs here)
     crash_handler_install();
     rt_set_fpcr(0);
     if (!setjmp(t->unwind)) guest_call(&t->cpu, t->entry);
@@ -206,38 +243,47 @@ static void *thread_main(void *arg) {
 static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int prio, int core) {
     KThread *t = calloc(1, sizeof *t);
     pthread_cond_init(&t->cond, NULL);
-    t->cur_svc = -1;
     t->obj.type = KOBJ_THREAD;
     t->entry = entry;
     t->prio = prio;
     t->core = core < 0 ? 0 : core;
-    t->id = next_thread_id++;
     t->cpu.x[0] = arg;
     t->cpu.sp = stack_top & ~15ull;
     t->cpu.excl_addr = ~0ull;
-    t->tlr = tls_next;
-    tls_next += 0x200;
-    t->cpu.tpidrro = t->tlr;
     t->cpu.thread = t;
-    pthread_mutex_lock(&g_klock);
+    pthread_mutex_lock(&g_klock);  // (two guest threads may create threads at once: one id and TLS slot each)
+    t->id = next_thread_id++;
+    t->tlr = TLS_BASE + tls_used;
+    tls_used += 0x200;
+    t->cpu.tpidrro = t->tlr;
     t->anext = g_threads;
     g_threads = t;
     pthread_mutex_unlock(&g_klock);
     return t;
 }
 
+// Guest recursion runs on the host stack, so give every guest thread a lot of it. The game runs ~40 threads at once;
+// on iOS that much address space doesn't fit next to the guest window (the kernel's own reserves leave only a few
+// gaps, see runtime/rt.h), and pthread_create starts failing with EAGAIN. 16 MB is far more than the game ever uses.
+#if PLAT_IOS
+#define GUEST_HOST_STACK (16ull << 20)
+#else
+#define GUEST_HOST_STACK (256ull << 20)
+#endif
+
 static void thread_start(KThread *t) {
 #ifdef _WIN32
-    t->host = guest_thread_create(thread_main, t, 256u << 20);
+    t->host = guest_thread_create(thread_main, t, (unsigned)GUEST_HOST_STACK);
     if (!t->host) FATAL("Could not create a game thread.\n");
     t->started = true;
 #else
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256ull << 20);  // guest recursion runs on the host stack
+    pthread_attr_setstacksize(&attr, GUEST_HOST_STACK);
     t->started = true;
-    pthread_create(&t->host, &attr, thread_main, t);
+    int err = pthread_create(&t->host, &attr, thread_main, t);
     pthread_attr_destroy(&attr);
+    if (err) FATAL("Could not create a game thread (%s).\n", strerror(err));
 #endif
 }
 
@@ -245,18 +291,34 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
     uint64_t stack = STACK_BASE + STACK_SIZE - ((stack_size + 0xFFFF) & ~0xFFFFull);
     region_add(stack, stack_size, 0xB, 3);
     KThread *t = thread_new(entry, 0, stack + stack_size, prio, 0);
+    t->is_main = true;
     t->handle = kernel_new_handle(&t->obj);
     return t;
 }
 
+static KThread *g_main_thread;  // (g_klock) for hang_watch
+static void *hang_watch(void *arg);
+
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3; t->cpu.x[4] = x4;
     thread_start(t);  // the host main thread goes on to run the window event loop
+    pthread_mutex_lock(&g_klock);
+    g_main_thread = t;
+    pthread_mutex_unlock(&g_klock);
+    static bool watching;
+    const char *e = getenv("LARECOMP_HANG_DUMP");
+    uint64_t s = e ? strtoull(e, NULL, 10) : 30;
+    if (!watching && s) {
+        watching = true;
+        pthread_t w;
+        if (!pthread_create(&w, NULL, hang_watch, (void *)(uintptr_t)s)) pthread_detach(w);
+    }
 }
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
 Cpu *kernel_current_cpu(void) { return t_cur ? &t_cur->cpu : NULL; }
 KThread *kernel_current_thread(void) { return t_cur; }
+uint64_t kernel_current_thread_id(void) { return t_cur ? t_cur->id : 0; }
 
 // ------------------------------------------------------------------ mutex / condvar (Horizon semantics)
 // Mutex word: owner handle | WAITERS_BIT. Waiting threads sleep on the global cond and are handed ownership.
@@ -300,17 +362,29 @@ static void mutex_release(uint64_t addr) {
 
 KThread *g_waitlist;
 
-static void waitlist_add(KThread *t) { t->wnext = g_waitlist; g_waitlist = t; }
+// At the end: the wakers take the most urgent waiter and, among equals, the first found - the longest waiting, as
+// Horizon (first in, first out within a priority). Added at the head, the latest waiter won every tie.
+static void waitlist_add(KThread *t) {
+    KThread **p = &g_waitlist;
+    while (*p) p = &(*p)->wnext;
+    t->wnext = NULL;
+    *p = t;
+}
 static void waitlist_remove(KThread *t) {
     for (KThread **p = &g_waitlist; *p; p = &(*p)->wnext)
         if (*p == t) { *p = t->wnext; return; }
 }
 
-// Block until wait_kind is cleared by a waker, timeout, or cancel. Caller holds g_klock.
+// Block until wait_kind is cleared by a waker, timeout, or a reboot. Caller holds g_klock.
+// CancelSynchronization doesn't end these waits (mutex, condition variable, address arbiter), as on Horizon: its flag
+// is for the thread's next WaitSynchronization only. Ending them used the flag up there (a cancel meant to wake a
+// thread out of a WaitSynchronization could be lost), and the SDK's untimed condition variable wait treats any
+// result but success as fatal.
 static uint32_t block_current(int64_t timeout_ns) {
     KThread *t = t_cur;
     struct timespec ts;
     if (timeout_ns >= 0) deadline(&ts, timeout_ns);
+    t->wait_since = plat_now_ns();
     waitlist_add(t);
     while (t->wait_kind != WAIT_NONE) {
         if (g_rt_unwind) {  // reboot: give up the wait (the thread unwinds when its svc returns)
@@ -318,18 +392,8 @@ static uint32_t block_current(int64_t timeout_ns) {
             t->wait_result = R_CANCELLED;
             break;
         }
-        if (t->cancel) {
-            t->cancel = false;
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_CANCELLED;
-            break;
-        }
         if (!kwait(timeout_ns, &ts)) {
-            // A waker may have run while this thread's timed wait was expiring (it holds g_klock, so it got there
-            // first): it already cleared wait_kind, set the result and - for a condition variable - handed this
-            // thread the mutex. Reporting a timeout then made the SDK lock that mutex again, owned by itself: a
-            // deadlock (Let's Go's movie thread froze the title movie at a random frame).
-            if (t->wait_kind == WAIT_NONE) break;
+            if (t->wait_kind == WAIT_NONE) break;  // (woken just as the time ran out: the waker's result stands)
             t->wait_kind = WAIT_NONE;
             t->wait_result = R_TIMEOUT;
             break;
@@ -339,72 +403,36 @@ static uint32_t block_current(int64_t timeout_ns) {
     return t->wait_result;
 }
 
-// LARECOMP_PROF_LOCKS=1: the contended mutexes (every svcArbitrateLock that has to wait), every 2 s: per mutex address
-// the number of waits, the time spent in them and the guest call chain of the first one (resolve with tools/addr2sym.py).
-typedef struct { uint64_t addr, n, ns, chain[3]; } LockStat;
-static LockStat lock_stats[64];
-
-static void lock_prof_note(uint64_t addr, uint64_t ns) {  // (caller holds g_klock)
-    static uint64_t last;
-    LockStat *s = NULL, *free_slot = NULL;
-    for (int i = 0; i < 64; i++) {
-        if (lock_stats[i].addr == addr) { s = &lock_stats[i]; break; }
-        if (!lock_stats[i].addr && !free_slot) free_slot = &lock_stats[i];
-    }
-    if (!s && free_slot) {
-        s = free_slot;
-        s->addr = addr;
-        uint64_t fp = t_cur->cpu.x[29];
-        s->chain[0] = t_cur->cpu.x[30];
-        for (int k = 1; k < 3; k++) {  // the AArch64 frame record chain {fp, lr}
-            if (fp < GUEST_LO || fp >= GUEST_HI || (fp & 7)) break;
-            s->chain[k] = ((uint64_t *)(uintptr_t)fp)[1];
-            fp = ((uint64_t *)(uintptr_t)fp)[0];
-        }
-    }
-    if (s) { s->n++; s->ns += ns; }
-    uint64_t now = plat_now_ns();
-    if (!last) last = now;
-    if (now - last < 2000000000ull) return;
-    last = now;
-    for (int shown = 0; shown < 6; shown++) {  // the six that waited longest
-        LockStat *best = NULL;
-        for (int i = 0; i < 64; i++)
-            if (lock_stats[i].addr && (!best || lock_stats[i].ns > best->ns)) best = &lock_stats[i];
-        if (!best || !best->n) break;
-        LOG("[locks] %llx: %llu waits, %llu ms (%.1f us each), first from %llx <- %llx <- %llx\n", (unsigned long long)best->addr,
-            (unsigned long long)best->n, (unsigned long long)(best->ns / 1000000), best->ns / 1000.0 / best->n,
-            (unsigned long long)best->chain[0], (unsigned long long)best->chain[1], (unsigned long long)best->chain[2]);
-        best->addr = 0;  // (counted: out of the next pick, and the slot is free again below)
-        best->n = best->ns = 0;
-    }
-    memset(lock_stats, 0, sizeof lock_stats);
+// (diagnostics) the last KTRACE_N condition variable (untimed waits) / mutex kernel calls, lock-free, for the [hang] dump: what each
+// thread did with which key / mutex word, and the words before and after. LARECOMP_KTRACE=0 turns it off.
+enum { KT_WAIT, KT_WAIT_END, KT_SIGNAL, KT_LOCK, KT_LOCK_END, KT_UNLOCK };
+#define KTRACE_N 256
+typedef struct { uint64_t ns, tid, addr, addr2; uint32_t w0, w1, w2, arg, kind; } KTrace;
+static KTrace ktrace[KTRACE_N];
+static uint64_t ktrace_n;  // (__atomic builtins)
+static int ktrace_on = -1;
+static void kt(uint32_t kind, uint64_t addr, uint64_t addr2, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t arg) {
+    if (ktrace_on < 0) ktrace_on = !getenv("LARECOMP_KTRACE") || atoi(getenv("LARECOMP_KTRACE")) != 0;
+    if (!ktrace_on) return;
+    KTrace *e = &ktrace[__atomic_fetch_add(&ktrace_n, 1, __ATOMIC_RELAXED) % KTRACE_N];
+    *e = (KTrace){plat_now_ns(), t_cur ? t_cur->id : 0, addr, addr2, w0, w1, w2, arg, kind};
 }
-
-// A contended mutex is handed to the next waiter by the owner's unlock (mutex_release). Sleeping on a condition
-// variable for that costs a wake-up (~12 us on Windows, measured with LARECOMP_PROF_LOCKS) and the world's frame has
-// ~1000 of them per thread (a hot nn::os::Mutex of the game, three threads), so a waiter first spins on its own wait
-// state for a few microseconds. LARECOMP_LOCK_SPIN_US=<n> (default 40; 0: always sleep, as before); off on a machine
-// with fewer than 4 logical processors, where the spinning thread would take the owner's core.
-#if defined(__x86_64__)
-#define CPU_RELAX() __builtin_ia32_pause()
-#else
-#define CPU_RELAX() __asm__ volatile("yield")
-#endif
-static uint64_t lock_spin_ns(void) {
-    static int64_t ns = -1;
-    if (ns < 0) {
-        const char *e = getenv("LARECOMP_LOCK_SPIN_US");
-        long us = e ? atol(e) : 40;
-        if (!e && SDL_GetNumLogicalCPUCores() < 4) us = 0;
-        ns = us > 0 ? us * 1000 : 0;
+static uint32_t rdw(uint64_t a) { return a ? __atomic_load_n(u32p(a), __ATOMIC_SEQ_CST) : 0; }
+// Keys used with timed waits (periodic pollers, e.g. a 1 ms timer thread) would fill the ring within a second: their
+// waits and signals are left out (g_klock).
+static uint64_t kt_timed[16];
+static bool kt_timed_key(uint64_t key, bool add) {
+    for (int i = 0; i < 16; i++) {
+        if (kt_timed[i] == key) return true;
+        if (!kt_timed[i] && add) { kt_timed[i] = key; return true; }
     }
-    return (uint64_t)ns;
+    return false;
 }
 
 static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) {
     pthread_mutex_lock(&g_klock);
     uint32_t v = __atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
+    kt(KT_LOCK, addr, 0, v, 0, owner, tag);
     if (v != (owner | WAITERS_BIT)) {
         pthread_mutex_unlock(&g_klock);
         return R_OK;
@@ -413,85 +441,51 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
     t->wait_kind = WAIT_MUTEX;
     t->wait_addr = addr;
     t->wait_tag = tag;
-    static int prof_locks = -1;
-    if (prof_locks < 0) prof_locks = getenv("LARECOMP_PROF_LOCKS") != NULL;
-    uint64_t t0 = prof_locks ? plat_now_ns() : 0;
-    uint32_t r;
-    uint64_t spin = lock_spin_ns();
-    bool handed = false;
-    if (spin) {  // wait on the thread's own flag first: the owner's unlock hands the mutex over without a sleep + wake-up
-        waitlist_add(t);
-        pthread_mutex_unlock(&g_klock);
-        uint64_t end = plat_now_ns() + spin;
-        while (__atomic_load_n((int *)&t->wait_kind, __ATOMIC_ACQUIRE) != WAIT_NONE && !g_rt_unwind && plat_now_ns() < end)
-            CPU_RELAX();
-        pthread_mutex_lock(&g_klock);
-        waitlist_remove(t);
-        handed = t->wait_kind == WAIT_NONE;  // (the waker wrote the result under g_klock, which we hold again)
-        r = t->wait_result;
-    }
-    if (!handed) r = block_current(-1);
-    if (prof_locks) lock_prof_note(addr, plat_now_ns() - t0);
+    uint32_t r = block_current(-1);
+    kt(KT_LOCK_END, addr, 0, rdw(addr), 0, 0, r);
     pthread_mutex_unlock(&g_klock);
     return r == R_CANCELLED ? R_OK : r;
 }
 
 static uint32_t svc_arbitrate_unlock(uint64_t addr) {
     pthread_mutex_lock(&g_klock);
+    uint32_t before = rdw(addr);
     mutex_release(addr);
+    kt(KT_UNLOCK, addr, 0, before, rdw(addr), 0, 0);
     pthread_mutex_unlock(&g_klock);
     return R_OK;
 }
 
-// LARECOMP_PROF_CONDVAR=1: every 2 s, the condition-variable waits by how long they took (until the thread runs again), and how
-// long the woken threads took to run after their waker released them (the wake-up latency spinning would save)
-static uint64_t cv_hist[8], cv_lat_ns, cv_lat_n, cv_wait_ns;
-static void cv_prof_note(uint64_t t0, uint64_t woken) {  // (caller holds g_klock)
-    static const uint64_t edges[7] = {10000, 25000, 50000, 100000, 250000, 1000000, 5000000};
-    static uint64_t last;
-    uint64_t now = plat_now_ns(), d = now - t0;
-    int b = 0;
-    while (b < 7 && d >= edges[b]) b++;
-    cv_hist[b]++;
-    cv_wait_ns += d;
-    if (woken > t0 && woken <= now) cv_lat_ns += now - woken, cv_lat_n++;
-    if (!last) last = now;
-    if (now - last < 2000000000ull) return;
-    last = now;
-    LOG("[condvar] waits <10us %llu, <25 %llu, <50 %llu, <100 %llu, <250 %llu, <1ms %llu, <5ms %llu, more %llu; %.0f ms waited; "
-        "wake-up latency %.1f us average over %llu (%.0f ms)\n",
-        (unsigned long long)cv_hist[0], (unsigned long long)cv_hist[1], (unsigned long long)cv_hist[2], (unsigned long long)cv_hist[3],
-        (unsigned long long)cv_hist[4], (unsigned long long)cv_hist[5], (unsigned long long)cv_hist[6], (unsigned long long)cv_hist[7],
-        cv_wait_ns / 1e6, cv_lat_n ? cv_lat_ns / 1e3 / cv_lat_n : 0.0, (unsigned long long)cv_lat_n, cv_lat_ns / 1e6);
-    memset(cv_hist, 0, sizeof cv_hist);
-    cv_lat_ns = cv_lat_n = cv_wait_ns = 0;
-}
-
 static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64_t timeout) {
+    static long late_us = -1;  // (test) LARECOMP_DEBUG_CV_LATE_WAIT=<us>: every condition variable wait starts that late
+    if (late_us < 0) late_us = getenv("LARECOMP_DEBUG_CV_LATE_WAIT") ? atol(getenv("LARECOMP_DEBUG_CV_LATE_WAIT")) : 0;
+    if (late_us > 0) usleep((useconds_t)late_us);  // (forces notify-before-wait races in the game's code: hle/delegate_null.c)
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
-    if (g_prof_cv < 0) g_prof_cv = getenv("LARECOMP_PROF_CONDVAR") != NULL;
-    uint64_t cv_t0 = g_prof_cv ? plat_now_ns() : 0;
-    t->woken_ns = 0;
+    uint32_t mbefore = rdw(mutex), kbefore = rdw(key);
     // The key first, as the console's kernel does: the SDK's Signal skips the svc while the key reads 0, so a signaller
     // that took the just-released mutex in user space would otherwise see no waiter and the wake-up was lost.
     __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     mutex_release(mutex);
+    bool traced = !kt_timed_key(key, timeout >= 0);
+    if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
     t->wait_kind = WAIT_CONDVAR;
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
+    // Timed out / cancelled: returns without the mutex, as Horizon does - nn::os takes it again itself (TimedWait on
+    // 0xEA01 calls the critical section's Enter). Taking it here as well left the thread holding it when Enter ran:
+    // Enter saw its own handle in the lock word and ArbitrateLock waited on itself forever (issue #19's thread dump: a
+    // controller thread's timer-event wait).
     uint32_t r = block_current(timeout);
-    if (g_prof_cv) cv_prof_note(cv_t0, t->woken_ns);
-    // Timed out / cancelled: the mutex is NOT reacquired here. As on the console, the caller does it: the SDK's
-    // InternalConditionVariableImplByHorizon::TimedWait calls InternalCriticalSection::Enter on 0xea01 (TimedOut).
-    // Reacquiring it here too left the thread owning the mutex and then waiting on itself (Let's Go boot deadlock).
+    if (traced) kt(KT_WAIT_END, key, mutex, rdw(key), rdw(mutex), 0, r);
     pthread_mutex_unlock(&g_klock);
     return r;
 }
 
 static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     pthread_mutex_lock(&g_klock);
+    uint32_t kbefore = rdw(key);
     int woken = 0;
     bool any_left = false;
     for (;;) {
@@ -515,6 +509,7 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     for (KThread *t = g_waitlist; t; t = t->wnext)
         if (t->wait_kind == WAIT_CONDVAR && t->wait_addr == key) any_left = true;
     if (!any_left) __atomic_store_n(u32p(key), 0, __ATOMIC_SEQ_CST);
+    if (!kt_timed_key(key, false)) kt(KT_SIGNAL, key, 0, kbefore, rdw(key), (uint32_t)woken, (uint32_t)count);
     pthread_mutex_unlock(&g_klock);
 }
 
@@ -528,8 +523,11 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
     bool wait;
     if (type == ARB_WAIT_LESS) wait = cur < value;
     else if (type == ARB_DEC_WAIT_LESS) {
-        wait = cur < value;
-        if (wait) __atomic_store_n(u32p(addr), (uint32_t)(cur - 1), __ATOMIC_SEQ_CST);
+        // Atomically, as Horizon: the game changes these words in user space (exclusive load / store, no kernel
+        // lock), and a plain store of the value read before overwrote such a change - a lost signal.
+        uint32_t v = (uint32_t)cur;
+        while ((wait = (int32_t)v < value) &&
+               !__atomic_compare_exchange_n(u32p(addr), &v, v - 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {}
     } else if (type == ARB_WAIT_EQ) wait = cur == value;
     else { pthread_mutex_unlock(&g_klock); return R_INVALID_ENUM; }
     if (!wait) { pthread_mutex_unlock(&g_klock); return R_INVALID_STATE; }
@@ -541,29 +539,35 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
     return r;
 }
 
-static int arbiter_wake(uint64_t addr, int32_t count) {
+static int arbiter_wake(uint64_t addr, int32_t count) {  // (the most urgent waiters first, as Horizon)
     int woken = 0;
-    for (KThread *t = g_waitlist; t; t = t->wnext) {
-        if (count > 0 && woken >= count) break;
-        if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr) {
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_OK;
-            wake(t);
-            woken++;
-        }
+    while (count <= 0 || woken < count) {
+        KThread *best = NULL;
+        for (KThread *t = g_waitlist; t; t = t->wnext)
+            if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr && (!best || t->prio < best->prio)) best = t;
+        if (!best) break;
+        best->wait_kind = WAIT_NONE;
+        best->wait_result = R_OK;
+        wake(best);
+        woken++;
     }
     return woken;
+}
+
+// The word at addr from `expected` to `desired` if it still holds `expected` (user space may change it any time).
+static bool arbiter_update(uint64_t addr, int32_t expected, int32_t desired) {
+    uint32_t e = (uint32_t)expected;
+    return __atomic_compare_exchange_n(u32p(addr), &e, (uint32_t)desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t value, int32_t count) {
     pthread_mutex_lock(&g_klock);
     uint32_t r = R_OK;
-    int32_t cur = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     if (type == ARB_SIGNAL) {
         arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_INC_EQ) {
-        if (cur != value) r = R_INVALID_STATE;
-        else { __atomic_store_n(u32p(addr), (uint32_t)(cur + 1), __ATOMIC_SEQ_CST); arbiter_wake(addr, count); }
+        if (!arbiter_update(addr, value, value + 1)) r = R_INVALID_STATE;
+        else arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_MOD_EQ) {
         int waiting = 0;
         for (KThread *t = g_waitlist; t; t = t->wnext)
@@ -571,8 +575,8 @@ static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t valu
         int32_t nv;
         if (count <= 0) nv = waiting > 0 ? value - 2 : value + 1;
         else nv = waiting == 0 ? value + 1 : (waiting <= count ? value - 1 : value);
-        if (cur != value) r = R_INVALID_STATE;
-        else { __atomic_store_n(u32p(addr), (uint32_t)nv, __ATOMIC_SEQ_CST); arbiter_wake(addr, count); }
+        if (!arbiter_update(addr, value, nv)) r = R_INVALID_STATE;
+        else arbiter_wake(addr, count);
     } else {
         r = R_INVALID_ENUM;
     }
@@ -581,6 +585,7 @@ static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t valu
 }
 
 // ------------------------------------------------------------------ wait synchronization
+
 static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, int64_t timeout, int32_t *index) {
     pthread_mutex_lock(&g_klock);
     struct timespec ts;
@@ -601,22 +606,16 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
     }
     for (;;) {
         for (int i = 0; i < count; i++) {
-            // (an empty slot, e.g. a Bluetooth event the game never got: wait on the others, as issue #1 found in the
-            // GO Park settings; a wait on nothing but empty slots still ends in the timeout below)
-            if (!hs[i]) continue;
             KObject *o = handle_get(hs[i]);
-            if (!o) {
-                LOG("[kernel] WaitSynchronization: invalid handle %#x at [%d] of %d (lr %llx)\n", hs[i], i, count,
-                    (unsigned long long)(t ? t->cpu.x[30] : 0));
-                r = R_INVALID_HANDLE;
-                goto out;
-            }
+            if (!o) { r = R_INVALID_HANDLE; goto out; }
             if (o->signaled) { *index = i; r = R_OK; goto out; }
         }
+        if (timeout == 0) { r = R_TIMEOUT; goto out; }  // (before the cancel: a poll leaves it for the next real wait)
         if (t->cancel) { t->cancel = false; r = R_CANCELLED; goto out; }
         if (g_rt_unwind) { r = R_CANCELLED; goto out; }
-        if (timeout == 0) { r = R_TIMEOUT; goto out; }
         t->in_sync_wait = true;
+        t->wait_since = plat_now_ns();
+        t->sync_handles = handles_ptr, t->sync_count = count;
         t->snext = g_syncwaiters;
         g_syncwaiters = t;
         bool ok = kwait(timeout < 0 ? -1 : timeout, &ts);
@@ -647,48 +646,8 @@ static int prof_svc = -1;
 static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     rt_unwind_point();
-    KThread *self = t_cur;
-    if (self) {
-        self->cur_svc_pc = pc;
-        for (int i = 0; i < 4; i++) self->cur_svc_args[i] = c->x[i];
-        self->cur_svc = (int)imm;
-    }
     svc_entry(c, imm, pc);
-    if (self) self->cur_svc = -1;
     rt_unwind_point();
-}
-
-// LARECOMP_THREAD_DUMP=<seconds>[,<repeat seconds>]: list every guest thread, the svc it is blocked in and where
-// from (guest pc / lr), to find what a hung boot waits on. (Read without g_klock: a debug snapshot.)
-static void *thread_dump_main(void *arg) {
-    const char *e = (const char *)arg;
-    double first = atof(e), every = strchr(e, ',') ? atof(strchr(e, ',') + 1) : 0;
-    plat_sleep_until_ns(plat_now_ns() + (uint64_t)(first * 1e9));
-    for (;;) {
-        LOG("[threads] ---- dump\n");
-        for (KThread *t = g_threads; t; t = t->anext) {
-            if (t->finished) continue;
-            LOG("[threads] id %llu h %x prio %d entry %llx wait %d tag %x addr %llx | svc %02x(%llx, %llx, %llx, %llx) "
-                "@%llx lr %llx\n", (unsigned long long)t->id, t->handle, t->prio, (unsigned long long)t->entry,
-                (int)t->wait_kind, t->wait_tag, (unsigned long long)t->wait_addr, t->cur_svc < 0 ? 0xff : t->cur_svc,
-                (unsigned long long)t->cur_svc_args[0], (unsigned long long)t->cur_svc_args[1],
-                (unsigned long long)t->cur_svc_args[2], (unsigned long long)t->cur_svc_args[3],
-                (unsigned long long)(t->cur_svc < 0 ? t->cpu.pc : t->cur_svc_pc), (unsigned long long)t->cpu.x[30]);
-            // guest call stack: the AArch64 frame record chain {fp, lr} from x29
-            uint64_t fp = t->cpu.x[29];
-            LOG("[threads]     stack:");
-            for (int i = 0; i < 16 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7); i++) {
-                uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1], up = ((uint64_t *)(uintptr_t)fp)[0];
-                LOG(" %llx", (unsigned long long)lr);
-                if (up <= fp) break;
-                fp = up;
-            }
-            LOG("\n");
-        }
-        if (every <= 0) break;
-        plat_sleep_until_ns(plat_now_ns() + (uint64_t)(every * 1e9));
-    }
-    return NULL;
 }
 
 static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
@@ -726,17 +685,7 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
         return;
     }
     if (trace_svc < 0) trace_svc = getenv("LARECOMP_TRACE_SVC") != NULL;
-    if (!trace_svc) {
-        uint64_t a0 = c->x[0], a1 = c->x[1], lr = c->x[30];
-        svc_impl(c, imm, pc);
-        static int nbad;  // (the first ones: which call got a handle that doesn't exist, for crash reports)
-        if (c->x[0] == R_INVALID_HANDLE && nbad < 16) {
-            nbad++;
-            LOG("[kernel] svc %02x(%llx, %llx) -> invalid handle (lr %llx)\n", imm, (unsigned long long)a0,
-                (unsigned long long)a1, (unsigned long long)lr);
-        }
-        return;
-    }
+    if (!trace_svc) return svc_impl(c, imm, pc);
     uint64_t in[4] = {c->x[0], c->x[1], c->x[2], c->x[3]};
     svc_impl(c, imm, pc);
     LOG("[svc] %02x(%llx, %llx, %llx, %llx) -> %llx %llx %llx  @%llx\n", imm, in[0], in[1], in[2], in[3], c->x[0],
@@ -796,6 +745,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};
             nanosleep(&ts, NULL);
+            g_blocked_ns += plat_now_ns() - now;
         }
         break;
     }
@@ -909,10 +859,6 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x26:  // Break
         if (x[0] & 0x80000000u) { LOG("[kernel] Break notification %llx\n", x[0]); x[0] = R_OK; break; }
-        if (x[2] == 4 && x[1] >= GUEST_LO && x[1] < GUEST_HI) {  // the info is the failing nn::Result
-            uint32_t res = *(uint32_t *)(uintptr_t)x[1];
-            LOG("[kernel] svcBreak result %#x = %04u-%04u\n", res, 2000 + (res & 0x1FF), (res >> 9) & 0x1FFF);
-        }
         FATAL("svcBreak(reason=%llx, info=%llx, size=%llx) at %llx\n", x[0], x[1], x[2], pc);
     case 0x27: debug_string(x[0], x[1]); x[0] = R_OK; break;
     case 0x29: {  // GetInfo(_, id0, handle, id1)
@@ -936,11 +882,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
         case 16: case 17: v = 0; break;
-        case 18: v = g_program_id; break;
-        case 20:  // UserExceptionContextAddress: nn::os::SetDyingMessageRegion stores its region at +0x1c0
-            if (!g_user_exception_ctx) g_user_exception_ctx = (uint64_t)(uintptr_t)hle_alloc(0x1000);
-            v = g_user_exception_ctx;
-            break;
+        case 18: v = GAME_PROGRAM_ID; break;
+        case 20: v = 0; break;
         default: r = R_INVALID_ENUM; LOG("[kernel] GetInfo unknown id %u/%llu\n", id0, x[3]);
         }
         x[0] = r;
@@ -1010,37 +953,144 @@ void kernel_stop_threads(void (*idle)(void)) {
     LOG("[reboot] %d guest threads stopped in %llums\n", n, (unsigned long long)((plat_now_ns() - t0) / 1000000));
 }
 
+// (diagnostics) every guest thread and what it waits on, with the guest frame chain (x29 / x30 pairs on the guest
+// stack: the game function that waits). Doesn't wait for g_klock: a hang may hold it (then says so).
+void kernel_dump_threads(const char *prefix) {
+    bool locked = false;
+    for (int i = 0; i < 100 && !(locked = pthread_mutex_trylock(&g_klock) == 0); i++) usleep(1000);
+    if (!locked) LOG("%s g_klock held for 100+ ms: read without it\n", prefix);
+    static const char *const kinds[] = {"-", "mutex", "condvar", "arbiter"};
+    extern const char *hle_name_at(uint64_t pc);
+    uint64_t now = plat_now_ns();
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (!t->started || t->finished) continue;
+        bool waiting = t->wait_kind != WAIT_NONE || t->in_sync_wait;
+        const char *hle = hle_name_at(t->cpu.pc);  // (pc: the last call through dispatch; an HLE one: its name)
+        LOG("%s thread %llu h %x prio %d core %d entry %llx pc %llx%s%s%s lr %llx wait %s addr %llx mutex %llx tag %x%s%s for %llu ms\n",
+            prefix, (unsigned long long)t->id, t->handle, t->prio, t->core, (unsigned long long)t->entry,
+            (unsigned long long)t->cpu.pc, hle ? " (" : "", hle ? hle : "", hle ? ")" : "", (unsigned long long)t->cpu.x[30],
+            (unsigned)t->wait_kind < 4 ? kinds[t->wait_kind] : "?", (unsigned long long)t->wait_addr,
+            (unsigned long long)t->wait_mutex, t->wait_tag,
+            t->in_sync_wait ? " in WaitSynchronization" : "", t->cancel ? " (cancel pending)" : "",
+            waiting ? (unsigned long long)((now - t->wait_since) / 1000000) : 0ull);
+        if (t->wait_kind == WAIT_CONDVAR || t->wait_kind == WAIT_MUTEX) {
+            uint64_t m = t->wait_kind == WAIT_CONDVAR ? t->wait_mutex : t->wait_addr;
+            LOG("%s   mutex word %x%s\n", prefix, *(volatile uint32_t *)(uintptr_t)m,
+                t->wait_kind == WAIT_CONDVAR ? "" : " (waiting to be handed it)");
+        }
+        for (int i = 0; t->in_sync_wait && i < t->sync_count && i < 8; i++) {
+            uint32_t h = ((const uint32_t *)(uintptr_t)t->sync_handles)[i];
+            KObject *o = h > 0x100 && h - 0x100 < MAX_HANDLES ? handles[h - 0x100] : NULL;
+            LOG("%s   handle %x type %d%s\n", prefix, h, o ? (int)o->type : 0, o && o->signaled ? " signaled" : "");
+        }
+        uint64_t fp = t->cpu.x[29];  // guest frames: [fp] = caller's fp, [fp + 8] = return address
+        for (int i = 0; i < 12 && fp >= STACK_BASE && fp < STACK_BASE + STACK_SIZE && !(fp & 15); i++) {
+            LOG("%s   frame %d: lr %llx\n", prefix, i, (unsigned long long)*(uint64_t *)(uintptr_t)(fp + 8));
+            uint64_t up = *(uint64_t *)(uintptr_t)fp;
+            if (up <= fp) break;
+            fp = up;
+        }
+    }
+    {   // the kernel trace: oldest first
+        static const char *const kn[] = {"cv-wait", "cv-wait-end", "cv-signal", "arb-lock", "arb-lock-end", "arb-unlock"};
+        uint64_t n = __atomic_load_n(&ktrace_n, __ATOMIC_RELAXED), first = n > KTRACE_N ? n - KTRACE_N : 0;
+        LOG("%s kernel trace, last %llu of %llu (ms before now; words before -> after):\n", prefix,
+            (unsigned long long)(n - first), (unsigned long long)n);
+        for (uint64_t i = first; i < n; i++) {
+            const KTrace *e = &ktrace[i % KTRACE_N];
+            long long ago = (long long)(now - e->ns) / 1000000;
+            switch (e->kind) {
+            case KT_WAIT: LOG("%s  -%lld t%llu cv-wait key %llx (%x) mutex %llx %x -> %x\n", prefix, ago,
+                              (unsigned long long)e->tid, (unsigned long long)e->addr, e->w0, (unsigned long long)e->addr2,
+                              e->w1, e->w2); break;
+            case KT_WAIT_END: LOG("%s  -%lld t%llu cv-wait-end key %llx (%x) mutex %llx (%x) r %x\n", prefix, ago,
+                                  (unsigned long long)e->tid, (unsigned long long)e->addr, e->w0, (unsigned long long)e->addr2,
+                                  e->w1, e->arg); break;
+            case KT_SIGNAL: LOG("%s  -%lld t%llu cv-signal key %llx %x -> %x count %d woke %u\n", prefix, ago,
+                                (unsigned long long)e->tid, (unsigned long long)e->addr, e->w0, e->w1, (int)e->arg, e->w2); break;
+            default: LOG("%s  -%lld t%llu %s mutex %llx %x -> %x owner %x tag/r %x\n", prefix, ago, (unsigned long long)e->tid,
+                         kn[e->kind < 6 ? e->kind : 0], (unsigned long long)e->addr, e->w0, e->w1, e->w2, e->arg);
+            }
+        }
+    }
+    if (locked) pthread_mutex_unlock(&g_klock);
+}
+
+// The hang dump, one facility for the whole runtime. LARECOMP_HANG_DUMP=<s> (default 30, 0 off), checked every
+// second from the main guest thread's start:
+// - the main guest thread in one kernel wait that long (startup hangs on Windows with few cores leave no other trace)
+// - the renderer's own checks (runtime/nvn/rqueue.c, kernel_hang_hooks): no frame presented twice that long after the
+//   GPU device setup, presenting stopped that long, or one noted host wait (GPU fence, queue, nextDrawable /
+//   vkAcquire...) that long
+// -> "[hang]" lines: why, the renderer's state (render thread queue, what each noted thread waits on), every guest
+// thread with its kernel wait and guest frames, and the kernel trace. At most 6 dumps per run.
+static bool (*hang_check_fn)(uint64_t limit_ns, char *why, size_t n);
+static void (*hang_state_fn)(const char *prefix);
+static bool (*hang_paused_fn)(void);  // the game deliberately stopped (iOS: the app in the background): no dump
+void kernel_hang_hooks(bool (*check)(uint64_t limit_ns, char *why, size_t n), void (*state)(const char *prefix)) {
+    __atomic_store_n(&hang_state_fn, state, __ATOMIC_RELEASE);
+    __atomic_store_n(&hang_check_fn, check, __ATOMIC_RELEASE);
+}
+void kernel_hang_paused_hook(bool (*paused)(void)) { __atomic_store_n(&hang_paused_fn, paused, __ATOMIC_RELEASE); }
+static void *hang_watch(void *arg) {
+    uint64_t s = (uint64_t)(uintptr_t)arg, dumped_since = 0;
+    int resumed = 0;
+    for (int dumps = 0; dumps < 6;) {
+        sleep(1);
+        bool (*paused)(void) = __atomic_load_n(&hang_paused_fn, __ATOMIC_ACQUIRE);
+        if (paused && paused()) { resumed = 2; continue; }  // (every wait is long then: not a hang)
+        if (resumed) { resumed--; continue; }  // (just back: the waits still carry start times from before the pause)
+        char why[256];
+        int n = 0;
+        pthread_mutex_lock(&g_klock);
+        KThread *m = g_main_thread;  // (the current boot's: kernel_reset clears it)
+        uint64_t since = m ? m->wait_since : 0, now = plat_now_ns();
+        bool stuck = m && m->started && !m->finished && (m->wait_kind != WAIT_NONE || m->in_sync_wait) && since < now &&
+                     now - since >= s * 1000000000ull && since != dumped_since;
+        pthread_mutex_unlock(&g_klock);
+        if (stuck) {
+            n = snprintf(why, sizeof why, "main guest thread in one kernel wait for %llu s", (unsigned long long)s);
+            dumped_since = since;
+        }
+        bool (*check)(uint64_t, char *, size_t) = __atomic_load_n(&hang_check_fn, __ATOMIC_ACQUIRE);  // (every second: it keeps its own "reported" state)
+        if (check && check(s * 1000000000ull, why + n + (n ? 2 : 0), sizeof why - (size_t)n - 2)) {
+            if (n) why[n] = ';', why[n + 1] = ' ';
+            n = 1;
+        }
+        if (!n) continue;
+        LOG("[hang] ===== %s =====\n", why);
+        void (*state)(const char *) = __atomic_load_n(&hang_state_fn, __ATOMIC_ACQUIRE);
+        if (state) state("[hang]");
+        kernel_dump_threads("[hang]");
+        LOG("[hang] =====\n");
+        dumps++;
+    }
+    return NULL;
+}
+
 // Reboot, step 2 (threads stopped): a fresh kernel. Kernel objects are leaked rather than freed: host statics
 // can still point at some (vi.c's vsync event, signalled by its host timer thread).
 void kernel_reset(void) {
     pthread_mutex_lock(&g_klock);
-    g_user_exception_ctx = 0;
     for (KThread *t = g_threads, *next; t; t = next) {
         next = t->anext;
         pthread_cond_destroy(&t->cond);
         free(t);
     }
     g_threads = NULL;
+    g_main_thread = NULL;
     g_waitlist = NULL;
     g_syncwaiters = NULL;
     memset(handles, 0, sizeof handles);
     nregions = 0;
     heap_size = 0;
-    tls_next = TLS_BASE;
+    tls_used = 0;
     next_thread_id = 0x50;
     g_rt_unwind = 0;
     pthread_mutex_unlock(&g_klock);
 }
 
 void kernel_init(void) {
-    static bool dump_started;
-    const char *dump = getenv("LARECOMP_THREAD_DUMP");
-    if (dump && !dump_started) {
-        dump_started = true;
-        pthread_t th;
-        pthread_create(&th, NULL, thread_dump_main, (void *)dump);
-        pthread_detach(th);
-    }
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {

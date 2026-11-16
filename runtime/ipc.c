@@ -61,6 +61,45 @@ uint32_t ipc_connect_named_port(const char *name) {
 }
 
 // ------------------------------------------------------------------ sm:
+// The services the game may open: the service access list of exefs/main.npdm (ACI0). sm refuses the others with
+// NotAllowed, as a console does (the SDK probes some, e.g. pctl:s / pctl:a / pctl:r, and copes with the refusal).
+static char g_sac[1024];  // entries separated by '\0', ending with an empty one; empty: no list, everything allowed
+static int g_sac_len;
+
+void ipc_set_service_access(const char *npdm_path) {
+    g_sac_len = 0;
+    FILE *f = fopen(npdm_path, "rb");
+    if (!f) return;
+    static uint8_t d[0x4000];
+    size_t n = fread(d, 1, sizeof d, f);
+    fclose(f);
+    uint32_t aci, aci_size, sac, sac_size;
+    if (n < 0x80 || memcmp(d, "META", 4)) return;
+    memcpy(&aci, d + 0x70, 4), memcpy(&aci_size, d + 0x74, 4);
+    if ((uint64_t)aci + 0x30 > n || aci_size < 0x30 || memcmp(d + aci, "ACI0", 4)) return;
+    memcpy(&sac, d + aci + 0x28, 4), memcpy(&sac_size, d + aci + 0x2C, 4);
+    if ((uint64_t)aci + sac + sac_size > n) return;
+    const uint8_t *p = d + aci + sac, *end = p + sac_size;
+    int len = 0;
+    while (p < end) {  // entries: a control byte (bit 7: server, bits 0-2: name length - 1), then the name
+        int k = (*p & 7) + 1;
+        bool server = *p & 0x80;
+        if (p + 1 + k > end || len + k + 2 > (int)sizeof g_sac) return;
+        if (!server) memcpy(g_sac + len, p + 1, k), len += k + 1;
+        p += 1 + k;
+    }
+    g_sac_len = len;
+}
+
+static bool service_allowed(const char *name) {
+    if (!g_sac_len) return true;
+    for (const char *e = g_sac; e < g_sac + g_sac_len; e += strlen(e) + 1) {
+        size_t k = strlen(e);
+        if (k && e[k - 1] == '*' ? !strncmp(name, e, k - 1) : !strcmp(name, e)) return true;
+    }
+    return false;
+}
+
 SERVICE("sm:", sm_handler) {
     (void)s;
     switch (req->cmd) {
@@ -69,6 +108,11 @@ SERVICE("sm:", sm_handler) {
     case 1: {  // GetServiceHandle(name)
         char name[9] = {0};
         memcpy(name, req->data, 8);
+        if (!service_allowed(name)) {
+            LOG("[sm] GetService %s: not in the game's service access list (NotAllowed)\n", name);
+            resp->result = MAKE_RESULT(21, 8);
+            break;
+        }
         LOG("[sm] GetService %s\n", name);
         ipc_return_object(resp, service_lookup(name));
         break;

@@ -1,9 +1,10 @@
 // hid (shared memory, input state filled in later) and settings (set, set:sys).
 #include <string.h>
 
-#include "../mods.h"
 #include "../hle.h"
 #include "../ipc.h"
+#include "../settings.h"
+#include "../rumble.h"
 
 static uint32_t new_event_handle(void) {
     uint32_t w, r;
@@ -13,7 +14,6 @@ static uint32_t new_event_handle(void) {
 
 // ------------------------------------------------------------------ hid
 KSharedMem *g_hid_shmem;
-uint32_t g_npad_supported_styles = 0x1F;  // NpadStyleTag bits: 0 FullKey, 1 Handheld, 2 JoyDual, 3 JoyLeft, 4 JoyRight, 5 Palma
 static uint32_t hid_shmem_handle;
 RT_ON_RESET(hid_reset) { g_hid_shmem = NULL; hid_shmem_handle = 0; }
 
@@ -30,14 +30,48 @@ SERVICE("hid", hid) {
     switch (req->cmd) {
     case 0: ipc_return_object(resp, service_new("IAppletResource", applet_resource, NULL)); break;
     case 40: case 106: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
-    case 100:  // SetSupportedNpadStyleSet (the styles the game accepts: runtime/hle/input.c picks one of them)
-        g_npad_supported_styles = IN(uint32_t, 0);
-        LOG("[hid] SetSupportedNpadStyleSet %#x\n", g_npad_supported_styles);
-        break;
-    case 101: OUT(uint32_t, 0) = g_npad_supported_styles; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
+    case 101: OUT(uint32_t, 0) = 0x1F; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
     case 121: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadJoyHoldType
     case 129: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadHandheldActivationMode
-    case 201: case 202: case 203: case 206: case 207: case 208: case 209: break;  // vibration
+    case 201: {  // SendVibrationValue: handle, four floats, padding, ARUID
+        if (req->data_size < 32) { resp->result = 0xD401; break; }
+        uint32_t h; RumbleValue v;
+        memcpy(&h, req->data, sizeof h);
+        memcpy(&v, req->data + 4, sizeof v);
+        input_rumble_send(h, &v);
+        break;
+    }
+    case 202: {  // GetActualVibrationValue (best-effort requested state)
+        if (req->data_size < 16) { resp->result = 0xD401; break; }
+        RumbleValue v = input_rumble_get(IN(uint32_t, 0));
+        memcpy(resp->data, &v, sizeof v); resp_size(resp, sizeof v);
+        break;
+    }
+    case 204:
+        if (req->data_size < 1) { resp->result = 0xD401; break; }
+        input_rumble_permit((IN(uint8_t, 0) & 1) != 0); break;
+    case 205: OUT(uint8_t, 0) = input_rumble_permitted(); resp_size(resp, 1); break;
+    case 211:  // virtual player-1 vibration device is mounted, as advertised by HLE
+        OUT(uint8_t, 0) = req->data_size >= 4 && rumble_side(IN(uint32_t, 0)) >= 0;
+        resp_size(resp, 1); break;
+    case 206: {  // SendVibrationValues: parallel handle/value pointer buffers
+        IpcBuf *handles = in_buf(req, 0), *values = in_buf(req, 1);
+        if (!handles || !values || handles->size % 4 || values->size % sizeof(RumbleValue) ||
+            handles->size / 4 != values->size / sizeof(RumbleValue) ||
+            handles->size / 4 > 64 || (handles->size && (!handles->addr || !values->addr))) {
+            resp->result = 0xD401; break;
+        }
+        // Validate both lengths before sending anything. memcpy avoids assuming
+        // that guest pointer buffers are aligned like host floats/uint32_t.
+        for (uint64_t i = 0; i < handles->size / 4; i++) {
+            uint32_t h; RumbleValue v;
+            memcpy(&h, (const void *)(uintptr_t)(handles->addr + i * 4), sizeof h);
+            memcpy(&v, (const void *)(uintptr_t)(values->addr + i * sizeof v), sizeof v);
+            input_rumble_send(h, &v);
+        }
+        break;
+    }
+    case 203: case 207: case 208: case 209: case 210: break;  // activation HLE'd; GC ERM / permit sessions not implemented
     case 200: memset(resp->data, 0, 0x10); OUT(uint32_t, 0) = 1; resp_size(resp, 0x10); break;
     default: break;  // Activate*/Set*: accept
     }
@@ -71,8 +105,7 @@ static void language_list(IpcReq *req, IpcResp *resp, int max) {
 SERVICE("set", set) {
     (void)s;
     switch (req->cmd) {
-    case 0: OUT(uint64_t, 0) = lang_code(game_language()); resp_size(resp, 8);  // GetLanguageCode (launcher / mod)
-        LOG("[set] GetLanguageCode: %s\n", game_language()); break;
+    case 0: OUT(uint64_t, 0) = lang_code(settings_language()); resp_size(resp, 8); break;  // GetLanguageCode
     case 1: language_list(req, resp, 15); break;                                   // GetAvailableLanguageCodes
     case 2: {                                                                      // MakeLanguageCode
         uint32_t i = IN(uint32_t, 0);

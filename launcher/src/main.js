@@ -2,7 +2,7 @@ import './style.css';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import { BUSY_PHASES, PHASE_LABEL, primaryAction } from './action.js';
+import { BUSY_PHASES, PHASE_LABEL, REBUILD_NOTE, primaryAction, toolsMissing } from './action.js';
 
 const PAGES = [
   ['home', 'Home'],
@@ -10,8 +10,8 @@ const PAGES = [
   ['settings', 'Settings'],
   ['about', 'About'],
 ];
-const PACKAGED_BUILD = 'Copies your game files into this folder (about 6 GB, or hard links on the same drive), then translates the game code and compiles it for this PC. The first build takes a long time.';
-const HEIGHTS = [['0', 'Match the window'], ['720', '720p'], ['1080', '1080p'], ['1440', '1440p'], ['2160', '4K']];
+const PACKAGED_BUILD = 'Copies your game files into this folder (about 6 GB, or nothing extra when Windows can hard-link them on the same drive), then translates the game code and compiles it for this PC. The first build takes a long time.';
+const RESOLUTIONS = [['match', 'Match the display'], ['75%', '75% of the display'], ['50%', '50% of the display'], ['25%', '25% of the display'], ['1x', '1080p'], ['2x', '4K']];
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -42,6 +42,7 @@ const actions = {
     if (dir) await call('set_game_dir', { path: dir });
   },
   setup: () => call('start_setup'),
+  rebuild: () => call('start_setup', { codeOnly: true }),
   cancel: () => call('cancel_setup'),
   play: () => call('play'),
   'go-setup': () => go('setup'),
@@ -88,6 +89,7 @@ const views = {
         <button class="btn primary big" data-act="${a.act ?? ''}" ${a.act ? '' : 'disabled'} aria-busy="${!!a.busy}">${esc(a.label)}</button>
       </div>
       ${a.detail ? `<p class="detail glass" role="alert">${esc(a.detail)}</p>` : ''}
+      ${s.phase === 'failed' ? '<div class="home-actions"><button class="btn quiet" data-act="open-setup-log">Open setup log</button></div>' : ''}
       ${crashCard(s.crash)}
       ${progress(s)}
       <p class="fine">Bring your own copy of the game. Nothing here contains or shares game files.</p>
@@ -103,14 +105,15 @@ const views = {
         ${s.game_error ? `<p class="bad" role="alert">${esc(s.game_error)}</p>` : ''}
         <button class="btn" data-act="pick" ${busy(s) ? 'disabled' : ''}>Select game folder</button>`)}
       ${step(2, 'Build tools', !s.tools_missing.length, s.tools_missing.length
-        ? `<p class="bad" role="alert">Missing: ${esc(s.tools_missing.join(', '))}. See the README for the install commands.</p>`
+        ? `<p class="bad" role="alert">${esc(toolsMissing(s))}</p>`
         : `<p>${s.packaged ? 'The bundled game code generator and compiler are in this folder.' : 'MSYS2 clang, make and the Python environment are installed.'}</p>`)}
       ${step(3, 'Game code', s.built, `
-        <p>${s.built ? 'The game code is built for this PC.' : s.packaged ? PACKAGED_BUILD : 'Builds the runtime, writes a game data image of about 6 GB next to the romfs folder, then translates the game code from your files and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
+        <p>${s.built ? 'The game code is built for this PC.' : s.rebuild ? REBUILD_NOTE : s.packaged ? PACKAGED_BUILD : 'Builds the runtime, checks your game files, then translates the game code from them and compiles it for this PC. About 7 minutes on a 16-thread CPU.'}</p>
+        ${s.work_error ? `<p class="bad" role="alert">${esc(s.work_error)}</p>` : ''}
         ${s.phase === 'failed' ? `<p class="bad" role="alert">${esc(s.error)}</p>` : ''}
         ${progress(s)}
         <div class="row">
-          <button class="btn ${s.built ? '' : 'primary'}" data-act="setup" ${busy(s) || !s.game_dir || s.game_error || s.tools_missing.length ? 'disabled' : ''}>${s.built ? 'Rebuild' : 'Build'}</button>
+          <button class="btn ${s.built ? '' : 'primary'}" data-act="${s.rebuild ? 'rebuild' : 'setup'}" ${busy(s) || s.work_error || s.tools_missing.length || (!s.rebuild && (!s.game_dir || s.game_error)) ? 'disabled' : ''}>${s.built || s.rebuild ? 'Rebuild' : 'Build'}</button>
           <button class="btn quiet" data-act="open-setup-log">Open setup log</button>
         </div>`)}
     </div>`;
@@ -123,7 +126,7 @@ const views = {
         <label class="field"><span>Fullscreen</span>
           <input type="checkbox" data-key="fullscreen" ${v.fullscreen === '1' ? 'checked' : ''} /></label>
         <label class="field"><span>Render resolution</span>
-          <select data-key="render_height">${HEIGHTS.map(([val, name]) => `<option value="${val}" ${(v.render_height || '0') === val ? 'selected' : ''}>${name}</option>`).join('')}</select></label>
+          <select data-key="resolution">${RESOLUTIONS.map(([val, name]) => `<option value="${val}" ${(v.resolution === 'auto' || !v.resolution ? 'match' : v.resolution) === val ? 'selected' : ''}>${name}</option>`).join('')}</select></label>
         <label class="field"><span>Volume</span>
           <input type="range" min="0" max="1" step="0.05" data-key="volume" value="${esc(v.volume || '1')}" /></label>
       </section>

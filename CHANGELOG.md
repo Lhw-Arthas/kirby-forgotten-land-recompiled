@@ -2,6 +2,109 @@
 
 Versions are tagged `vX.Y.Z`. Small fixes bump the last number; features and large fixes bump the middle one.
 
+## 0.3.0
+
+**Stage music plays, and a new area no longer starts on a black screen.** This version is rebuilt on LAS Recomp's
+engine, copied at the commit in [docs/UPSTREAM.md](docs/UPSTREAM.md), so later LAS fixes can be brought over instead of
+ported by hand. Kirby's part is a small layer next to it (`game/`). 0.2.1 was never released, and its fixes are in
+this version.
+
+No game files and no game code are included. The zip holds tools only; the game code is built on your PC from your
+own extracted copy (base game, v1.0.0). The game code is generated differently now, so it is built again: unzipped over
+an older version, the launcher offers "Rebuild game code".
+
+### Highlights
+- **Stage music plays.** In 0.2.0 the music of most stages (104 Opus tracks) turned into loud noise once its decoder
+  opened. The decoder command the game uses (`DecodeInterleaved`) is implemented, and so are the reverb and delay
+  effects the game puts on its sound
+- **No black or half-drawn screen on a first visit.** While the shaders for an area build, the game pauses on its last
+  complete picture with "Preparing graphics for this area... (first visit only)" and a progress bar. It also holds back
+  any frame with a draw still waiting, so nothing pops in afterwards. Slow PCs had this worst: a player reported it on
+  an i3-6006U with an MX110. In the stage tour, the draws shown late fell from 351 to 0 in the Arena and from 81 to 0
+  in a Treasure Road stage. The cost is more short pauses on a first visit; later visits use the shader cache
+- **A faster first build.** About 7 minutes on a 16-thread PC, where 0.2.0 took about 16. The slowest file starts
+  first, and the few functions over 200 KB of C are compiled without optimization
+- **No 6 GB image of the game's data.** The setup links your `romfs` folder into the install folder, or copies it
+  when it is on another drive, instead of writing a `romfs.bin` image. On an install updated from 0.2.0, "Rebuild game code"
+  sets it up this way from the folder picked before and deletes the old image
+- **Mouthful Mode looks right.** The Ring, Elevator and Dump Car models were drawn without their geometry stage, so
+  Ring Mouth had no face. Geometry shaders work now, and all 14,232 shader programs in the game build on the test PC
+
+### Added
+- The release `README.txt` lists the controls and how to change them
+- The launcher offers "Rebuild game code" when the game code in its folder was built by another version
+- The launcher refuses a build up front when the disk has less than 6.5 GB free or the install path is over 200
+  characters, and refuses an unsupported game version when you pick the folder
+- Clearer launcher messages for a dump of the update ("base game 1.0.0 needed"), build tools an antivirus removed, a
+  game that closes at once, and a graphics driver without Vulkan
+- Crash dialogs name the cause in plain words. The log repeats the fatal line after the trace, names the GPU (vendor,
+  model, driver, VRAM and optional features), and after a lost GPU names the memory it was reading
+- CI on GitHub (Windows): the runtime build, the engine tests, the launcher tests and repo checks, including a guard
+  that fails on any game file in the repo. CI never sees game data
+- `make verify GAME=<dump>` for a developer PC with the game: the generator gate, a service check, an asset check, a
+  shader sweep and a stage tour (`LARECOMP_STAGE` starts at any of the 109 stages). [docs/testing.md](docs/testing.md)
+  describes them
+- Scripted play: `tools/input/stage1.txt` (the first stage, past the Spit guide) and `tools/input/carmouth.txt`
+  (the Mouthful Mode car's boost guide). `tools/audio_check.py` checks a capture of the game's sound
+- `tools/check_game_identity.py` fails when the launcher, `recomplauncher.json` and the READMEs disagree with
+  `game/game.h`. [docs/launcher-runtime-contract.md](docs/launcher-runtime-contract.md) says what both launchers expect
+  of the runtime
+
+### Changed
+- Built on LAS Recomp's engine (MIT). Graphics, audio, input and the in-game menu (Esc or F1) are LAS Recomp's, with
+  its settings, its Controls page and its pause handling. Link's Awakening's features are left out. Windows only
+- The keyboard keys changed: W A S D move, K J L I are A B X Y, Q and E are L and R, 1 and 3 are ZL and ZR, Enter is
+  Plus, Backspace is Minus, the arrow keys are the d-pad, and F11 is full screen. The release `README.txt` lists
+  them all
+- The game code needs a CPU with AVX2 (Intel Haswell, 2013, or newer; AMD Excavator or Zen, or newer). 0.2.0 also
+  built it for older CPUs
+- Saves are written in one step, so a crash in the middle of a save does not corrupt it (from LAS Recomp)
+- When the controller in use is unplugged, a second one takes over (from LAS Recomp)
+- At boot the system calls return what the game expects (applet, BCAT, error context, parental control). A service the
+  game is not allowed to use is refused as on a console, from the game's own access list
+- The game code library is 119 MB (0.2.0: 109 MB), because the largest functions are compiled without optimization.
+  They are 0.59% of the calls, and no runtime cost showed within the ±15% noise of the measurement
+
+### Fixed
+- The credits stopped with "out of command memory"
+- Integer textures are sampled as integers, as the Vulkan spec asks (NVIDIA accepted the old way, other drivers may
+  not), and optional GPU features are checked before use. A GPU without one of them failed to start. Vulkan validation
+  errors from boot to the first stage went from 20,866 to 0. Not yet checked on AMD hardware
+  ([#11](https://github.com/scarxity/kirby-forgotten-land-recompiled/issues/11))
+- The launcher and RecompLauncher wrote the Resolution setting as `render_height`, which the new engine does not read.
+  Both write `resolution` now
+- Closing the launcher ends its build and every tool the build started
+- Simplified and Traditional Chinese use the language codes `zh-Hans` and `zh-Hant`. Lhw-Arthas fixed this for 0.2.0
+  in [#7](https://github.com/scarxity/kirby-forgotten-land-recompiled/pull/7); LAS Recomp sends the same codes. Thanks!
+
+### Known issues
+- Nobody has played the game start to finish. Boot, the opening, the first stage (scripted), Mouthful Mode's car and
+  ring, and loading each stage directly in the stage tour are checked. Bosses, later worlds by real play, and the
+  ending are not
+- Waddle Dee Town is checked by play: a scripted run cleared the first stage and walked into the Town with no error.
+  Starting the world map or the Town directly with the stage tour's shortcut crashes; that shortcut skips the story
+- Stage tour, on a build from just before the release: all 109 stages load and 101 run without error. The 3 Arena
+  menus, the two world maps and the Town crash only when jumped to directly; the 2 credits sequences hit the "out of
+  command memory" error fixed in this version
+- A first visit to an area pauses while its shaders build: about 15 to 25 s at the beach on a 2-core PC with a cold
+  cache (an older measurement), less on faster PCs. Later visits pause about 1 s
+- Rarely, the game crashed after the opening movie while the PC was heavily overloaded. It did not happen in 15 runs
+  without other load, including runs that starved the game's threads on purpose
+- A lost GPU device in Mouthful Mode ([#10](https://github.com/scarxity/kirby-forgotten-land-recompiled/issues/10),
+  [#6](https://github.com/scarxity/kirby-forgotten-land-recompiled/issues/6), reported on 0.2.0) did not happen again
+  in 20-minute runs at 4K. If it does, the log now names the memory the GPU was reading
+- The fixes for the black screen on an AMD RX 550
+  ([#11](https://github.com/scarxity/kirby-forgotten-land-recompiled/issues/11)) follow the Vulkan spec but have not
+  run on AMD hardware
+- Online features do not work. Choose "Do Not Use" at the prompt. amiibo and screenshots are stubs
+- 3D runs at 30 fps, the game's own pace on the Switch
+- Only extracted `exefs` and `romfs` folders of the base game 1.0.0 are accepted. No `.nsp` or `.xci` files,
+  no update
+- Frame generation is off and untested. Each tutorial clip's window may stay black for its first few seconds (seen in
+  0.2.0, not checked again). No rumble. Keys are changed in the in-game menu or in `larecomp.ini` only, not in the
+  launcher
+- Windows only. LAS Recomp's code for other platforms is in the tree but not built
+
 ## 0.2.0
 
 **0.1.1 could not be set up from a normal dump. This version fixes that.** The game is still not playable: it has

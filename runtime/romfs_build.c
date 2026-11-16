@@ -1,8 +1,9 @@
-// RomFS image builder (romfs_build.h). Layout as the game's own image: a 0x50-byte header, file data
+// RomFS image layout (romfs_build.h). Layout as the game's own image: a 0x50-byte header, file data
 // from 0x200 (each file 16-byte aligned), then the directory hash table, directory entries, file hash table and file
-// entries. Entries are found by hash (the game's RomFS code walks the tables itself), so the order inside them only
+// entries. The image itself is never written: runtime/services/fs.c serves it from this layout and the files. Entries are found by hash (the game's RomFS code walks the tables itself), so the order inside them only
 // has to be consistent: directories and files are sorted by name, children before siblings' children.
 #include "romfs_build.h"
+#include "../game/game.h"
 
 #include "platform.h"  // (Windows: POSIX mkdir)
 
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef __APPLE__
@@ -20,10 +22,7 @@
 #include <windows.h>
 #endif
 
-#define ROMFS_GAME_FILES 9373  // (Kirby and the Forgotten Land 1.0.0: counted in an extracted romfs)
-#define ROMFS_MIN_FILES 9373
 #define EMPTY 0xFFFFFFFFu
-#define DATA_START 0x200u
 
 typedef struct Dir Dir;
 typedef struct {
@@ -41,6 +40,7 @@ struct Dir {
     uint32_t off;  // entry offset in the directory table
 };
 
+static int by_string(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 static int by_name_dir(const void *a, const void *b) { return strcmp((*(Dir *const *)a)->name, (*(Dir *const *)b)->name); }
 static int by_name_file(const void *a, const void *b) { return strcmp((*(File *const *)a)->name, (*(File *const *)b)->name); }
 
@@ -120,6 +120,116 @@ static uint64_t align16(uint64_t x) { return (x + 15) & ~15ull; }
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static void put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); }
 
+static bool exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+static bool is_dir(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool romfs_is_game(const char *dir) {
+    static const char *const markers[] = {GAME_ROMFS_MARKERS};
+    char p[2200];
+    for (size_t i = 0; i < sizeof markers / sizeof *markers; i++) {
+        snprintf(p, sizeof p, "%s/%s", dir, markers[i]);
+        if (!is_dir(p)) return false;
+    }
+    return true;
+}
+
+static void find_game(const char *dir, int depth, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size,
+                      char *image, size_t image_size, bool *unusable) {
+    if (depth > 4 || (*exefs && (*romfs || (image && *image)))) return;
+    char p[2200], q[2200];
+    snprintf(p, sizeof p, "%s/main", dir), snprintf(q, sizeof q, "%s/main.npdm", dir);
+    if (!*exefs && exists(p) && exists(q)) snprintf(exefs, exefs_size, "%s", dir);
+    snprintf(p, sizeof p, "%s/romfs.bin", dir);
+    if (image && !*image && exists(p)) snprintf(image, image_size, "%s", p);
+    if (romfs_is_game(dir)) {  // (its folders are the game's data: nothing else to find in them)
+        if (!*romfs) snprintf(romfs, romfs_size, "%s", dir);
+        return;
+    }
+    DIR *d = opendir(dir);
+    if (!d) return;
+    char **sub = NULL;
+    int n = 0, cap = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        const char *name = e->d_name;
+        if (name[0] == '.') continue;
+        size_t len = strlen(name);
+        const char *ext = len > 4 ? name + len - 4 : "";
+        static const char *const packages[] = {".xci", ".nsp", ".nca", ".nsz", ".xcz"};
+        for (size_t i = 0; i < sizeof packages / sizeof *packages; i++)
+            if (strcasecmp(ext, packages[i]) == 0 && unusable) *unusable = true;
+        snprintf(p, sizeof p, "%s/%s", dir, name);
+        if (is_dir(p)) {
+            if (n == cap) sub = realloc(sub, sizeof *sub * (cap = cap ? cap * 2 : 16));
+            sub[n++] = strdup(p);
+        }
+    }
+    closedir(d);
+    qsort(sub, n, sizeof *sub, by_string);
+    for (int i = 0; i < n; i++) {
+        find_game(sub[i], depth + 1, exefs, exefs_size, romfs, romfs_size, image, image_size, unusable);
+        free(sub[i]);
+    }
+    free(sub);
+}
+
+void romfs_find_game_image(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, char *image,
+                           size_t image_size, bool *unusable) {
+    exefs[0] = romfs[0] = image[0] = 0;
+    find_game(dir, 0, exefs, exefs_size, romfs, romfs_size, image, image_size, unusable);
+}
+
+void romfs_find_game(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, bool *unusable) {
+    exefs[0] = romfs[0] = 0;
+    find_game(dir, 0, exefs, exefs_size, romfs, romfs_size, NULL, 0, unusable);
+}
+
+bool romfs_image_ok(const char *path, char *why, size_t why_size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(why, why_size, "can't open it"); return false; }
+    uint64_t h[10] = {0};
+    size_t n = fread(h, 1, sizeof h, f);
+    fseeko(f, 0, SEEK_END);
+    uint64_t size = (uint64_t)ftello(f);
+    fclose(f);
+    if (n == sizeof h && !memcmp(h, "IVFC", 4)) { snprintf(why, why_size, "an IVFC image, not a plain RomFS"); return false; }
+    if (n != sizeof h || h[0] != 0x50) { snprintf(why, why_size, "no RomFS header (%llu bytes)", (unsigned long long)size); return false; }
+    for (int i = 1; i < 9; i += 2)  // (dir hash, dir meta, file hash, file meta: offset and size, inside the file)
+        if (!h[i + 1] || h[i + 1] > (64ull << 20) || h[i] > size || h[i + 1] > size - h[i]) {
+            snprintf(why, why_size, "its tables point past its end (%llu bytes: cut short?)", (unsigned long long)size);
+            return false;
+        }
+    if (h[9] > size) { snprintf(why, why_size, "its data starts past its end (%llu bytes)", (unsigned long long)size); return false; }
+    // Cut short: the game reads a file whose read failed, without checking. Every file's data must be inside the
+    // image. The file table's entries: parent, sibling (u32), offset, size (u64), hash, name length (u32), name.
+    uint8_t *meta = malloc(h[8]);
+    f = meta ? fopen(path, "rb") : NULL;
+    bool got = f && fseeko(f, (off_t)h[7], SEEK_SET) == 0 && fread(meta, 1, h[8], f) == h[8];
+    if (f) fclose(f);
+    uint64_t end = 0;
+    for (uint64_t o = 0; got && o + 0x20 <= h[8];) {
+        uint64_t off, len;
+        uint32_t name;
+        memcpy(&off, meta + o + 8, 8), memcpy(&len, meta + o + 0x10, 8), memcpy(&name, meta + o + 0x1C, 4);
+        if (off + len > end) end = off + len;
+        o += 0x20 + ((name + 3ull) & ~3ull);
+    }
+    free(meta);
+    if (!got) { snprintf(why, why_size, "its file table can't be read"); return false; }
+    if (end > size - h[9]) {
+        snprintf(why, why_size, "its files end past its end (%llu of %llu bytes: cut short?)",
+                 (unsigned long long)size, (unsigned long long)(h[9] + end));
+        return false;
+    }
+    return true;
+}
+
 uint64_t romfs_dir_bytes(const char *dir) {
     Dir *t = scan(dir, "", NULL, 0);
     if (!t) return 0;
@@ -132,30 +242,13 @@ uint64_t romfs_dir_bytes(const char *dir) {
     return n;
 }
 
-static bool copy_data(FILE *out, const char *path, uint64_t size, uint8_t *buf, size_t bufsize, uint64_t *done,
-                      uint64_t total, void (*progress)(uint64_t, uint64_t)) {
-    FILE *in = fopen(path, "rb");
-    if (!in) return false;
-    uint64_t left = size;
-    while (left) {
-        size_t want = left < bufsize ? (size_t)left : bufsize;
-        size_t got = fread(buf, 1, want, in);
-        if (got != want || fwrite(buf, 1, got, out) != got) { fclose(in); return false; }
-        left -= got;
-        *done += got;
-        if (progress) progress(*done, total);
-    }
-    fclose(in);
-    return true;
-}
-
-bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_t, uint64_t), char *why, size_t why_size) {
+bool romfs_layout(const char *dir, RomfsLayout *out, char *why, size_t why_size) {
     #define FAIL(...) do { if (why) snprintf(why, why_size, __VA_ARGS__); goto fail; } while (0)
     bool ok = false;
-    FILE *out = NULL;
-    uint8_t *dtab = NULL, *ftab = NULL, *buf = NULL;
+    uint8_t *dtab = NULL, *ftab = NULL;
     uint32_t *dbuckets = NULL, *fbuckets = NULL;
     Lists l = {0};
+    memset(out, 0, sizeof *out);
     Dir *root = scan(dir, "", NULL, 0);
     if (!root) FAIL("can't read %s", dir);
     // table order: root, then each directory's subdirectories as flatten() lists them; files likewise
@@ -169,12 +262,11 @@ bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_
     for (int i = 0; i < l.nd; i++) l.dirs[i]->off = dsize, dsize += 0x18 + align4((uint32_t)strlen(l.dirs[i]->name));
     for (int i = 0; i < l.nf; i++) l.files[i]->off = fsize, fsize += 0x20 + align4((uint32_t)strlen(l.files[i]->name));
     // file data offsets (relative to the data start), each 16-byte aligned
-    uint64_t data = 0, total = 0;
+    uint64_t data = 0;
     for (int i = 0; i < l.nf; i++) {
         data = align16(data);
         l.files[i]->data_off = data;
         data += l.files[i]->size;
-        total += l.files[i]->size;
     }
 
     uint32_t nbd = bucket_count((uint32_t)l.nd), nbf = bucket_count((uint32_t)l.nf);
@@ -218,41 +310,35 @@ bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_
     }
 
     // header: tables after the file data (4-byte aligned)
-    uint64_t dhash_off = (DATA_START + data + 3) & ~3ull;
+    uint64_t dhash_off = (ROMFS_DATA_START + data + 3) & ~3ull;
     uint64_t dmeta_off = dhash_off + 4ull * nbd, fhash_off = dmeta_off + dsize, fmeta_off = fhash_off + 4ull * nbf;
-    uint8_t hdr[DATA_START] = {0};
-    uint64_t hv[10] = {0x50, dhash_off, 4ull * nbd, dmeta_off, dsize, fhash_off, 4ull * nbf, fmeta_off, fsize, DATA_START};
-    memcpy(hdr, hv, sizeof hv);
-
-    out = fopen(out_path, "wb");
-    if (!out) FAIL("can't write %s", out_path);
-    if (fwrite(hdr, 1, DATA_START, out) != DATA_START) FAIL("write failed (disk full?)");
-    size_t bufsize = 4u << 20;
-    buf = malloc(bufsize);
-    uint64_t pos = 0, done = 0;
-    static const uint8_t zero[16];
-    for (int i = 0; i < l.nf; i++) {
-        File *f = l.files[i];
-        if (f->data_off > pos && fwrite(zero, 1, (size_t)(f->data_off - pos), out) != f->data_off - pos)
-            FAIL("write failed (disk full?)");
-        if (!copy_data(out, f->path, f->size, buf, bufsize, &done, total, progress)) FAIL("can't copy %s", f->path);
-        pos = f->data_off + f->size;
-    }
-    uint64_t tail = dhash_off - DATA_START - pos;
-    if (tail && fwrite(zero, 1, (size_t)tail, out) != tail) FAIL("write failed (disk full?)");
-    if (fwrite(dbuckets, 4, nbd, out) != nbd || fwrite(dtab, 1, dsize, out) != dsize ||
-        fwrite(fbuckets, 4, nbf, out) != nbf || fwrite(ftab, 1, fsize, out) != fsize)
-        FAIL("write failed (disk full?)");
-    if (fclose(out) != 0) { out = NULL; FAIL("write failed (disk full?)"); }
-    out = NULL;
+    uint64_t hv[10] = {0x50, dhash_off, 4ull * nbd, dmeta_off, dsize, fhash_off, 4ull * nbf, fmeta_off, fsize, ROMFS_DATA_START};
+    memcpy(out->header, hv, sizeof hv);
+    // the tables, one blob from dhash_off: dir hash, dir entries, file hash, file entries
+    out->tables_off = dhash_off;
+    out->tables_size = fmeta_off + fsize - dhash_off;
+    out->tables = malloc(out->tables_size);
+    memcpy(out->tables, dbuckets, 4ull * nbd);
+    memcpy(out->tables + (dmeta_off - dhash_off), dtab, dsize);
+    memcpy(out->tables + (fhash_off - dhash_off), fbuckets, 4ull * nbf);
+    memcpy(out->tables + (fmeta_off - dhash_off), ftab, fsize);
+    out->size = fmeta_off + fsize;
+    out->files = malloc(sizeof *out->files * l.nf);
+    out->nfiles = l.nf;
+    for (int i = 0; i < l.nf; i++)  // (in data order: sorted by start)
+        out->files[i] = (RomfsLayoutFile){ROMFS_DATA_START + l.files[i]->data_off, l.files[i]->size, strdup(l.files[i]->path)};
     ok = true;
 fail:
-    if (out) fclose(out);
-    if (!ok) remove(out_path);
-    free(buf), free(dtab), free(ftab), free(dbuckets), free(fbuckets), free(l.dirs), free(l.files);
+    free(dtab), free(ftab), free(dbuckets), free(fbuckets), free(l.dirs), free(l.files);
     free_tree(root);
     return ok;
     #undef FAIL
+}
+
+void romfs_layout_free(RomfsLayout *l) {
+    for (int i = 0; i < l->nfiles; i++) free(l->files[i].path);
+    free(l->files), free(l->tables);
+    memset(l, 0, sizeof *l);
 }
 
 // ------------------------------------------------------------------ copying the player's folder
@@ -309,37 +395,11 @@ static bool copy_dir(Dir *d, const char *dst, uint64_t *done, uint64_t total, vo
     return true;
 }
 
-bool romfs_image_ok(const char *path, char *why, size_t why_size) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { snprintf(why, why_size, "can't open it"); return false; }
-    uint64_t h[10] = {0};
-    size_t n = fread(h, 1, sizeof h, f);
-    fseeko(f, 0, SEEK_END);
-    uint64_t size = (uint64_t)ftello(f);
-    fclose(f);
-    if (n == sizeof h && !memcmp(h, "IVFC", 4)) { snprintf(why, why_size, "an IVFC image, not a plain RomFS"); return false; }
-    if (n != sizeof h || h[0] != 0x50) { snprintf(why, why_size, "no RomFS header (%llu bytes)", (unsigned long long)size); return false; }
-    for (int i = 1; i < 9; i += 2)  // (dir hash, dir meta, file hash, file meta: offset and size, inside the file)
-        if (!h[i + 1] || h[i + 1] > (64ull << 20) || h[i] > size || h[i + 1] > size - h[i]) {
-            snprintf(why, why_size, "its tables point past its end (%llu bytes: cut short?)", (unsigned long long)size);
-            return false;
-        }
-    if (h[9] > size) { snprintf(why, why_size, "its data starts past its end (%llu bytes)", (unsigned long long)size); return false; }
-    // Files missing: the game reads a file whose open failed, without checking, and closes (issue #37: 19165 files; the
-    // whole game has 27818). The file table's entries: parent, sibling (u32), offset, size (u64), hash, name length (u32), name.
-    uint8_t *meta = malloc(h[8]);
-    f = meta ? fopen(path, "rb") : NULL;
-    bool got = f && fseeko(f, (off_t)h[7], SEEK_SET) == 0 && fread(meta, 1, h[8], f) == h[8];
-    if (f) fclose(f);
-    int nfiles = 0;
-    for (uint64_t o = 0; got && o + 0x20 <= h[8]; nfiles++) {
-        uint32_t len;
-        memcpy(&len, meta + o + 0x1C, 4);
-        o += 0x20 + ((len + 3ull) & ~3ull);
-    }
-    free(meta);
-    if (got && nfiles < ROMFS_MIN_FILES) { snprintf(why, why_size, "only %d files: the game has %d", nfiles, ROMFS_GAME_FILES); return false; }
-    return true;
+bool romfs_copy_file(const char *src, const char *dst) {
+    struct stat st;
+    if (stat(src, &st) != 0) return false;
+    uint64_t done = 0;
+    return copy_file(src, dst, (uint64_t)st.st_size, &done, (uint64_t)st.st_size, NULL);
 }
 
 bool romfs_copy_tree(const char *src, const char *dst, void (*progress)(uint64_t, uint64_t)) {
@@ -353,11 +413,4 @@ bool romfs_copy_tree(const char *src, const char *dst, void (*progress)(uint64_t
     free(l.dirs), free(l.files);
     free_tree(t);
     return ok;
-}
-
-bool romfs_copy_file(const char *src, const char *dst, void (*progress)(uint64_t, uint64_t)) {
-    struct stat st;
-    if (stat(src, &st) != 0) return false;
-    uint64_t done = 0;
-    return copy_file(src, dst, (uint64_t)st.st_size, &done, (uint64_t)st.st_size, progress);
 }

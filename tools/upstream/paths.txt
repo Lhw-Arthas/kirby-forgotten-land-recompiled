@@ -1,0 +1,6 @@
+# What this repo takes from LAS Recomp, relative to the LAS checkout; a trailing / takes the whole folder, minus
+# tools/upstream/removed.txt. Everything else in LAS (docs, README, CI, Android project) is not taken.
+Makefile
+runtime/
+tools/
+third_party/

@@ -16,7 +16,14 @@ NVN(nvnCommandBufferInitialize) {
     SET_HOST(A(0), cb);
     RET(1);
 }
-NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }
+struct CmdSpill { CmdSpill *next; uint64_t owner, size; bool busy; _Alignas(16) uint8_t mem[]; };  // owner: the guest chunk it continues
+
+NVN(nvnCommandBufferFinalize) {
+    NvnCmdBuf *cb = cb_of(A(0));
+    for (CmdSpill *s = cb->spills, *n; s; s = n) n = s->next, free(s);
+    free(cb);
+    SET_HOST(A(0), 0);
+}
 NVN(nvnCommandBufferSetDebugLabel) { (void)c; }
 
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
@@ -27,9 +34,7 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     return r;
 }
 
-NVN(nvnCommandBufferAddCommandMemory) {
-    NvnCmdBuf *cb = cb_of(A(0));
-    uint64_t mem = HOST(NvnPool, A(1))->storage + A(2), size = A(3);
+static void use_memory(NvnCmdBuf *cb, uint64_t mem, uint64_t size) {
     if (cb->recording && cb->mem) {
         // chain the list being recorded into the new chunk
         CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
@@ -38,6 +43,15 @@ NVN(nvnCommandBufferAddCommandMemory) {
     cb->mem = mem;
     cb->size = size;
     cb->used = 0;
+}
+
+NVN(nvnCommandBufferAddCommandMemory) {
+    NvnCmdBuf *cb = cb_of(A(0));
+    uint64_t mem = HOST(NvnPool, A(1))->storage + A(2);
+    for (CmdSpill *s = cb->spills; s; s = s->next)  // (the game reuses the chunk: it is done with the lists in it)
+        if (s->owner == mem) s->busy = false;
+    cb->chunk = mem;
+    use_memory(cb, mem, A(3));
 }
 NVN(nvnCommandBufferAddControlMemory) { (void)c; }
 NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
@@ -55,12 +69,30 @@ NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); 
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
 NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 
+// The game sizes its command memory for NVN's encoding, and a CmdRec is bigger than most NVN commands: a list can outgrow
+// a chunk the game never expected to fill (the credits: 512 KB, and its callback adds nothing). The list goes on in host
+// memory kept with the guest chunk it continues, and reused once the game adds that chunk again.
+static void spill(NvnCmdBuf *cb, uint64_t need) {
+    CmdSpill *s = cb->spills;
+    while (s && (s->busy || s->size < need)) s = s->next;
+    if (!s) {
+        uint64_t size = need > 0x40000 ? need : 0x40000;
+        LOG("[nvn] command buffer %llx: a list outgrew its command memory, %llu KB more in host memory\n",
+            (unsigned long long)cb->guest, (unsigned long long)(size >> 10));
+        s = malloc(sizeof *s + size);
+        s->size = size;
+        s->next = cb->spills;
+        cb->spills = s;
+    }
+    s->owner = cb->chunk, s->busy = true;
+    use_memory(cb, (uint64_t)(uintptr_t)s->mem, s->size);
+}
+
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
-    for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
-        if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
+    if ((!cb->mem || cb->used + size + JUMP_RESERVE > cb->size) && cb->callback) {
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = cb->guest;
@@ -70,44 +102,20 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
         guest_call(c, cb->callback);
         memcpy(c->x, saved, sizeof saved);
     }
+    if (!cb->mem || cb->used + size + JUMP_RESERVE > cb->size) spill(cb, size + JUMP_RESERVE);
     CmdRec *r = raw_rec(cb->mem + cb->used, op, size);
     cb->used += size;
     return r;
 }
 
-// ---- the game object being drawn (frame interpolation, docs/PESQUISA-60FPS.md)
-// The in-between frame pairs each draw with the same object's draw in the previous frame (the game reorders objects every
-// frame: pairing by order made ghosts). g_obj_tag names the object being drawn: nothing sets it for this game.
-static __thread uint64_t g_obj_tag;
-// Before a draw or a command list call: a CMD_OBJECT when the object changed since the list's last one.
-static void obj_mark(Cpu *c, NvnCmdBuf *cb) {
-    if (cb->obj_tag == g_obj_tag) return;
-    CmdRec *r = rec(c, cb, CMD_OBJECT, 0);
-    r->x[0] = g_obj_tag;
-    cb->obj_tag = g_obj_tag;
-}
-
-static void draw_chain(Cpu *c, const char *kind, uint64_t count);
-static uint64_t g_trace_cb[16], g_trace_list[64];  // (LARECOMP_TRACE_COUNT, below)
-static int g_ntrace_cb, g_ntrace_list;
 NVN(nvnCommandBufferBeginRecording) {
-    draw_chain(c, "begin", 0);
     NvnCmdBuf *cb = cb_of(A(0));
-    cb->obj_tag = 0;
     cb->recording = true;
     rec(c, cb, CMD_BARRIER, 0);  // makes sure memory exists; the list starts here
     cb->start = cb->mem + cb->used - sizeof(CmdRec);
-    nvn_list_begin(cb->start);
 }
 NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
-    for (int i = 0; i < g_ntrace_cb; i++)
-        if (g_trace_cb[i] == A(0)) {  // (LARECOMP_TRACE_COUNT: this list holds the traced draw)
-            g_trace_cb[i] = g_trace_cb[--g_ntrace_cb];
-            if (g_ntrace_list < 64) g_trace_list[g_ntrace_list++] = cb->start;
-            LOG("[trace] list %llx holds the traced draw\n", (unsigned long long)cb->start);
-            break;
-        }
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
     RET(cb->start);
@@ -138,14 +146,10 @@ static CmdRec *record_copy(Cpu *c, uint32_t op, int arg, uint32_t len) {
 #define PLAIN(name, op) NVN(name) { Snap s = snap(c); record(c, op, 0, &s); }
 
 // ---- state binding
-// (cmd, program, stages): only the stages in the mask are bound. Let's Go binds separate programs per stage (a
-// vertex program, then a fragment program) and unbinds stages with a NULL program: the executor (exec.c) keeps the
-// combination - binding the whole program each time left draws with half a program, all skipped (no 3D).
 NVN(nvnCommandBufferBindProgram) {
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_BIND_PROGRAM, 0, &s);
-    r->x[0] = s.x[1] ? (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]) : 0;  // host program (0: unbind the stages)
-    r->x[1] = s.x[2];                                                      // NVNshaderStageBits
+    r->x[0] = (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]);  // host program
 }
 NVN(nvnCommandBufferBindBlendState) { record_copy(c, CMD_BIND_BLEND, 1, 8); }
 NVN(nvnCommandBufferBindChannelMaskState) { record_copy(c, CMD_BIND_CHANNEL_MASK, 1, 4); }
@@ -236,10 +240,18 @@ NVN(nvnCommandBufferSetRenderTargets) {
     const uint64_t *colors = (const uint64_t *)(uintptr_t)s.x[2], *views = (const uint64_t *)(uintptr_t)s.x[3];
     for (int i = 0; i < n; i++) {
         rt.tex[i] = colors && colors[i] ? (uint64_t)(uintptr_t)HOST(NvnTexture, colors[i]) : 0;
-        if (views && views[i]) { rt.has_view[i] = 1; memcpy(&rt.views[i], (void *)(uintptr_t)views[i], sizeof(NvnTextureView)); }
+        if (views && views[i]) {
+            rt.has_view[i] = 1;
+            memcpy(&rt.views[i], (void *)(uintptr_t)views[i], sizeof(NvnTextureView));
+            nvn_texture_note_view((NvnTexture *)(uintptr_t)rt.tex[i], &rt.views[i]);
+        }
     }
     rt.depth = s.x[4] ? (uint64_t)(uintptr_t)HOST(NvnTexture, s.x[4]) : 0;
-    if (s.x[5]) { rt.has_dview = 1; memcpy(&rt.dview, (void *)(uintptr_t)s.x[5], sizeof(NvnTextureView)); }
+    if (s.x[5]) {
+        rt.has_dview = 1;
+        memcpy(&rt.dview, (void *)(uintptr_t)s.x[5], sizeof(NvnTextureView));
+        nvn_texture_note_view((NvnTexture *)(uintptr_t)rt.depth, &rt.dview);
+    }
     CmdRec *r = record(c, CMD_SET_RENDER_TARGETS, sizeof rt, &s);
     r->x[0] = (uint64_t)n;
     memcpy(r->extra, &rt, sizeof rt);
@@ -329,7 +341,7 @@ static void clear_texture(Cpu *c, int kind) {
     Snap s = snap(c);
     ClearTexRec ct = {0};
     ct.tex = (uint64_t)(uintptr_t)HOST(NvnTexture, s.x[1]);
-    if (s.x[2]) { ct.has_view = 1; memcpy(&ct.view, (void *)(uintptr_t)s.x[2], sizeof ct.view); }
+    if (s.x[2]) { ct.has_view = 1; memcpy(&ct.view, (void *)(uintptr_t)s.x[2], sizeof ct.view); nvn_texture_note_view((NvnTexture *)(uintptr_t)ct.tex, &ct.view); }
     if (s.x[3]) memcpy(ct.region, (void *)(uintptr_t)s.x[3], sizeof ct.region);
     if (s.x[4]) memcpy(ct.color, (void *)(uintptr_t)s.x[4], 16);
     CmdRec *r = record(c, CMD_CLEAR_TEXTURE, sizeof ct, &s);
@@ -357,33 +369,18 @@ NVN(nvnCommandBufferDiscardColor) {
 NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
 
 // ---- draws (all integer arguments fit in x1..x7)
-NVN(nvnCommandBufferDrawArrays) { draw_chain(c, "arrays", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
-NVN(nvnCommandBufferDrawArraysInstanced) { draw_chain(c, "arrays_inst", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); record(c, CMD_DRAW_ARRAYS, 0, &s); }
+NVN(nvnCommandBufferDrawArrays) { Snap s = snap(c); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
+NVN(nvnCommandBufferDrawArraysInstanced) { Snap s = snap(c); record(c, CMD_DRAW_ARRAYS, 0, &s); }
 // Debug: LARECOMP_TRACE_COUNT=<n> logs the guest call chain of indexed draws with n indices.
-// LARECOMP_TRACE_COUNT: the command lists that hold the traced draw (recorded once, called every frame): their
-// handles, so nvnCommandBufferCallCommands can log who calls them and in which present.
-static bool trace_list(uint64_t h) { for (int i = 0; i < g_ntrace_list; i++) if (g_trace_list[i] == h) return true; return false; }
-static void trace_chain(Cpu *c) {
-    uint64_t fp = c->x[29];
-    for (int i = 0; i < 14 && fp >= 0x7000000000ull && fp < 0x8000000000ull && (fp & 7) == 0; i++) {
-        uint64_t next = *(uint64_t *)(uintptr_t)fp, lr = *(uint64_t *)(uintptr_t)(fp + 8);
-        LOG(" %llx", (unsigned long long)lr);
-        if (next <= fp) break;
-        fp = next;
-    }
-    LOG("\n");
-}
 static void trace_draw(Cpu *c, uint64_t count) {
     static long want = -2;
     if (want == -2) want = getenv("LARECOMP_TRACE_COUNT") ? atol(getenv("LARECOMP_TRACE_COUNT")) : -1;
     if (want < 0 || (long)count != want) return;
     static int n;
-    if (n++ > 4000) return;
-    if (g_ntrace_cb < 16) g_trace_cb[g_ntrace_cb++] = c->x[0];
-    extern uint64_t renderer_game_frame(void);
-    LOG("[trace] f%llu draw count %llu lr %llx chain:", (unsigned long long)renderer_game_frame(), (unsigned long long)count, (unsigned long long)c->x[30]);
+    if (n++ > 40) return;
+    LOG("[trace] draw count %llu lr %llx chain:", (unsigned long long)count, (unsigned long long)c->x[30]);
     uint64_t fp = c->x[29];
-    for (int i = 0; i < 14 && fp >= 0x7000000000ull && fp < 0x8000000000ull && (fp & 7) == 0; i++) {
+    for (int i = 0; i < 14 && fp >= GUEST_LO && fp < GUEST_HI && (fp & 7) == 0; i++) {
         uint64_t next = *(uint64_t *)(uintptr_t)fp, lr = *(uint64_t *)(uintptr_t)(fp + 8);
         LOG(" %llx", (unsigned long long)lr);
         if (next <= fp) break;
@@ -392,55 +389,19 @@ static void trace_draw(Cpu *c, uint64_t count) {
     LOG("\n");
 }
 
-// Debug: LARECOMP_DRAW_CHAINS=<frame>[-<last>] logs every draw recorded during those presents: the present, its
-// order, count and the guest call chain (return addresses up the frame records), plus command list recordings and
-// calls - to find which game function draws each object, and whether lists are recorded every frame or reused.
-static bool chains_on(void) {
-    static long from = -2, to = -2;
-    if (from == -2) {
-        const char *e = getenv("LARECOMP_DRAW_CHAINS");
-        from = e ? atol(e) : -1;
-        to = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : from;
-    }
-    extern uint64_t renderer_game_frame(void);
-    long f = (long)renderer_game_frame();
-    return from >= 0 && f >= from && f <= to;
-}
-static void draw_chain(Cpu *c, const char *kind, uint64_t count) {
-    if (!chains_on()) return;
-    extern uint64_t renderer_game_frame(void);
-    static int n;
-    char line[512];
-    int len = snprintf(line, sizeof line, "[chain] f%llu %d %s %llu cb %llx tag %llx:", (unsigned long long)renderer_game_frame(),
-                       n++, kind, (unsigned long long)count, (unsigned long long)c->x[0], (unsigned long long)g_obj_tag);
-    uint64_t fp = c->x[29];
-    len += snprintf(line + len, sizeof line - len, " %llx", (unsigned long long)c->x[30]);
-    for (int i = 0; i < 16 && fp >= 0x7000000000ull && fp < 0x8000000000ull && (fp & 7) == 0; i++) {
-        uint64_t next = *(uint64_t *)(uintptr_t)fp, lr = *(uint64_t *)(uintptr_t)(fp + 8);
-        if (len < (int)sizeof line - 20) len += snprintf(line + len, sizeof line - len, " %llx", (unsigned long long)lr);
-        if (next <= fp) break;
-        fp = next;
-    }
-    LOG("%s\n", line);
-}
-
 NVN(nvnCommandBufferDrawElements) {
     trace_draw(c, c->x[3]);
-    draw_chain(c, "elements", c->x[3]);
     Snap s = snap(c);
-    obj_mark(c, cb_of(s.x[0]));
     CmdRec *r = record(c, CMD_DRAW_ELEMENTS, 0, &s);
     r->x[4] = 0; r->x[5] = 0; r->x[6] = 1;  // base vertex, base instance, instances
 }
 NVN(nvnCommandBufferDrawElementsBaseVertex) {
     trace_draw(c, c->x[3]);
-    draw_chain(c, "elements_bv", c->x[3]);
     Snap s = snap(c);
-    obj_mark(c, cb_of(s.x[0]));
     CmdRec *r = record(c, CMD_DRAW_ELEMENTS, 0, &s);
     r->x[5] = 0; r->x[6] = 1;
 }
-NVN(nvnCommandBufferDrawElementsInstanced) { trace_draw(c, c->x[3]); draw_chain(c, "elements_inst", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
+NVN(nvnCommandBufferDrawElementsInstanced) { trace_draw(c, c->x[3]); Snap s = snap(c); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
 PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
@@ -458,7 +419,7 @@ NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
 static void tex_ref(TexRef *t, uint64_t tex, uint64_t view, uint64_t region) {
     t->tex = tex ? (uint64_t)(uintptr_t)HOST(NvnTexture, tex) : 0;
-    if (view) { t->has_view = 1; memcpy(&t->view, (void *)(uintptr_t)view, sizeof t->view); }
+    if (view) { t->has_view = 1; memcpy(&t->view, (void *)(uintptr_t)view, sizeof t->view); nvn_texture_note_view((NvnTexture *)(uintptr_t)t->tex, &t->view); }
     if (region) memcpy(t->region, (void *)(uintptr_t)region, sizeof t->region);
 }
 NVN(nvnCommandBufferCopyBufferToTexture) {  // (cmd, src, dst, dstView, dstRegion, flags)
@@ -511,7 +472,6 @@ NVN(nvnCommandBufferFenceSync) {
     // work executes at submit time, so the sync is satisfied once this list has run
     Snap s = snap(c);
     record(c, CMD_FENCE_SYNC, 0, &s);
-    nvn_list_fence(cb_of(s.x[0])->start, s.x[1]);  // (with the render thread: the sync takes the list's ticket at submit)
 }
 PLAIN(nvnCommandBufferWaitSync, CMD_WAIT_SYNC)
 PLAIN(nvnCommandBufferBarrier, CMD_BARRIER)
@@ -520,24 +480,8 @@ PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 NVN(nvnCommandBufferReportValue) { (void)c; }
 NVN(nvnCommandBufferResetCounter) { (void)c; }
-NVN(nvnCommandBufferCallCommands) {
-    if (g_ntrace_list) {
-        const uint64_t *h = (const uint64_t *)(uintptr_t)A(2);
-        for (uint64_t i = 0; i < A(1); i++)
-            if (trace_list(h[i])) {
-                extern uint64_t renderer_game_frame(void);
-                LOG("[trace] f%llu call list %llx lr %llx chain:", (unsigned long long)renderer_game_frame(), (unsigned long long)h[i],
-                    (unsigned long long)c->x[30]);
-                trace_chain(c);
-            }
-    }
-    draw_chain(c, "call", A(1)); obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8);
-    nvn_list_call(cb_of(A(0))->start, (const uint64_t *)(uintptr_t)A(2), (int)A(1));  // (their fences are this list's too)
-}
-NVN(nvnCommandBufferCopyCommands) {
-    obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8);
-    nvn_list_call(cb_of(A(0))->start, (const uint64_t *)(uintptr_t)A(2), (int)A(1));
-}
+NVN(nvnCommandBufferCallCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
+NVN(nvnCommandBufferCopyCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; }

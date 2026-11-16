@@ -1,0 +1,60 @@
+# Mouthful Mode (Carmouth) and its DeformCarBoost guide clip, for tools/run_scripted.sh with LARECOMP_LOCKSTEP=1 and
+# LARECOMP_STAGE=Level0/Stage1/Step02 (the first stage's second step, where the car is).
+# Issues #10 and #6 lost the GPU here on 0.2.0. The guide opens around frame 4200; after it the car drives out of its area
+# and back in, dashing, so the clip opens and closes again and again.
+
+# a new game: "Do Not Use" online, difficulty, the opening skipped, then into the car ahead (B: inhale)
+880:LEFT:8  950:A:8  1400:A:8  1800:A:8  2600:A:8  2700:PLUS:8  2760:PLUS:8  2800:B:8
+3400:A:8  3550:A:8
+3600:STICK_UP:90  3660:B:160
+
+# to the cracked garage wall the guide stands at (B: Turbo Dash); a car stuck at a pillar backs off and tries again
+3900:STICK_45:240  3920:B:20  4000:B:20  4150:STICK_UP:240  4170:B:20
+4400:STICK_DOWN:50  4450:STICK_45:90  4540:STICK_UP:120  4550:B:20  4660:STICK_135:60
+4720:STICK_DOWN:50  4770:STICK_45:90  4860:STICK_UP:120  4870:B:20  4980:STICK_135:60
+5040:STICK_DOWN:50  5090:STICK_45:90  5180:STICK_UP:120  5190:B:20  5300:STICK_135:60
+5360:STICK_DOWN:50  5410:STICK_45:90  5500:STICK_UP:120  5510:B:20  5620:STICK_135:60
+5680:STICK_DOWN:50  5730:STICK_45:90  5820:STICK_UP:120  5830:B:20  5940:STICK_135:60
+6000:STICK_DOWN:50  6050:STICK_45:90  6140:STICK_UP:120  6150:B:20  6260:STICK_135:60
+6320:STICK_DOWN:50  6370:STICK_45:90  6460:STICK_UP:120  6470:B:20  6580:STICK_135:60
+6640:STICK_DOWN:50  6690:STICK_45:90  6780:STICK_UP:120  6790:B:20  6900:STICK_135:60
+6960:STICK_DOWN:50  7010:STICK_45:90  7100:STICK_UP:120  7110:B:20  7220:STICK_135:60
+7280:STICK_DOWN:50  7330:STICK_45:90  7420:STICK_UP:120  7430:B:20  7540:STICK_135:60
+7600:STICK_DOWN:50  7650:STICK_45:90  7740:STICK_UP:120  7750:B:20  7860:STICK_135:60
+7920:STICK_DOWN:50  7970:STICK_45:90  8060:STICK_UP:120  8070:B:20  8180:STICK_135:60
+8240:STICK_DOWN:50  8290:STICK_45:90  8380:STICK_UP:120  8390:B:20  8500:STICK_135:60
+8560:STICK_DOWN:50  8610:STICK_45:90  8700:STICK_UP:120  8710:B:20  8820:STICK_135:60
+8880:STICK_DOWN:50  8930:STICK_45:90  9020:STICK_UP:120  9030:B:20  9140:STICK_135:60
+9200:STICK_DOWN:50  9250:STICK_45:90  9340:STICK_UP:120  9350:B:20  9460:STICK_135:60
+
+# the guide is open: out of its area and back in, dashing
+@DeformCarBoost+200:STICK_DOWN:150  @DeformCarBoost+210:B:30  @DeformCarBoost+360:STICK_UP:150  @DeformCarBoost+370:B:30
+@DeformCarBoost+520:STICK_DOWN:150  @DeformCarBoost+530:B:30  @DeformCarBoost+680:STICK_UP:150  @DeformCarBoost+690:B:30
+@DeformCarBoost+840:STICK_DOWN:150  @DeformCarBoost+850:B:30  @DeformCarBoost+1000:STICK_UP:150  @DeformCarBoost+1010:B:30
+@DeformCarBoost+1160:STICK_DOWN:150  @DeformCarBoost+1170:B:30  @DeformCarBoost+1320:STICK_UP:150  @DeformCarBoost+1330:B:30
+@DeformCarBoost+1480:STICK_DOWN:150  @DeformCarBoost+1490:B:30  @DeformCarBoost+1640:STICK_UP:150  @DeformCarBoost+1650:B:30
+@DeformCarBoost+1800:STICK_DOWN:150  @DeformCarBoost+1810:B:30  @DeformCarBoost+1960:STICK_UP:150  @DeformCarBoost+1970:B:30
+@DeformCarBoost+2120:STICK_DOWN:150  @DeformCarBoost+2130:B:30  @DeformCarBoost+2280:STICK_UP:150  @DeformCarBoost+2290:B:30
+@DeformCarBoost+2440:STICK_DOWN:150  @DeformCarBoost+2450:B:30  @DeformCarBoost+2600:STICK_UP:150  @DeformCarBoost+2610:B:30
+@DeformCarBoost+2760:STICK_DOWN:150  @DeformCarBoost+2770:B:30  @DeformCarBoost+2920:STICK_UP:150  @DeformCarBoost+2930:B:30
+@DeformCarBoost+3080:STICK_DOWN:150  @DeformCarBoost+3090:B:30  @DeformCarBoost+3240:STICK_UP:150  @DeformCarBoost+3250:B:30
+@DeformCarBoost+3400:STICK_DOWN:150  @DeformCarBoost+3410:B:30  @DeformCarBoost+3560:STICK_UP:150  @DeformCarBoost+3570:B:30
+@DeformCarBoost+3720:STICK_DOWN:150  @DeformCarBoost+3730:B:30  @DeformCarBoost+3880:STICK_UP:150  @DeformCarBoost+3890:B:30
+@DeformCarBoost+4040:STICK_DOWN:150  @DeformCarBoost+4050:B:30  @DeformCarBoost+4200:STICK_UP:150  @DeformCarBoost+4210:B:30
+@DeformCarBoost+4360:STICK_DOWN:150  @DeformCarBoost+4370:B:30  @DeformCarBoost+4520:STICK_UP:150  @DeformCarBoost+4530:B:30
+@DeformCarBoost+4680:STICK_DOWN:150  @DeformCarBoost+4690:B:30  @DeformCarBoost+4840:STICK_UP:150  @DeformCarBoost+4850:B:30
+@DeformCarBoost+5000:STICK_DOWN:150  @DeformCarBoost+5010:B:30  @DeformCarBoost+5160:STICK_UP:150  @DeformCarBoost+5170:B:30
+@DeformCarBoost+5320:STICK_DOWN:150  @DeformCarBoost+5330:B:30  @DeformCarBoost+5480:STICK_UP:150  @DeformCarBoost+5490:B:30
+@DeformCarBoost+5640:STICK_DOWN:150  @DeformCarBoost+5650:B:30  @DeformCarBoost+5800:STICK_UP:150  @DeformCarBoost+5810:B:30
+@DeformCarBoost+5960:STICK_DOWN:150  @DeformCarBoost+5970:B:30  @DeformCarBoost+6120:STICK_UP:150  @DeformCarBoost+6130:B:30
+@DeformCarBoost+6280:STICK_DOWN:150  @DeformCarBoost+6290:B:30  @DeformCarBoost+6440:STICK_UP:150  @DeformCarBoost+6450:B:30
+@DeformCarBoost+6600:STICK_DOWN:150  @DeformCarBoost+6610:B:30  @DeformCarBoost+6760:STICK_UP:150  @DeformCarBoost+6770:B:30
+@DeformCarBoost+6920:STICK_DOWN:150  @DeformCarBoost+6930:B:30  @DeformCarBoost+7080:STICK_UP:150  @DeformCarBoost+7090:B:30
+@DeformCarBoost+7240:STICK_DOWN:150  @DeformCarBoost+7250:B:30  @DeformCarBoost+7400:STICK_UP:150  @DeformCarBoost+7410:B:30
+@DeformCarBoost+7560:STICK_DOWN:150  @DeformCarBoost+7570:B:30  @DeformCarBoost+7720:STICK_UP:150  @DeformCarBoost+7730:B:30
+@DeformCarBoost+7880:STICK_DOWN:150  @DeformCarBoost+7890:B:30  @DeformCarBoost+8040:STICK_UP:150  @DeformCarBoost+8050:B:30
+@DeformCarBoost+8200:STICK_DOWN:150  @DeformCarBoost+8210:B:30  @DeformCarBoost+8360:STICK_UP:150  @DeformCarBoost+8370:B:30
+@DeformCarBoost+8520:STICK_DOWN:150  @DeformCarBoost+8530:B:30  @DeformCarBoost+8680:STICK_UP:150  @DeformCarBoost+8690:B:30
+@DeformCarBoost+8840:STICK_DOWN:150  @DeformCarBoost+8850:B:30  @DeformCarBoost+9000:STICK_UP:150  @DeformCarBoost+9010:B:30
+@DeformCarBoost+9160:STICK_DOWN:150  @DeformCarBoost+9170:B:30  @DeformCarBoost+9320:STICK_UP:150  @DeformCarBoost+9330:B:30
+@DeformCarBoost+9480:STICK_DOWN:150  @DeformCarBoost+9490:B:30  @DeformCarBoost+9640:STICK_UP:150  @DeformCarBoost+9650:B:30

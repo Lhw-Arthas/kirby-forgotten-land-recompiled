@@ -1,6 +1,6 @@
-// RomFS image from a folder of game files (runtime/romfs_build.c). The game reads its data through one raw RomFS
-// image (romfs.bin, runtime/services/fs.c); players bring their own game files, and the start screen builds the image
-// from their romfs/ folder.
+// The game's RomFS image, laid out from a folder of game files (runtime/romfs_build.c). The game reads its data through
+// one raw RomFS image; runtime/services/fs.c serves that image from this layout - the header and tables in memory, each
+// file's data straight from its file in the player's romfs/ folder - so no second copy of the game data is kept.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
@@ -10,23 +10,44 @@
 extern "C" {
 #endif
 
-// Writes the RomFS image of the folder `dir` to `out`. progress (may be NULL): bytes of file data written so far and
-// the total, now and then. false = failed (why: a short message).
-bool romfs_build(const char *dir, const char *out, void (*progress)(uint64_t done, uint64_t total), char *why,
-                 size_t why_size);
+#define ROMFS_DATA_START 0x200u
+typedef struct { uint64_t start, size; char *path; } RomfsLayoutFile;  // start: offset in the image
+typedef struct {
+    uint8_t header[ROMFS_DATA_START];  // the image's first bytes (the 0x50-byte header, then zeros)
+    uint64_t tables_off, tables_size;  // dir hash, dir entries, file hash and file entries, one blob
+    uint8_t *tables;
+    RomfsLayoutFile *files;  // sorted by start; the bytes between files read as zeros
+    int nfiles;
+    uint64_t size;  // the whole image
+} RomfsLayout;
 
-// Whether the file at path is a raw RomFS image the game can read (its 0x50-byte header, and the tables and data it
-// points at inside the file). false: why says what's wrong (an IVFC image - a dump tool's other format -, a cut file...).
-bool romfs_image_ok(const char *path, char *why, size_t why_size);
+// Lays out the RomFS image of the folder `dir`. false = failed (why: a short message).
+bool romfs_layout(const char *dir, RomfsLayout *out, char *why, size_t why_size);
+void romfs_layout_free(RomfsLayout *l);
 
 // Bytes of file data under dir (the image is about this plus its tables).
 uint64_t romfs_dir_bytes(const char *dir);
 
+// The game's files in the player's folder: exefs is the folder holding main and main.npdm, romfs the one holding
+// the game's RomFS (romfs_is_game) - the picked folder itself, its exefs/ and romfs/, or a few levels down (some
+// layouts nest them; the two may be one and the same folder). Either comes back "" when not found. unusable (optional)
+// is set when game packages (.xci / .nsp / .nca...) were seen instead: the player has the game, not its files.
+// True when dir is the game's RomFS: it holds every folder game/game.h names (GAME_ROMFS_MARKERS).
+bool romfs_is_game(const char *dir);
+void romfs_find_game(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, bool *unusable);
+// The same, and a romfs.bin (a RomFS image as one file) found on the way, in image ("" when none): the headless setup
+// (runtime/setup_cli.c) takes either as the game's data. The search stops at the first of them.
+void romfs_find_game_image(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, char *image,
+                           size_t image_size, bool *unusable);
+// Whether the file is a RomFS image the game can read: a plain RomFS (not IVFC), its tables and every file's data
+// inside the file. false: why says what is wrong with it.
+bool romfs_image_ok(const char *path, char *why, size_t why_size);
+
 // Copies the folder tree src to dst (hard links where the file system allows: no second copy of 6 GB). progress as
 // above. false = failed.
 bool romfs_copy_tree(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total));
-// One file the same way (a hard link where the file system allows).
-bool romfs_copy_file(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total));
+// One file the same way (an existing dst is replaced).
+bool romfs_copy_file(const char *src, const char *dst);
 
 #ifdef __cplusplus
 }

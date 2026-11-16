@@ -4,28 +4,44 @@
 
 #include "../hle.h"
 #include "../kernel.h"
+#include "../settings.h"
 
 static uint32_t vsync_r, vsync_w;
 static KEvent *vsync_event;
 uint32_t vi_vsync_handle(void) { return vsync_r; }
-volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framepace.c)
+volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framepace.c, runtime/nvn/pace.c)
+volatile uint64_t g_vsync_ns;     // plat_now_ns() of the latest (stored after the count: count >= the vsync it's from;
+                                  // also frame interpolation's game timeline)
 uint64_t g_native_window;
 
 static void *vsync_thread(void *arg) {
     (void)arg;
     const uint64_t period = 16666667;
     plat_thread_realtime(period);
+    plat_thread_perf_core(PLAT_PERF_VSYNC);
     uint64_t next = plat_now_ns();
     for (;;) {
         next += period;
         plat_sleep_until_ns(next);
         uint64_t now = plat_now_ns();
         if (now > next + period * 3) {
+            // (~100 ms late every frame: macOS coalescing the timers of a thread that lost its real-time policy while
+            // the app isn't frontmost - checked and set again here; the window's focus says whether it was frontmost)
             static int warned;
-            if (warned++ < 20) LOG("[vi] vsync timer late by %llums (host throttling?)\n", (unsigned long long)((now - next) / 1000000));
+            int rt = plat_thread_realtime_check(period);
+            extern bool ui_window_focused(void);
+            if (warned++ < 40) LOG("[vi] vsync timer late by %llums (window focused %d, real-time policy %s)\n", (unsigned long long)((now - next) / 1000000),
+                                    ui_window_focused(), rt == 0 ? "holds" : rt == 1 ? "was gone: set again" : "unknown");
             next = now;  // don't burst-signal to catch up
         }
-        __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELAXED);
+        // Pause on focus lost (Video tab): no vsync while the window isn't in front, so the game waits on it - still
+        // (test runs' windows don't take the focus: never there)
+        extern bool ui_window_focused(void);
+        static int test_run = -1;
+        if (test_run < 0) test_run = getenv("LARECOMP_HIDDEN") || getenv("LARECOMP_WINDOW_SHOT");
+        if (g_settings.pause_unfocused && !test_run && !ui_window_focused()) continue;
+        __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_vsync_ns, now, __ATOMIC_RELEASE);
         pthread_mutex_lock(&g_klock);
         kernel_signal(vsync_event);
         pthread_mutex_unlock(&g_klock);
@@ -50,11 +66,6 @@ HLE_FUNC("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", vi_create_layer) 
 
 HLE_FUNC("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", vi_destroy_layer) { (void)c; }
 HLE_FUNC("_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii", vi_set_layer_crop) { c->x[0] = 0; }
-// Let's Go: how the layer fills the screen. The host window scales the image itself (output_scale.c).
-HLE_FUNC("_ZN2nn2vi19SetLayerScalingModeEPNS0_5LayerENS0_11ScalingModeE", vi_set_layer_scaling_mode) {
-    LOG("[vi] SetLayerScalingMode(%llu)\n", (unsigned long long)c->x[1]);
-    c->x[0] = 0;
-}
 
 HLE_FUNC("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window) {
     if (!g_native_window) g_native_window = (uint64_t)hle_alloc(0x100);

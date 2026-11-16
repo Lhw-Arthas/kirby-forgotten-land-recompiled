@@ -2,9 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../mods.h"
 #include "../hle.h"
 #include "../ipc.h"
+#include "../settings.h"
 
 #define AM_NO_MESSAGE MAKE_RESULT(128, 3)
 #define AM_NO_DATA MAKE_RESULT(128, 2)
@@ -60,6 +60,7 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 66: case 900: break;  // SetCpuBoostMode(u32), SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled: no output
     case 60: {  // GetDefaultDisplayResolution
         int w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;
         LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);
@@ -74,6 +75,10 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 0: LOG("[am] application requested exit\n"); exit(0);
     case 9: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    // LockExit, SetPerformanceModeChangedNotification, SetFocusHandlingMode, SetRestartMessageEnabled,
+    // SetOutOfFocusSuspendingEnabled, SetIdleTimeDetectionExtension: settings with no output
+    case 1: case 12: case 13: case 14: case 16: case 62: break;
+    case 91: resp->copy_handles[resp->ncopy++] = new_event(); break;  // GetAccumulatedSuspendedTickChangedEvent
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
     default: UNHANDLED("ISelfController");
@@ -84,6 +89,7 @@ static void window_controller(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 1: OUT(uint64_t, 0) = 0x1234; resp_size(resp, 8); break;  // GetAppletResourceUserId
+    case 10: break;  // AcquireForegroundRights: no output
     default: UNHANDLED("IWindowController");
     }
 }
@@ -135,8 +141,6 @@ static Service *new_am_storage(const void *data, uint64_t size) {
 
 extern const uint8_t g_user_id[16];
 
-const char *g_game_version = "1.0.0";  // the set-up game's version (runtime/gamesetup.c game_version)
-
 static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
@@ -153,16 +157,16 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
         }
         break;
     case 20: OUT(uint64_t, 0) = 0; resp_size(resp, 8); break;  // EnsureSaveData
-    case 21: memset(resp->data, 0, 8); memcpy(resp->data, game_language(), strlen(game_language())); resp_size(resp, 8);  // GetDesiredLanguage
-        LOG("[am] GetDesiredLanguage: %s\n", game_language()); break;
-    case 23: {  // GetDisplayVersion: the version of the set-up build (runtime/main.c)
-        extern const char *g_game_version;
-        memset(resp->data, 0, 0x10);
-        memcpy(resp->data, g_game_version, strlen(g_game_version));
-        resp_size(resp, 0x10);
+    case 21: {  // GetDesiredLanguage: the game's text language (settings: runtime/settings.c, "language")
+        char lang[8] = {0};
+        snprintf(lang, sizeof lang, "%s", settings_language());
+        memcpy(resp->data, lang, 8);
+        resp_size(resp, 8);
         break;
     }
+    case 23: memcpy(resp->data, "1.0.0", 6); resp_size(resp, 0x10); break;
     case 40: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // NotifyRunning
+    case 111: OUT(int32_t, 0) = 0; resp_size(resp, 4); break;  // QueryApplicationPlayStatisticsByUid: no entries
     case 130: case 140: resp->copy_handles[resp->ncopy++] = new_event(); break;
     default: UNHANDLED("IApplicationFunctions");
     }

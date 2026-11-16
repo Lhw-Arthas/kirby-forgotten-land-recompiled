@@ -9,15 +9,27 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Kirby and the Forgotten Land, any region build of the base game (main.npdm's program id).
 const PROGRAM_ID: u64 = 0x0100_4D30_0C5A_E000;
+/// The game's update (patch), which has the same title and a program id ending E800.
+const UPDATE_ID: u64 = 0x0100_4D30_0C5A_E800;
 const MODULES: [&str; 3] = ["main", "sdk", "subsdk0"];
-const SETTING_KEYS: [&str; 3] = ["fullscreen", "render_height", "volume"];
-/// The release runtime, next to the launcher in the zip.
+const SETTING_KEYS: [&str; 3] = ["fullscreen", "resolution", "volume"];
+/// The runtime (game/game.mk EXE_NAME): next to the launcher in the zip, in build/ beside a source checkout.
 const PACKAGED_EXE: &str = "ForgottenLandRecomp.exe";
 /// Packaged mode: the folder the player picked, remembered until Build reads it.
 const PICKED_FILE: &str = "game-folder.txt";
+/// Free disk space the build needs (about 6.4 GB were in use at the peak of a real one, the game files copied: a hard
+/// link on the same drive costs none of that, but the launcher cannot know beforehand), and the game code alone.
+const BUILD_BYTES: u64 = 6_500_000_000;
+const CODE_BYTES: u64 = 1_000_000_000;
+/// The longest install folder path the build works from. Measured with the bundled tools: the build failed to start its
+/// tools from 216 characters on, because Windows paths stop at 260 and the build adds about 45 below this folder.
+const MAX_WORK_PATH: usize = 200;
+/// A game that ends sooner than this after it started did not get anywhere: the launcher says so.
+const EARLY_EXIT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,7 +37,8 @@ enum Phase {
     #[default]
     Idle,
     Runtime,
-    Image,
+    /// Packaged mode: the runtime looking for the game files and copying them. Developer mode: checking the dump.
+    Files,
     Translate,
     Compile,
     Failed,
@@ -59,17 +72,19 @@ enum Mode {
 
 impl Mode {
     fn detect(exe_dir: &Path) -> Mode {
-        if exe_dir.join("lasgen").join("lasgen.exe").is_file() && exe_dir.join("zig").join("zig.exe").is_file() {
-            return Mode::Packaged;
+        let tools = exe_dir.join("lasgen").join("lasgen.exe").is_file() && exe_dir.join("zig").join("zig.exe").is_file();
+        // a release folder with its tools removed (or the launcher started from inside the zip) is still a release folder
+        match find_repo(exe_dir) {
+            Some(repo) if !tools => Mode::Dev(Dev {
+                repo,
+                msys: std::env::var("KFL_MSYS2").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(r"C:\msys64")),
+            }),
+            _ => Mode::Packaged,
         }
-        Mode::Dev(Dev {
-            repo: find_repo(),
-            msys: std::env::var("KFL_MSYS2").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(r"C:\msys64")),
-        })
     }
 }
 
-/// One stdout line of the runtime's `--setup` (runtime/main.c setup_headless) or `--check`.
+/// One stdout line of the runtime's `--setup` (runtime/setup_cli.c) or `--check`.
 #[derive(Debug, PartialEq)]
 enum SetupLine {
     Progress(Phase, f32, Option<String>),
@@ -82,7 +97,7 @@ fn parse_setup_line(line: &str) -> Option<SetupLine> {
     match w.next()? {
         "phase" => {
             let phase = match w.next()? {
-                "looking" | "copying" | "image" => Phase::Image,
+                "looking" | "copying" => Phase::Files,
                 "reading" => Phase::Translate,
                 "compiling" | "finishing" => Phase::Compile,
                 _ => return None,
@@ -101,11 +116,12 @@ fn setup_failure(reason: &str) -> String {
     match reason {
         "not_found" => "No game files were found in that folder. It needs your extracted exefs (it holds main and main.npdm) and romfs (it holds the folders msg and gfx), in it or in folders inside it.",
         "package" => "Those are packed game files (.xci, .nsp). Extract them first (exefs and romfs).",
-        "version" => "That is not Kirby and the Forgotten Land.",
+        "version" => "Those are not the files of Kirby and the Forgotten Land 1.0.0. They are from another game, or from a version of Kirby this release does not support. Extract version 1.0.0 of the base game.",
+        "update" => "That is the game's update, not the base game. Extract the base game, version 1.0.0, without the update.",
         "copy" => "The game files could not be copied. Check the free disk space and try again.",
-        "tools" => "The game code builder is missing from this folder. Unzip the release again.",
-        "bad_image" => "The game data image (romfs.bin) cannot be read. Pick a folder with the romfs folder itself.",
-        _ => "The game code did not build. Open the setup log for the details.",
+        "tools" => "The build tools are missing from this folder. An antivirus may have removed them. Unzip the release again and allow this folder in your antivirus.",
+        "bad_image" => "The game's romfs could not be read. If you picked a romfs.bin, it is cut short or is not a plain RomFS image. Extract the romfs folder again and pick the folder that holds it.",
+        _ => "The game code did not build. Open the setup log for the details. If an antivirus is running, it may have blocked the compiler: allow this folder in it and build again.",
     }
     .into()
 }
@@ -127,12 +143,80 @@ struct Crash {
     log: String,
 }
 
+/// What the runtime says is set up in the work folder (`--status`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Code {
+    None,
+    /// The game files are there, but the game code is missing or was built by another version of the runtime.
+    Build,
+    Ready,
+}
+
+fn parse_status(stdout: &str) -> Code {
+    match stdout.lines().map(str::trim).find(|l| matches!(*l, "ready" | "build" | "none")) {
+        Some("ready") => Code::Ready,
+        Some("build") => Code::Build,
+        _ => Code::None,
+    }
+}
+
+/// The Windows calls the launcher needs.
+#[cfg(windows)]
+mod win {
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use std::process::Child;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows_sys::Win32::System::JobObjects::*;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    /// A job that ends every process in it when the last handle to it closes.
+    pub fn kill_on_close_job() -> HANDLE {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32);
+            job
+        }
+    }
+
+    pub fn join(job: HANDLE, child: &Child) -> bool {
+        unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) != 0 }
+    }
+
+    /// The child ends with the launcher however the launcher ends (closed, crashed, killed): the job's only handle is
+    /// the launcher's own, which Windows closes with the process. Everything the child starts is in the job too.
+    pub fn end_with_launcher(child: &Child) {
+        static JOB: OnceLock<usize> = OnceLock::new();
+        join(*JOB.get_or_init(|| kill_on_close_job() as usize) as HANDLE, child);
+    }
+
+    pub fn free_bytes(dir: &Path) -> Option<u64> {
+        let mut free = 0u64;
+        let ok = unsafe { GetDiskFreeSpaceExW(wide(&dir.to_string_lossy()).as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+        (ok != 0).then_some(free)
+    }
+}
+
 struct App {
     mode: Mode,
     work: PathBuf,
+    /// Why this folder cannot be built in (checked once at startup).
+    work_problem: Option<String>,
     job: Arc<Mutex<Job>>,
-    game: Mutex<Option<Child>>,
+    /// The running game and when it started.
+    game: Mutex<Option<(Child, Instant)>>,
     crash: Mutex<Option<Crash>>,
+    /// Why the last folder the player picked was not used, until the next pick.
+    pick_error: Mutex<String>,
+    /// The runtime's verdict, with the times of the files it was made from.
+    code: Mutex<Option<([Option<SystemTime>; 5], Code)>>,
 }
 
 #[derive(Serialize)]
@@ -141,7 +225,10 @@ struct Status {
     game_dir: Option<String>,
     game_error: Option<String>,
     tools_missing: Vec<String>,
+    work_error: Option<String>,
     built: bool,
+    /// The game files are set up and only the game code needs building (for this version).
+    rebuild: bool,
     running: bool,
     phase: Phase,
     progress: Option<f32>,
@@ -152,15 +239,11 @@ struct Status {
     packaged: bool,
 }
 
-fn find_repo() -> PathBuf {
+fn find_repo(exe_dir: &Path) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("KFL_REPO") {
-        return PathBuf::from(p);
+        return Some(PathBuf::from(p));
     }
-    let exe = std::env::current_exe().unwrap_or_default();
-    exe.ancestors()
-        .find(|d| d.join("Makefile").is_file() && d.join("runtime").is_dir())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| exe.parent().map(Path::to_path_buf).unwrap_or_default())
+    exe_dir.ancestors().find(|d| d.join("Makefile").is_file() && d.join("runtime").is_dir()).map(Path::to_path_buf)
 }
 
 fn program_id(npdm: &Path) -> Option<u64> {
@@ -176,19 +259,23 @@ fn program_id(npdm: &Path) -> Option<u64> {
 }
 
 fn check_game(dir: &Path) -> Result<(), String> {
+    let layout = "Pick the folder that holds your extracted exefs (with main, sdk, subsdk0 and main.npdm) and romfs (with the folders msg and gfx), right inside it.";
     let exefs = dir.join("exefs");
     for m in MODULES {
         if !exefs.join(m).is_file() {
-            return Err(format!("This folder has no exefs\\{m}. Pick the folder that holds your extracted exefs and romfs."));
+            return Err(format!("This folder has no exefs\\{m}. {layout}"));
         }
     }
-    if !dir.join("romfs").is_dir() {
-        return Err("This folder has no romfs folder next to exefs.".into());
+    for d in ["msg", "gfx"] {
+        if !dir.join("romfs").join(d).is_dir() {
+            return Err(format!("This folder has no romfs\\{d}. {layout}"));
+        }
     }
     match program_id(&exefs.join("main.npdm")) {
         Some(PROGRAM_ID) => Ok(()),
-        Some(id) => Err(format!("These files are another game (program id {id:016X}).")),
-        None => Err("exefs\\main.npdm is missing or unreadable.".into()),
+        Some(UPDATE_ID) => Err(setup_failure("update").into()),
+        Some(id) => Err(format!("{} Its program id is {id:016X}.", setup_failure("version"))),
+        None => Err("exefs\\main.npdm is missing or unreadable. Extract the exefs again.".into()),
     }
 }
 
@@ -237,6 +324,15 @@ fn classify(code: i32, tail: &str) -> Outcome {
     }
 }
 
+/// What a player can do about a start-up failure the runtime words for developers (runtime/nvn/vulkan/device.c).
+fn explain(reason: String) -> String {
+    if reason.contains("Vulkan") || reason.contains("SDL_CreateWindow") {
+        format!("Your graphics card or its driver may not support Vulkan 1.3. Update the graphics driver and try again. ({reason})")
+    } else {
+        reason
+    }
+}
+
 const KEPT_CRASH_LOGS: usize = 5;
 
 fn log_tail(path: &Path) -> String {
@@ -278,7 +374,8 @@ impl App {
     // true while the game runs; when it has just ended, records a crash for the status
     fn poll_game(&self) -> bool {
         let mut g = self.game.lock().unwrap();
-        let Some(child) = g.as_mut() else { return false };
+        let Some((child, started)) = g.as_mut() else { return false };
+        let ran = started.elapsed();
         let ended = match child.try_wait() {
             Ok(None) => return true,
             Ok(Some(st)) => Some(st.code().unwrap_or(1)),
@@ -286,7 +383,12 @@ impl App {
         };
         *g = None;
         if let Some(code) = ended {
-            if let Outcome::Crashed(reason) = classify(code, &log_tail(&self.work.join("game.log"))) {
+            let reason = match classify(code, &log_tail(&self.work.join("game.log"))) {
+                Outcome::Crashed(reason) => Some(explain(reason)),
+                _ if ran < EARLY_EXIT => Some(format!("The game closed {} seconds after it started (exit code {code}). The game log says why.", ran.as_secs())),
+                _ => None,
+            };
+            if let Some(reason) = reason {
                 *self.crash.lock().unwrap() = Some(Crash { reason, log: keep_crash_log(&self.work) });
             }
         }
@@ -297,7 +399,7 @@ impl App {
     }
     fn exe(&self) -> PathBuf {
         match self.mode {
-            Mode::Dev(_) => self.work.join("build").join("lasrecomp.exe"),
+            Mode::Dev(_) => self.work.join("build").join(PACKAGED_EXE),
             Mode::Packaged => self.work.join(PACKAGED_EXE),
         }
     }
@@ -307,14 +409,42 @@ impl App {
             Mode::Packaged => self.game().join("lasgame.dll"),
         }
     }
-    fn image(&self) -> PathBuf {
-        self.game().join("romfs.bin")
-    }
     fn ini(&self) -> PathBuf {
         self.work.join("larecomp.ini")
     }
+    /// The times of what `--status` reads: the runtime, the game code and its id, and the RomFS the setup copied (the
+    /// folder, or the romfs.bin the player picked instead).
+    fn stamp(&self) -> [Option<SystemTime>; 5] {
+        let id = PathBuf::from(format!("{}.id", self.lib().display()));
+        let game = self.game();
+        [self.exe(), self.lib(), id, game.join("romfs"), game.join("romfs.bin")].map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+    }
+    /// Only the game code is built again when the RomFS set up is a folder: an older version's romfs.bin can't serve
+    /// the game's movies, so that install is set up again from the folder picked (its compiled objects are reused).
+    fn code_only(&self, asked: bool) -> bool {
+        asked && matches!(self.mode, Mode::Packaged) && self.game().join("romfs").is_dir()
+    }
+    /// The runtime's verdict. It runs a process, so the answer is kept until one of the files it reads changes.
+    fn code(&self) -> Code {
+        if self.work_problem.is_some() {
+            return Code::None;
+        }
+        let stamp = self.stamp();
+        let mut cache = self.code.lock().unwrap();
+        if let Some((seen, code)) = &*cache {
+            if *seen == stamp {
+                return *code;
+            }
+        }
+        let mut c = self.runtime();
+        c.arg("--status").stderr(Stdio::null());
+        hide_window(&mut c);
+        let code = c.output().map(|o| parse_status(&String::from_utf8_lossy(&o.stdout))).unwrap_or(Code::None);
+        *cache = Some((stamp, code));
+        code
+    }
     fn built(&self) -> bool {
-        self.exe().is_file() && self.lib().is_file() && self.image().is_file()
+        self.code() == Code::Ready
     }
     /// The game files the player picked: the junction in developer mode, the remembered folder in packaged mode (or,
     /// once that is forgotten, the install folder's own copy).
@@ -353,8 +483,8 @@ impl App {
         };
         c
     }
-    // returns at once when a valid image exists
-    fn build_image(&self) -> Command {
+    // the runtime builds nothing here: it only checks the dump linked as `extracted` holds a RomFS
+    fn check_romfs(&self) -> Command {
         let mut c = self.runtime();
         c.args(["extracted", "--build-romfs"]);
         hide_window(&mut c);
@@ -414,11 +544,45 @@ fn hide_window(c: &mut Command) {
 #[cfg(not(windows))]
 fn hide_window(_: &mut Command) {}
 
+/// Too little free space for the build, in words. The drive is the work folder's.
+fn disk_problem(work: &Path, need: u64) -> Option<String> {
+    let free = win::free_bytes(work).filter(|free| *free < need)?;
+    let drive: String = work.to_string_lossy().chars().take(2).collect();
+    Some(format!(
+        "There is not enough free disk space on {drive}. The build needs about {:.1} GB and {:.1} GB are free. Free some space, or move this folder to a drive with more room.",
+        need as f64 / 1e9,
+        free as f64 / 1e9
+    ))
+}
+
+/// A build that failed on a full disk reports whatever failed first: say it is the disk.
+fn disk_full_note(work: &Path) -> Option<String> {
+    win::free_bytes(work).filter(|free| *free < 200_000_000).map(|_| "The disk is full. Free some space and build again.".into())
+}
+
+/// Why the build cannot run in this install folder, found once at startup (Windows paths stop at 260 characters and
+/// the build adds about 45 below this folder).
+fn work_problem(mode: &Mode, work: &Path) -> Option<String> {
+    if !matches!(mode, Mode::Packaged) {
+        return None;
+    }
+    let n = work.to_string_lossy().encode_utf16().count();
+    if n > MAX_WORK_PATH {
+        return Some(format!("The path of this folder is {n} characters long, and Windows stops the build at about {MAX_WORK_PATH}. Move the Forgotten Land Recomp folder to a shorter path, such as C:\\Games\\ForgottenLandRecomp, and start it again."));
+    }
+    let probe = work.join(".write-test");
+    let writable = fs::write(&probe, b"").is_ok();
+    let _ = fs::remove_file(&probe);
+    (!writable).then(|| "The launcher cannot write to its folder. Move the Forgotten Land Recomp folder somewhere you can write to, such as Documents, and start it again.".into())
+}
+
 type St<'a> = tauri::State<'a, Arc<App>>;
 
-#[tauri::command]
+// (async: it may run the runtime, and the window must not wait for that)
+#[tauri::command(async)]
 fn status(app: St) -> Status {
-    let built = app.built();
+    let idle = matches!(app.job.lock().unwrap().phase, Phase::Idle | Phase::Failed);
+    let code = if idle { app.code() } else { Code::None };
     let (game_dir, game_error) = match app.game_source() {
         Some(game) => {
             let shown = fs::canonicalize(&game).unwrap_or(game.clone());
@@ -428,6 +592,7 @@ fn status(app: St) -> Status {
         }
         None => (None, None),
     };
+    let game_error = game_error.or_else(|| Some(app.pick_error.lock().unwrap().clone()).filter(|e| !e.is_empty()));
     let running = app.poll_game();
     let job = app.job.lock().unwrap();
     let progress = match (&app.mode, job.phase) {
@@ -443,7 +608,9 @@ fn status(app: St) -> Status {
         game_dir,
         game_error,
         tools_missing: app.tools_missing(),
-        built,
+        work_error: app.work_problem.clone(),
+        built: code == Code::Ready,
+        rebuild: code == Code::Build,
         running,
         phase: job.phase,
         progress,
@@ -458,10 +625,15 @@ fn status(app: St) -> Status {
 // (async: the runtime's search of a big folder must not freeze the window)
 #[tauri::command(async)]
 fn set_game_dir(app: St, path: String) -> Result<(), String> {
-    let src = PathBuf::from(path);
+    let result = pick_game_dir(&app, PathBuf::from(&path));
+    *app.pick_error.lock().unwrap() = result.as_ref().err().map(|e| format!("{path} was not used. {e}")).unwrap_or_default();
+    result
+}
+
+fn pick_game_dir(app: &App, src: PathBuf) -> Result<(), String> {
     match app.mode {
         Mode::Dev(_) => check_game(&src)?,
-        Mode::Packaged => runtime_check(&app, &src)?,
+        Mode::Packaged => runtime_check(app, &src)?,
     }
     if let Mode::Packaged = app.mode {
         return fs::write(app.work.join(PICKED_FILE), src.to_string_lossy().as_bytes()).map_err(|e| e.to_string());
@@ -492,6 +664,7 @@ fn spawn_step(app: &App, phase: Phase, cmd: &mut Command) -> Result<Option<Child
         return Err("Cancelled.".into());
     }
     let mut child = cmd.stdin(Stdio::null()).spawn().map_err(|e| format!("{cmd:?}: {e}"))?;
+    win::end_with_launcher(&child);
     job.phase = phase;
     let out = child.stdout.take();
     job.child = Some(child);
@@ -510,7 +683,7 @@ fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Re
 fn run_setup(app: &App, mut cmd: Command, log: &mut fs::File) -> Result<(), String> {
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let _ = writeln!(log, "== {cmd:?}");
-    let out = spawn_step(app, Phase::Image, cmd.stdout(Stdio::piped()).stderr(err))?.ok_or("no setup output")?;
+    let out = spawn_step(app, Phase::Files, cmd.stdout(Stdio::piped()).stderr(err))?.ok_or("no setup output")?;
     let mut end = None;
     for line in BufReader::new(out).lines().map_while(Result::ok) {
         match parse_setup_line(&line) {
@@ -540,37 +713,52 @@ fn wait_step(app: &App) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn start_setup(app: St) -> Result<(), String> {
-    let game = app.game_source().ok_or("Select your game folder first.")?;
-    if let Mode::Dev(_) = app.mode {
-        check_game(&game)?;
+fn start_setup(app: St, code_only: Option<bool>) -> Result<(), String> {
+    // only the game code, from the game files set up already: no folder to pick, none needed
+    let code_only = app.code_only(code_only.unwrap_or(false));
+    let game = if code_only { None } else { Some(app.game_source().ok_or("Select your game folder first.")?) };
+    if let (Mode::Dev(_), Some(game)) = (&app.mode, &game) {
+        check_game(game)?;
+    }
+    if let Some(problem) = &app.work_problem {
+        return Err(problem.clone());
     }
     let missing = app.tools_missing();
     if !missing.is_empty() {
         return Err(format!("Missing build tools: {}.", missing.join(", ")));
+    }
+    if let Some(problem) = disk_problem(&app.work, if code_only { CODE_BYTES } else { BUILD_BYTES }) {
+        return Err(problem);
     }
     {
         let mut job = app.job.lock().unwrap();
         if !matches!(job.phase, Phase::Idle | Phase::Failed) {
             return Ok(());
         }
-        let phase = if let Mode::Packaged = app.mode { Phase::Image } else { Phase::Runtime };
+        let phase = match (&app.mode, code_only) {
+            (_, true) => Phase::Translate,
+            (Mode::Packaged, _) => Phase::Files,
+            _ => Phase::Runtime,
+        };
         *job = Job { phase, ..Job::default() };
     }
     let app = Arc::clone(&app);
     std::thread::spawn(move || {
         let jobs = format!("-j{}", std::thread::available_parallelism().map_or(4, |n| n.get()));
-        let result = fs::File::create(app.work.join("setup.log")).map_err(|e| e.to_string()).and_then(|mut log| match &app.mode {
+        let result = fs::File::create(app.work.join("setup.log")).map_err(|e| format!("The launcher cannot write to its folder ({e}). Move the Forgotten Land Recomp folder somewhere you can write to, such as Documents.")).and_then(|mut log| match &app.mode {
             Mode::Dev(dev) => {
-                let exe = format!("{}/build/lasrecomp.exe", dev.work_from_repo(&app.work).to_string_lossy().replace('\\', "/"));
+                let exe = format!("{}/build/{PACKAGED_EXE}", dev.work_from_repo(&app.work).to_string_lossy().replace('\\', "/"));
                 run_step(&app, Phase::Runtime, dev.make(&app.work, &[&jobs, &exe]), &mut log)?;
-                run_step(&app, Phase::Image, app.build_image(), &mut log)?;
+                run_step(&app, Phase::Files, app.check_romfs(), &mut log)?;
                 run_step(&app, Phase::Translate, dev.make(&app.work, &["gen"]), &mut log)?;
                 run_step(&app, Phase::Compile, dev.make(&app.work, &[&jobs]), &mut log)
             }
             Mode::Packaged => {
                 let mut c = app.runtime();
-                c.arg("--setup").arg(&game);
+                match &game {
+                    Some(game) => c.arg("--setup").arg(game),
+                    None => c.arg("--rebuild-code"),
+                };
                 hide_window(&mut c);
                 run_setup(&app, c, &mut log)
             }
@@ -580,7 +768,7 @@ fn start_setup(app: St) -> Result<(), String> {
             Ok(()) => job.phase = Phase::Idle,
             Err(e) => {
                 job.phase = if job.cancelled { Phase::Idle } else { Phase::Failed };
-                job.error = if job.cancelled { String::new() } else { e };
+                job.error = if job.cancelled { String::new() } else { disk_full_note(&app.work).unwrap_or(e) };
             }
         }
     });
@@ -612,8 +800,11 @@ fn cancel(app: &App) {
 #[tauri::command]
 fn play(app: St) -> Result<(), String> {
     let mut game = app.game.lock().unwrap();
-    if game.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))) {
+    if game.as_mut().is_some_and(|(c, _)| matches!(c.try_wait(), Ok(None))) {
         return Ok(());
+    }
+    if !app.built() {
+        return Err("The game code was not built by this version of the program. Open Set up and build it again.".into());
     }
     *app.crash.lock().unwrap() = None;
     let log = fs::File::create(app.work.join("game.log")).map_err(|e| e.to_string())?;
@@ -626,7 +817,7 @@ fn play(app: St) -> Result<(), String> {
         .stderr(log)
         .spawn()
         .map_err(|e| format!("Could not start the game: {e}"))?;
-    *game = Some(child);
+    *game = Some((child, Instant::now()));
     Ok(())
 }
 
@@ -673,12 +864,16 @@ fn main() {
         Mode::Dev(dev) => std::env::var("KFL_WORK").map(PathBuf::from).unwrap_or_else(|_| dev.repo.join("..").join("work").join("kfl")),
         Mode::Packaged => exe_dir,
     };
+    let work = fs::canonicalize(&work).map(|p| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\"))).unwrap_or(work);
     let app = Arc::new(App {
-        work: fs::canonicalize(&work).map(|p| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\"))).unwrap_or(work),
+        work_problem: work_problem(&mode, &work),
+        work,
         mode,
         job: Arc::new(Mutex::new(Job::default())),
         game: Mutex::new(None),
         crash: Mutex::new(None),
+        pick_error: Mutex::new(String::new()),
+        code: Mutex::new(None),
     });
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -697,7 +892,16 @@ mod tests {
     }
 
     fn app(repo: &str, work: &str) -> App {
-        App { mode: Mode::Dev(dev(repo)), work: work.into(), job: Arc::new(Mutex::new(Job::default())), game: Mutex::new(None), crash: Mutex::new(None) }
+        App {
+            mode: Mode::Dev(dev(repo)),
+            work: work.into(),
+            work_problem: None,
+            job: Arc::new(Mutex::new(Job::default())),
+            game: Mutex::new(None),
+            crash: Mutex::new(None),
+            pick_error: Mutex::new(String::new()),
+            code: Mutex::new(None),
+        }
     }
 
     #[test]
@@ -710,6 +914,9 @@ mod tests {
     #[test]
     fn the_bundled_tools_select_packaged_mode() {
         let root = scratch("mode");
+        assert!(matches!(Mode::detect(&root), Mode::Packaged), "no repo and no tools: still a release folder");
+        fs::create_dir_all(root.join("runtime")).unwrap();
+        fs::write(root.join("Makefile"), "").unwrap();
         assert!(matches!(Mode::detect(&root), Mode::Dev(_)));
         for tool in ["lasgen\\lasgen.exe", "zig\\zig.exe"] {
             fs::create_dir_all(root.join(tool).parent().unwrap()).unwrap();
@@ -721,7 +928,8 @@ mod tests {
 
     #[test]
     fn setup_lines_map_onto_the_phases() {
-        assert_eq!(parse_setup_line("phase copying 0.010"), Some(SetupLine::Progress(Phase::Image, 0.01, None)));
+        assert_eq!(parse_setup_line("phase looking 0.000"), Some(SetupLine::Progress(Phase::Files, 0.0, None)));
+        assert_eq!(parse_setup_line("phase copying 0.010"), Some(SetupLine::Progress(Phase::Files, 0.01, None)));
         assert_eq!(parse_setup_line("phase reading 0.200"), Some(SetupLine::Progress(Phase::Translate, 0.2, None)));
         assert_eq!(parse_setup_line("phase finishing 0.990"), Some(SetupLine::Progress(Phase::Compile, 0.99, None)));
         assert_eq!(
@@ -732,7 +940,7 @@ mod tests {
         assert_eq!(parse_setup_line("failed version"), Some(SetupLine::Failed("version".into())));
         assert_eq!(parse_setup_line("[paths] Forgotten Land Recomp 0.1.0"), None);
         assert_eq!(parse_setup_line("phase someday 0.5"), None);
-        assert!(setup_failure("version").contains("not Kirby"));
+        assert_eq!(parse_setup_line("phase image 0.100"), None, "the runtime builds no image: it has no such phase");
     }
 
     #[test]
@@ -753,6 +961,145 @@ mod tests {
         let r = run_setup(&app, c, &mut fs::File::create(root.join("log")).unwrap());
         assert_eq!(r, Err(setup_failure("copy")));
         assert_eq!(app.job.lock().unwrap().progress, Some(0.5));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_runtimes_status_line_decides_the_game_code() {
+        assert_eq!(parse_status("ready\r\n"), Code::Ready);
+        assert_eq!(parse_status("[paths] x\nbuild\n"), Code::Build);
+        assert_eq!(parse_status("none\n"), Code::None);
+        assert_eq!(parse_status(""), Code::None);
+        assert_eq!(parse_status("[vk] ready to render\n"), Code::None);
+    }
+
+    #[test]
+    fn the_failure_texts_say_what_the_runtime_refused() {
+        let text = setup_failure("version");
+        assert!(text.contains("another game") && text.contains("version of Kirby") && text.contains("1.0.0"), "{text}");
+        assert!(!text.contains("That is not Kirby"), "{text}");
+        let text = setup_failure("bad_image");
+        assert!(text.contains("romfs.bin") && text.contains("romfs folder") && !text.contains("game data image"), "{text}");
+    }
+
+    #[test]
+    fn the_status_is_asked_again_when_the_romfs_folder_or_image_changes() {
+        let root = scratch("stamp");
+        let app = app("", root.to_str().unwrap());
+        let none = app.stamp();
+        fs::create_dir_all(root.join("extracted").join("romfs")).unwrap();
+        let folder = app.stamp();
+        assert_ne!(folder, none, "the setup's RomFS folder is what --status reads");
+        fs::write(root.join("extracted").join("romfs.bin"), "x").unwrap();
+        assert_ne!(app.stamp(), folder, "so is a romfs.bin the player picked");
+        fs::remove_dir(root.join("extracted").join("romfs")).unwrap();
+        fs::remove_file(root.join("extracted").join("romfs.bin")).unwrap();
+        assert_eq!(app.stamp(), none);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_older_versions_romfs_image_is_set_up_again_not_only_rebuilt() {
+        let root = scratch("codeonly");
+        let mut app = app("", root.to_str().unwrap());
+        app.mode = Mode::Packaged;
+        fs::create_dir_all(root.join("extracted")).unwrap();
+        fs::write(root.join("extracted").join("romfs.bin"), "x").unwrap();
+        assert!(!app.code_only(true), "0.2.0's romfs.bin: the movies need the folder");
+        fs::create_dir_all(root.join("extracted").join("romfs")).unwrap();
+        assert!(app.code_only(true));
+        assert!(!app.code_only(false));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_dump_is_checked_the_way_the_setup_checks_it() {
+        let root = scratch("dump");
+        let npdm = |id: u64| {
+            let mut b = vec![0u8; 0x100];
+            b[..4].copy_from_slice(b"META");
+            b[0x70..0x74].copy_from_slice(&0x80u32.to_le_bytes());
+            b[0x80..0x84].copy_from_slice(b"ACI0");
+            b[0x90..0x98].copy_from_slice(&id.to_le_bytes());
+            b
+        };
+        let msg = |r: Result<(), String>| r.unwrap_err();
+        assert!(msg(check_game(&root)).contains("no exefs\\main"));
+        fs::create_dir_all(root.join("exefs")).unwrap();
+        for m in MODULES {
+            fs::write(root.join("exefs").join(m), "x").unwrap();
+        }
+        assert!(msg(check_game(&root)).contains("no romfs\\msg"));
+        fs::create_dir_all(root.join("romfs").join("msg")).unwrap();
+        fs::create_dir_all(root.join("romfs").join("gfx")).unwrap();
+        assert!(msg(check_game(&root)).contains("main.npdm is missing"));
+        fs::write(root.join("exefs").join("main.npdm"), npdm(0x0100_4D30_0C5A_E800)).unwrap();
+        assert_eq!(msg(check_game(&root)), setup_failure("update"));
+        assert!(setup_failure("update").contains("base game"));
+        fs::write(root.join("exefs").join("main.npdm"), npdm(0x0100_0000_0000_1234)).unwrap();
+        assert!(msg(check_game(&root)).contains("another game") && msg(check_game(&root)).contains("0100000000001234"));
+        fs::write(root.join("exefs").join("main.npdm"), npdm(PROGRAM_ID)).unwrap();
+        assert_eq!(check_game(&root), Ok(()));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_vulkan_driver_says_what_to_do() {
+        let log = format!("{START}FATAL: SDL_CreateWindow: Installed Vulkan doesn't implement the VK_KHR_surface extension\nhost backtrace:\n");
+        let Outcome::Crashed(reason) = classify(3, &log) else { panic!("a crash") };
+        assert!(explain(reason).starts_with("Your graphics card or its driver may not support Vulkan 1.3. Update the graphics driver"));
+        assert_eq!(explain("FATAL: out of memory".into()), "FATAL: out of memory");
+    }
+
+    #[test]
+    fn too_little_disk_space_is_said_before_the_build_starts() {
+        let root = scratch("disk");
+        let msg = disk_problem(&root, u64::MAX / 2).expect("no drive has that much room");
+        assert!(msg.contains("not enough free disk space") && msg.contains("move this folder"), "{msg}");
+        assert_eq!(disk_problem(&root, 1), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_long_install_path_is_refused_up_front() {
+        let long = PathBuf::from(format!("C:\\{}", "a".repeat(MAX_WORK_PATH)));
+        assert!(work_problem(&Mode::Packaged, &long).unwrap().contains("shorter path"));
+        assert_eq!(work_problem(&Mode::Dev(dev("")), &long), None);
+        let root = scratch("workok");
+        assert_eq!(work_problem(&Mode::Packaged, &root), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_launcher_ending_ends_what_it_started() {
+        let job = win::kill_on_close_job();
+        let mut child = sleeper().stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        assert!(win::join(job, &child));
+        assert!(child.try_wait().unwrap().is_none());
+        // closing the job is what Windows does when the launcher ends, however it ends
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(job) };
+        let started = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(started.elapsed().as_secs() < 5, "the child outlived its job");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_game_that_closes_at_once_is_reported() {
+        let root = scratch("early");
+        let mut app = app("", root.to_str().unwrap());
+        app.work = root.clone();
+        fs::write(root.join("game.log"), START).unwrap();
+        let mut c = Command::new("cmd");
+        c.args(["/C", "exit 1"]);
+        *app.game.lock().unwrap() = Some((c.spawn().unwrap(), Instant::now()));
+        while app.poll_game() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let crash = app.crash.lock().unwrap().clone().expect("a card for a game that closed at once");
+        assert!(crash.reason.contains("closed 0 seconds after it started (exit code 1)"), "{}", crash.reason);
+        assert!(root.join(&crash.log).is_file());
         fs::remove_dir_all(&root).unwrap();
     }
 

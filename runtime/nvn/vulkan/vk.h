@@ -9,7 +9,11 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#ifdef __ANDROID__
+#include <volk.h>  // (every Vulkan function through volk: Android's loader exports 1.1 only before API 33)
+#else
 #include <vulkan/vulkan.h>
+#endif
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else
@@ -20,31 +24,68 @@
 #include "../maxwell/shader.h"
 
 void vk_device_fault_report(void);
-void vk_pipeline_cache_save(void);  // cache/vk_pipelines.bin (any thread)
+#ifdef __ANDROID__
+void vk_android_load(void);  // android_driver.c: the Vulkan driver (a custom one through libadrenotools, or the system's)
+#endif
 #define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { if (r_ == VK_ERROR_DEVICE_LOST) vk_device_fault_report(); \
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
 
+// Swapchain images the renderer keeps (the driver decides how many it makes from the count asked: a Mali-G68 made 9
+// for 8 asked). From mamcjr's LASRecompAndroid (MIT).
+#ifdef __ANDROID__
+#define VK_SC_MAX 16
+#else
+#define VK_SC_MAX 8
+#endif
 typedef struct {
     VkInstance inst;
     VkPhysicalDevice phys;
     VkDevice dev;
     VkQueue queue;
     uint32_t qfam;
+    uint32_t ts_bits;          // the queue's timestampValidBits (0: no timestamps)
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
+    bool cpu_astc;  // ASTC decoded on the CPU although the driver lists it (device.c)
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
-    bool custom_border, divisor, host_import;
+    bool custom_border, divisor, host_import, dmabuf;
+    bool aniso, mirror_clamp;  // samplerAnisotropy, samplerMirrorClampToEdge (textures.c vk_sampler: without them, plainer samplers)
+    // VK_EXT_vertex_input_dynamic_state (exec.c): the vertex layout is set per draw (vkCmdSetVertexInputEXT), not
+    // baked into each pipeline - fewer pipelines. Off: no extension / feature, or LARECOMP_VK_DYN_VERTEX=0.
+    bool vids;
+    PFN_vkCmdSetVertexInputEXT set_vertex_input;
+    // LARECOMP_VK_GPL_PROBE=1 only (exec.c gpl_probe, measurement): VK_EXT_graphics_pipeline_library enabled
+    bool gpl_probe;
+    bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
+    bool heap_dmabuf_default;  // the heap as driver memory by default: RADV and Mesa's PanVK (device.c; LARECOMP_VK_HEAP_DMABUF overrides)
+    bool cb_release;  // command buffers reset with RELEASE_RESOURCES before each begin: Arm's driver (device.c; LARECOMP_VK_CB_RELEASE)
+    bool cb_early_reset;  // a slot's command buffers reset once its submission completes: PanVK (device.c; LARECOMP_VK_CB_EARLY_RESET)
+    bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
+    bool geometry;     // geometry shaders (exec.c: programs with one; without it their draws are skipped)
+    bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
+    bool heap_probe;      // one import tried at the start, lazy chunks if it runs out of memory (exec.c whole_import_probe_oom)
+    // on by default on integrated GPUs only (device.c; LARECOMP_VK_LEAN_USAGE / LARECOMP_VK_SMAA_STENCIL /
+    // LARECOMP_NO_FRAME_CLEAR =0 / =1 override):
+    bool lean_usage;      // colour images list their view formats instead of a bare MUTABLE_FORMAT (textures.c create_image)
+    bool smaa_stencil;    // SMAA's weights pass only where the edge pass found edges (exec.c post_process)
+    bool no_frame_clear;  // scene targets not cleared at their first use in each frame (textures.c renderer_texture_frame_fresh)
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
     VkFormat sc_format;
-    VkExtent2D sc_extent;
+    VkExtent2D sc_extent;  // the window's size: what everything drawn into the window image is laid out in
+    VkExtent2D sc_phys;    // the swapchain images' own size (the panel's orientation when pre-rotated: sc_quarter)
+    int sc_quarter;        // Android pre-rotation: 0, or quarter turns (1: 90 degrees, 3: 270) applied when drawing into them
     uint32_t sc_count;
-    VkImage sc_images[8];
-    VkImageView sc_views[8];
+    VkImage sc_images[VK_SC_MAX];
+    VkImageView sc_views[VK_SC_MAX];
 } VkG;
+// (device.c) a rect / viewport of the window (sc_extent) in the swapchain image (sc_phys): turned with sc_quarter
+VkRect2D vk_sc_rect(int32_t x, int32_t y, uint32_t w, uint32_t h);
+VkViewport vk_sc_viewport(float x, float y, float w, float h);
+void vk_log_memory(const char *why);  // (device.c: per-heap budget and use, at start and on allocation failures)
 extern VkG g_vk;
 
 // ---- submissions (exec.c)
@@ -57,6 +98,13 @@ void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra);  // submit + one more cb (present)
+// GPU timer (exec.c gpu_timer_add): the window image's submission starts its counted work here (after its acquire wait)
+void vk_gpu_timer_window_start(void);
+bool vk_gpu_split_ns(uint64_t out[4]);  // cumulative: game GPU ns, window GPU ns, frame spans' ns, frames; false: no timer
+uint64_t vk_cum_wait_ns(void);          // cumulative vk_wait_seq time
+// (device.c) CPU time blocked presenting, cumulative ns: [0] frame slot's fence, [1] window image acquire, [2] present;
+// [3]: frames presented
+extern uint64_t g_vk_frame_waits[4];
 
 // Transient GPU-visible memory that lives until the submission it was allocated for completes.
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;
@@ -75,55 +123,59 @@ typedef struct TexBackend {
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
+    uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
-    bool storage;  // made with storage usage (an NVN image: vk_storage_view)
+    bool storage;        // made with storage usage (an NVN image: vk_storage_view)
+    bool ao;            // (scalable) the game's ambient occlusion: at its own scale (textures.c tex_ao)
+    bool shadow;         // (scalable) the game's shadow map: at its own scale (textures.c tex_shadow)
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
-    float sx, sy;
+    float sx, sy;        // the scale the contents were drawn at (scalable textures)
+    float ax, ay;        // the allocation scale (the image's size; Dynamic: the contents use a part of it)
     void *pending_rgba;  // host-produced pixels (video) waiting to be uploaded on the render thread
     uint32_t pending_w, pending_h, pending_stride;
+    bool pending_nv12;        // pending_rgba holds NV12 (Y, then UV at pending_uv_off): converted on the GPU
+    uint32_t pending_uv_off;
     uint8_t astc_bw, astc_bh;  // ASTC without GPU support: decoded to RGBA8 on upload (runtime/nvn/astc.c)
     bool astc_srgb;
+    uint8_t cpu_bc;      // a BC format the driver doesn't list: decoded on upload (runtime/nvn/bc.h kind)
+    int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
+    uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
-    uint64_t dirty_seq;  // last host write (backend_pool_written) this texture was checked against
-    uint8_t font_k;      // > 1: a glyph cache drawn at that scale (runtime/hle/font_hires.c): filled from its K x image
-    uint8_t ui2x;        // 1: an interface texture drawn from its 2x version (runtime/ui2x.c): ui2x_fmt, ui2x_w x ui2x_h
-    VkFormat ui2x_fmt;
-    uint32_t ui2x_w, ui2x_h;
-    uint64_t ui2x_hash;  // the guest data it was checked against (data_hash)
-    // The in-between images at a reduced size (textures.c vk_tex_lo_begin): a scaled render target's smaller twin (lo),
-    // which stands in for it while they are rendered; full: the twin's own target. lo_use: the twin's first use in this
-    // image (0 none yet, 1 rendered to, 2 read first); lo_seed: read before being rendered to, so filled from the full
-    // image first next time.
-    struct TexBackend *lo, *full;
-    uint8_t lo_use;
-    bool lo_seed;
+    // (g_vk.lean_usage) the only formats views of this image may have: nview_fmt 0 = any compatible one
+    VkFormat view_fmt[2];
+    uint8_t nview_fmt;
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
-// The in-between images at f x the render size (exec.c vk_interp_replay): every scaled render target gives way to its
-// smaller twin until vk_tex_lo_end. vk_tex_lo(b): the twin standing in for b now (b itself outside).
-void vk_tex_lo_begin(float f);
-void vk_tex_lo_end(void);
-bool vk_tex_lo_active(void);
-TexBackend *vk_tex_lo(TexBackend *b);
 VkFormat vk_format(uint32_t nvn_format);
+VkFormat vk_image_format(uint32_t nvn_format, VkImageAspectFlags *aspect);  // (shader preparation)
+void vk_pipeline_cache_save(void);
+// (device.c) pipelines as vkCreate*Pipelines with g_vk.pcache, or from / into our stored binaries (VK_KHR_pipeline_binary)
+VkResult vk_create_graphics_pipeline(const VkGraphicsPipelineCreateInfo *ci, VkPipeline *out);
+VkResult vk_create_compute_pipeline(const VkComputePipelineCreateInfo *ci, VkPipeline *out);
 bool vk_format_alpha_one(uint32_t nvn_format);
 // View of t (optionally through an NVN texture view) for rendering or sampling.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype);
-// Storage view of t for compute stores (SUST); NULL when t has no storage usage or another dimension.
-VkImageView vk_storage_view(NvnTexture *t, const NvnTextureView *v, bool has_view, int want_textype);
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect);
 VkImageView vk_dummy_view(int textype);
-VkImageView vk_dummy_depth_view(int textype);  // (depth-compare lookups without a depth texture: exec.c texture_info)
+// Storage view of t for compute stores (SUST); NULL when t has no storage usage or another dimension.
+VkImageView vk_storage_view(NvnTexture *t, const NvnTextureView *v, bool has_view, int want_textype);
+VkImageView vk_dummy_depth_view(int textype);  // shadow (depth compare) slots: 1x1 depth, cleared to 1.0
+bool vk_format_depth_compare(VkFormat f);  // SAMPLED_IMAGE_DEPTH_COMPARISON
+bool vk_tex_depth_compare(NvnTexture *t);  // t's image can be sampled with a depth compare
+VkFormat vk_view_format(TexBackend *b, VkFormat want);  // want, or the image's own format where want isn't allowed
+void vk_convert_nv12(TexBackend *b, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off);  // exec.c
+VkImageView vk_dummy_color_view(uint32_t w, uint32_t h, uint32_t samples);
 VkSampler vk_sampler(NvnSamplerDesc *d);
-VkSampler vk_sampler_biased(NvnSamplerDesc *d, float bias);  // (TAA / FSR 3.1: d with more mip bias)
+VkSampler vk_sampler_nearest(NvnSamplerDesc *d);  // (integer views: no filtering)
 VkSampler vk_default_sampler(bool linear);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.
 void vk_defer_image(VkImage img, VmaAllocation mem);
 void vk_defer_view(VkImageView v);
+void vk_defer_buffer(VkBuffer b, VkDeviceMemory m);  // raw memory (an import); destroyed once the pending submission is done
 void vk_views_forget(TexBackend *b);  // drop (deferred) the cached views of an image being replaced
 uint64_t vk_frame_counter(void);
 

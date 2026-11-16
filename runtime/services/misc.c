@@ -3,6 +3,7 @@
 
 #include "../hle.h"
 #include "../ipc.h"
+#include "../../game/game.h"
 
 static void ok_logger(Service *s, IpcReq *req, IpcResp *resp) {
     LOG("[svc] %s cmd %u (ok)\n", s->name, req->cmd);
@@ -21,6 +22,7 @@ static void pctl_service(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 1031: case 1035: case 1018: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // restrictions off
     case 1032: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;
+    case 1: break;  // Initialize
     default: LOG("[pctl] IParentalControlService cmd %u (ok)\n", req->cmd); resp_size(resp, 0x10);
     }
 }
@@ -35,29 +37,34 @@ SERVICE("pctl:s", pctl_s) { pctl_root(s, req, resp); }
 SERVICE("pctl:a", pctl_a) { pctl_root(s, req, resp); }
 SERVICE("pctl:r", pctl_r) { pctl_root(s, req, resp); }
 
-// ------------------------------------------------------------------ nfp:user (amiibo: no reader attached)
-static void nfp_user(Service *s, IpcReq *req, IpcResp *resp) {
-    switch (req->cmd) {
-    case 0: case 1: break;  // Initialize / Finalize
-    case 2: OUT(int32_t, 0) = 0; resp_size(resp, 4); break;  // ListDevices: none
-    case 19: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetState: initialized
-    case 23: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;  // AttachAvailabilityChangeEvent
-    default: ok_logger(s, req, resp);
-    }
-}
-SERVICE("nfp:user", nfp_user_root) {
-    if (req->cmd == 0) ipc_return_object(resp, service_new("IUser", nfp_user, NULL));  // CreateUserInterface
-    else ok_logger(s, req, resp);
-}
-
 // ------------------------------------------------------------------ aoc:u (no DLC)
 SERVICE("aoc:u", aoc_u) {
     (void)s;
     switch (req->cmd) {
     case 2: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;   // CountAddOnContent
     case 3: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;   // ListAddOnContent
-    case 5: OUT(uint64_t, 0) = 0x01006BB00C6F1000ull; resp_size(resp, 8); break;  // GetAddOnContentBaseId
+    case 5: OUT(uint64_t, 0) = GAME_PROGRAM_ID + 0x1000; resp_size(resp, 8); break;  // GetAddOnContentBaseId
     case 8: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
     default: ok_logger(s, req, resp);
     }
+}
+
+// ------------------------------------------------------------------ prepo:u (play reports: kept, never sent)
+SERVICE("prepo:u", prepo_u) {
+    (void)s; (void)resp;
+    if (req->cmd < 10100 || req->cmd > 10107) LOG("[svc] prepo:u cmd %u (ok)\n", req->cmd);  // (SaveReport*: no output)
+}
+
+// ------------------------------------------------------------------ bcat:u (no deliveries offline)
+SERVICE("bcat:u", bcat_u) {
+    (void)s;
+    if (req->cmd == 0) ipc_return_object(resp, service_new("IBcatService", ok_logger, NULL));  // CreateBcatService
+    else ok_logger(s, req, resp);
+}
+
+// ------------------------------------------------------------------ ectx:aw (error context, 11.0.0+)
+SERVICE("ectx:aw", ectx_aw) {
+    (void)s;
+    if (req->cmd == 0) ipc_return_object(resp, service_new("IContextRegistrar", ok_logger, NULL));  // CreateContextRegistrar
+    else ok_logger(s, req, resp);
 }

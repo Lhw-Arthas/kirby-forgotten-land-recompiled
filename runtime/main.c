@@ -1,14 +1,20 @@
 // LAS Recomp entry: load modules, set up the kernel, run nn::init::Start on the main thread.
 #include <SDL3/SDL.h>
+#include "platform.h"
+#if defined(__ANDROID__) || PLAT_IOS
+#include <SDL3/SDL_main.h>  // (main() becomes SDL_main: SDL's activity runs it on Android, its UIApplication delegate on iOS)
+#endif
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "game_addresses.h"
+#include "../game/game.h"
 #include "gamelib.h"
-#include "gamesetup.h"
-#include "romfs_build.h"
 #include "paths.h"
 #include "settings.h"
+#include "setup_cli.h"
 #include "hle.h"
 #include "kernel.h"
 
@@ -22,9 +28,10 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     }
 }
 
-// nn::init::Start calls x2 right after nnosInitialize, x3 after nninitStartup just before nnMain (every
-// module's constructors, once nninitStartup has set up the heap) and x4 only after nnMain returns.
-// rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
+// nn::init::Start (game/game.h GAME_START_ARGS) with 4 arguments calls x2 right after nnosInitialize and x3 after
+// nninitStartup, just before nnMain: SDK constructors run early, the game's run once nninitStartup has set up its
+// heap. With 5 it calls x2 when the exception handler is ready, x3 after nninitStartup (every module) and x4 only
+// after nnMain returns. rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
 // __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
 static void module_init(Cpu *c, Module *m) {
     LOG("init %s (DT_INIT %llx, %llu init_array entries)\n", m->name, m->init, m->init_array_sz / 8);
@@ -32,18 +39,81 @@ static void module_init(Cpu *c, Module *m) {
     else run_array(c, m->init_array, m->init_array_sz);
 }
 
-static void rtld_init_all(Cpu *c) {  // the SDK, the subsdk modules that link against it, then main
+static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that link against it
     for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
-    module_init(c, &g_modules[0]);
 }
-static void rtld_fini_all(Cpu *c) { (void)c; }
-static void rtld_exception_ready(Cpu *c) { (void)c; }
+static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+#if GAME_START_ARGS == 5
+static void rtld_init_all(Cpu *c) { rtld_init_sdk(c), rtld_init_main(c); }
+static void rtld_nothing(Cpu *c) { (void)c; }
+#endif
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
+// LARECOMP_REEXEC_FORCE=1 (test): the first process skips the reservation once and starts again, as when the range is
+// taken (the new process has LARECOMP_REEXEC set and reserves normally).
+#define REEXEC_FORCED "forced by LARECOMP_REEXEC_FORCE"
+#ifdef LARECOMP_DYN_BASE
+uint64_t g_guest_lo = GUEST_CANON;
+// The window's start (rt.h). LARECOMP_GUEST_BASE=<hex> (test) asks for one; otherwise a start other than GUEST_CANON
+// first, so a desktop DYN_BASE build always runs the game away from its own addresses. The game was made for a 39-bit
+// address space, so the window ends below 2^39; 4 GB aligned keeps ADRP's page offsets the same as the game's.
+#ifdef __linux__
+// The lowest 4 GB-aligned start above 4 GB whose window fits below 2^39 in a gap of /proc/self/maps (0: none). On
+// Android the process is forked from the zygote with its libraries already mapped, and can't re-exec for another
+// layout. From LASRecompAndroid by mamcjr (MIT), android/common/guest_window.c.
+static uint64_t free_window(uint64_t size) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    uint64_t prev_end = 0x100000000ull, found = 0;
+    char line[512];
+    for (bool more = true; more && !found;) {
+        unsigned long long lo = 1ull << 39, hi = 0;
+        more = fgets(line, sizeof line, f) && sscanf(line, "%llx-%llx", &lo, &hi) == 2;
+        uint64_t start = (prev_end + 0xFFFFFFFFull) & ~0xFFFFFFFFull;
+        if (start + size <= (more ? lo : 1ull << 39) && start + size <= (1ull << 39)) found = start;
+        if (more && hi > prev_end) prev_end = hi;
+    }
+    fclose(f);
+    return found;
+}
+#endif
+static bool reserve_dyn_window(void) {
+#if PLAT_IOS
+    // (the kernel's reserves leave a few gaps that move with every launch: the smallest one the packed window fits,
+    //  read off the map - runtime/platform/ios.c. 1 GB aligned rather than 4: the gaps are a few GB, and the game's
+    //  own address arithmetic only sees its regions' 1 GB alignment; ADRP's 4 KB page offsets hold at any base)
+    uint64_t lo = plat_place_guest(GUEST_SIZE);
+    if (lo) g_guest_lo = lo;
+    return lo != 0;
+#else
+    uint64_t want[4] = {0, 0, GUEST_CANON + 0x100000000ull, GUEST_CANON};  // (macOS: room up to ~0x77_2000_0000)
+    const char *e = getenv("LARECOMP_GUEST_BASE");
+    if (e && *e) want[0] = strtoull(e, NULL, 16);
+#ifdef __linux__
+    want[1] = free_window(GUEST_SIZE);
+#endif
+    for (int i = 0; i < 4; i++) {
+        uint64_t lo = want[i];
+        if (!lo || (lo & 0xFFFFFFFFull) || lo + GUEST_SIZE > (1ull << 39)) continue;
+        if (plat_reserve_guest(lo, lo + GUEST_SIZE)) { g_guest_lo = lo; return true; }
+    }
+    return false;
+#endif
+}
+#endif
+static bool g_guest_reserved;  // (iOS: a failure is final, but only the game needs the window - boot() reports it)
 __attribute__((constructor(101))) static void reserve_guest_space(void) {
-    plat_watch_writes(HEAP_BASE);  // (the heap's written pages: vertex data the GPU ring keeps from one frame to the next, exec.c)
-    if (plat_reserve_guest(GUEST_LO, GUEST_HI)) return;
+    const char *force = getenv("LARECOMP_REEXEC_FORCE");
+    bool forced = force && *force && strcmp(force, "0") && !getenv("LARECOMP_REEXEC");
+    if (forced) setenv("LARECOMP_REEXEC_WHY", REEXEC_FORCED, 1);
+#ifdef LARECOMP_DYN_BASE
+    else if (reserve_dyn_window()) { g_guest_reserved = true; return; }
+#else
+    else if (plat_reserve_guest(GUEST_LO, GUEST_HI)) { g_guest_reserved = true; return; }
+#endif
+    else setenv("LARECOMP_REEXEC_WHY", "", 0);  // (the platform may have said what holds the range; else nothing more)
+    if (PLAT_IOS) return;  // (no re-exec there: the start screen and the seed generator still run; the game can't)
     const char *tries = getenv("LARECOMP_REEXEC");
     int n = tries ? atoi(tries) : 0;
     if (n >= 20) {
@@ -71,8 +141,8 @@ void rt_request_reboot(int kind) {
 }
 int rt_reboot_requested(void) { return g_reboot; }
 
-// LARECOMP_REBOOT_AT=<frame>:<seed | vanilla | title>[,...] (test): at that presented frame, switch to the seed /
-// vanilla in place, or go back to the start screen (with LARECOMP_LAUNCHER_AUTOPLAY it plays the saved choice).
+// LARECOMP_REBOOT_AT=<frame>:<game | title>[,...] (test): at that presented frame, reboot the game in place, or go
+// back to the start screen (with LARECOMP_LAUNCHER_AUTOPLAY it plays the saved choice).
 // Frames count on across reboots. Called by the presenter every frame.
 void reboot_test_frame(uint64_t frame) {
     static const char *next;
@@ -101,16 +171,20 @@ __attribute__((section(".rst$z"), used)) static const ResetFn __stop_resets[1];
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
 void backend_clear_window(void);      // a black frame while the game is down
+void backend_quit(void);              // quitting: the render thread stopped, the GPU idle, caches kept (before exit())
 
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
     while (SDL_PollEvent(&e))
-        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); backend_quit(); exit(0); }
 }
 
 static void teardown(void) {
     uint64_t t0 = plat_now_ns();
     kernel_stop_threads(reboot_idle);
+#ifdef __ANDROID__
+    { extern void audio_stop_all(void); audio_stop_all(); }  // (before backend_reset unmaps a placed heap: audio.c)
+#endif
     backend_clear_window();
     backend_reset();
     const ResetFn *start = __start_resets, *stop = __stop_resets;
@@ -127,19 +201,33 @@ static void teardown(void) {
 }
 
 static void boot(const char *root) {
+    if (!g_guest_reserved)
+        FATAL("guest address range %llx-%llx is not free: this device lays its address space out differently (the [vm] lines above)\n",
+              GUEST_LO, GUEST_HI);
     char exefs[1024], romfs[1024], npdm_path[1024];
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
     snprintf(romfs, sizeof romfs, "%s/romfs", root);
     snprintf(npdm_path, sizeof npdm_path, "%s/main.npdm", exefs);
     if (!g_romfs_dir) g_romfs_dir = strdup(romfs);
 
+#ifdef __linux__
+    {   // the window and graphics device first (normally made by the start screen or ui_run), so the guest heap can be
+        // the driver's memory before any game thread runs (runtime/nvn/vulkan/exec.c backend_guest_heap_prepare)
+        extern void ui_window_init(void);
+        extern void backend_guest_heap_prepare(void);
+        ui_window_init();
+        backend_guest_heap_prepare();
+    }
+#endif
     char why[512];
+    if (!game_version_select(root, why, sizeof why)) FATAL("%s\n", why);  // (the address table: game_addresses.h)
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
 
+    { extern void ipc_set_service_access(const char *); ipc_set_service_access(npdm_path); }
     uint32_t stack_size = 0x100000;
     int prio = 44;
     FILE *f = fopen(npdm_path, "rb");
@@ -148,114 +236,147 @@ static void boot(const char *root) {
         if (fread(meta, 1, sizeof meta, f) == sizeof meta && !memcmp(meta, "META", 4)) {
             prio = meta[0xE];
             stack_size = *(uint32_t *)(meta + 0x1C);
-            uint8_t aci[0x18];  // ACI0 (offset at META+0x70): the program id at +0x10 (svcGetInfo 18)
-            if (!fseek(f, *(uint32_t *)(meta + 0x70), SEEK_SET) && fread(aci, 1, sizeof aci, f) == sizeof aci &&
-                !memcmp(aci, "ACI0", 4))
-                g_program_id = *(uint64_t *)(aci + 0x10);
         }
         fclose(f);
     }
-    LOG("main thread: prio %d, stack 0x%x, program id %016llx\n", prio, stack_size, (unsigned long long)g_program_id);
+    LOG("main thread: prio %d, stack 0x%x\n", prio, stack_size);
 
-    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");
+    uint64_t start = loader_find_symbol(GAME_START_SYMBOL);
     if (!start) FATAL("nn::init::Start not found\n");
-    uint64_t init_fn = hle_register("<rtld_init_all>", rtld_init_all);
-    uint64_t fini_fn = hle_register("<rtld_fini_all>", rtld_fini_all);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    // SDK 11's nn::init::Start(thread_handle, args_region, exception_handler_ready, init_all, fini_all): as rtld calls it
-    kernel_run_main(t, t->handle, 0, hle_register("<rtld_exception_ready>", rtld_exception_ready), init_fn, fini_fn);
+#if GAME_START_ARGS == 5  // nn::init::Start(thread_handle, args_region, exception_ready, init, fini)
+    uint64_t nothing = hle_register("<rtld_nothing>", rtld_nothing);
+    kernel_run_main(t, t->handle, 0, nothing, hle_register("<rtld_init_all>", rtld_init_all), nothing);
+#else  // nn::init::Start(thread_handle, args_region, init_sdk, init_main)
+    kernel_run_main(t, t->handle, 0, hle_register("<rtld_init_sdk>", rtld_init_sdk),
+                    hle_register("<rtld_init_main>", rtld_init_main), 0);
+#endif
 }
 
-// --setup <folder>: the start screen's setup (runtime/gamesetup.h) with no window, for the launcher. Prints one stdout
-// line per change, "phase <looking|copying|image|reading|compiling|finishing> <0..1> [(<slow file>, <n> min)]", then "done" or
-// "failed <reason>" (the SETUP_FAIL_* names below); the details go to stderr. Killing it is safe: the next run starts
-// the setup over (it clears <data root>/extracted first).
-// --prepare <folder>: the same for RecompLauncher (recomplauncher.json): the lines are "progress <0..1> <text>", and a
-// failure is its exit code (the SETUP_FAIL_* value, explained to the player by the file's exit_codes).
-// --check <folder>: only the search and the program id check of the setup, changing nothing: prints "ok" or "failed
-// <reason>" (not_found, package or version) and exits 0 or 1. The launcher asks it before it offers the Build.
-static const char *const SETUP_NAME[] = {"idle", "looking", "copying", "image", "reading", "compiling", "finishing", "done",
-                                         "not_found", "package", "version", "copy", "build", "tools", "bad_image"};
+// The log's first line after the log's own: this build and the machine, for bug reports. Nothing that identifies the
+// player (platform.h plat_system_info). Once per session: a restart of this process (the start screen re-executing
+// itself for the game) appends to the same log and inherits LASRECOMP_INFO_LOGGED.
+static void log_startup_info(void) {
+    if (getenv("LASRECOMP_INFO_LOGGED")) return;
+    setenv("LASRECOMP_INFO_LOGGED", "1", 1);
+    extern const char *larecomp_version(void);  // runtime/ui/launcher.mm
+    PlatSysInfo si = {0};
+    plat_system_info(&si);
+    char cores[96] = "";
+    if (si.cores > 0) {
+        int n = snprintf(cores, sizeof cores, " %d cores", si.cores);
+        if (si.cores_detail[0]) n += snprintf(cores + n, sizeof cores - n, " (%s)", si.cores_detail);
+        if (si.threads > si.cores) snprintf(cores + n, sizeof cores - n, " / %d threads", si.threads);
+    } else if (si.threads > 0) snprintf(cores, sizeof cores, " %d threads", si.threads);
+    unsigned long long tenths = (si.ram * 10 + (1ull << 29)) >> 30;  // (GB to a tenth; whole when it is: 64 GB, 14.5 GB)
+    char ram[32] = "RAM unknown";
+    if (si.ram && tenths % 10) snprintf(ram, sizeof ram, "%llu.%llu GB RAM", tenths / 10, tenths % 10);
+    else if (si.ram) snprintf(ram, sizeof ram, "%llu GB RAM", tenths / 10);
+    fprintf(stderr, "[info] " GAME_NAME " %s, %s, %s%s, %s%s%s\n", larecomp_version(), si.os[0] ? si.os : "unknown OS",
+            si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
+}
 
-static int setup_headless(const char *folder, bool prepare) {
-    static const char *const TEXT[] = {"", "Looking for the game files", "Copying the game files", "Writing the game data image",
-                                       "Reading the game code", "Compiling the game code", "Finishing"};
-    setup_start(folder);
-    int shown_state = -1, shown_permille = -1;
-    char step[200], shown_step[200] = "";
-    for (;;) {
-        bool running = setup_running();  // (read before the state: the setup sets its last state, then stops running)
-        int st = setup_state(), permille = (int)(setup_progress() * 1000);
-        setup_step(step, sizeof step);
-        const char *slow = strchr(step, '(');
-        if (!running) {
-            if (prepare) { if (st == SETUP_DONE) printf("progress 1 Ready\n"); }
-            else if (st == SETUP_DONE) printf("done\n");
-            else printf("failed %s\n", st > SETUP_DONE ? SETUP_NAME[st] : "build");
-            fflush(stdout);
-            return st == SETUP_DONE ? 0 : prepare && st > SETUP_DONE ? st : 1;
-        }
-        if (st < SETUP_DONE && (st != shown_state || permille != shown_permille || strcmp(step, shown_step))) {
-            if (prepare) printf("progress %.3f %s\n", permille / 1000.0, step[0] ? step : TEXT[st]);
-            else printf("phase %s %.3f%s%s\n", SETUP_NAME[st], permille / 1000.0, slow ? " " : "", slow ? slow : "");
-            fflush(stdout);
-            shown_state = st, shown_permille = permille;
-            snprintf(shown_step, sizeof shown_step, "%s", step);
-        }
-        SDL_Delay(100);
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+// The Metal HUD setting (Video tab): Apple's HUD library loads only when MTL_HUD_ENABLED=1 is set as the process starts
+// (macOS 27: setting it later in the process, or the layer's developerHUDProperties alone, do nothing), so with the
+// setting on the app starts itself again with it, before the session log opens. From then on the setting shows and
+// hides the HUD at once (runtime/nvn/metal.m ui_metal_hud_apply); with it off at launch, turning it on needs a restart.
+static void metal_hud_relaunch(void) {
+    if (getenv("MTL_HUD_ENABLED")) return;  // (set: by us, or by hand)
+    char path[1100], dir[900];
+    const char *e = getenv("LARECOMP_SETTINGS");
+    if (e && *e) snprintf(path, sizeof path, "%s", e);
+    else if (rt_data_root_early(dir, sizeof dir)) snprintf(path, sizeof path, "%s/larecomp.ini", dir);
+    else snprintf(path, sizeof path, "larecomp.ini");  // (dev mode: the starting directory)
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[256];
+    bool on = false;
+    while (fgets(line, sizeof line, f)) {
+        int v;
+        if (sscanf(line, " metal_hud = %d", &v) == 1) on = v != 0;
     }
+    fclose(f);
+    if (!on) return;
+    setenv("MTL_HUD_ENABLED", "1", 1);
+    setenv("LARECOMP_METAL_HUD", "1", 1);  // (ui_metal_hud_apply: the HUD was loaded for the setting)
+#if TARGET_OS_IPHONE
+    return;  // (no restart to do: Metal reads it when SDL_main creates the device, later than this)
+#endif
+    plat_exec(NULL);
+    perror("metal hud re-exec");  // (failed: the game starts without the HUD)
 }
+#endif
 
 int main(int argc, char **argv) {
+#ifdef __APPLE__
+    metal_hud_relaunch();
+#endif
+    bool headless = setup_cli_parse(argc, argv);  // (the launchers' commands: runtime/setup_cli.h)
+#if LARECOMP_IOSEXPORT
+    for (int i = 1; i < argc; i++)  // (a command-line run: its lines to the terminal as well as the log)
+        if (!strcmp(argv[i], "--build-ios")) { plat_cli_begin(); break; }
+#endif
     plat_init();
+#ifdef LARECOMP_DYN_BASE
+    LOG("[boot] guest window %llx-%llx (moving: rt.h)\n", (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI);
+#endif
+    log_startup_info();
+    if (getenv("LARECOMP_REEXEC")) {  // (reserve_guest_space started this process again)
+        const char *why = getenv("LARECOMP_REEXEC_WHY"), *n = getenv("LARECOMP_REEXEC");
+        if (!why) LOG("[boot] started again (try %s) (LARECOMP_REEXEC set by the caller)\n", n);
+        else if (!strcmp(why, REEXEC_FORCED)) LOG("[boot] started again (try %s): %s\n", n, why);
+        else LOG("[boot] started again (try %s): the guest address range was in use%s%s\n", n, *why ? ": " : "", why);
+    }
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
 #else
     setvbuf(stderr, NULL, _IOLBF, 0);
 #endif
     const char *root = "extracted";  // (in the data root)
-    bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
-    static char arg_root[1024], arg_setup[1024], arg_check[1024];
-    bool build_romfs = false, prepare = false;
-    const char *setup_dir = NULL, *check_dir = NULL;
+    // LARECOMP_NO_LAUNCHER=1 (tools/game_slot.sh sets it for every test run): never the start screen - it can
+    // delete game files, and a test's extracted/ may be a link to someone else's. Where it would come up (a forced
+    // start screen, "Title screen" in game) the app exits instead. =0: off (start screen tests, scratch data root).
+    const char *nl = getenv("LARECOMP_NO_LAUNCHER");
+    bool no_launcher = nl && *nl && strcmp(nl, "0");
+    bool skip_launcher = no_launcher || getenv("LARECOMP_INPUT");  // tests boot straight in
+    if (getenv("LARECOMP_FORCE_LAUNCHER")) skip_launcher = false;  // (test: the start screen, then the scripted input)
+    static char arg_root[4096], arg_kit[4096];  // (>= PATH_MAX: Bionic's fortified realpath checks it)
+    bool build_ios = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
-        else if (!strcmp(argv[i], "--build-romfs")) build_romfs = true;
-        else if ((!strcmp(argv[i], "--setup") || !strcmp(argv[i], "--prepare")) && i + 1 < argc) {
-            prepare = argv[i][2] == 'p';
-            setup_dir = realpath(argv[++i], arg_setup) ? arg_setup : argv[i];  // (resolved here: rt_paths_init changes directory)
+        else if (!strcmp(argv[i], "--build-ios")) {  // <kit.laskit> [game files]: the iOS app, then exit
+            build_ios = true;
+            if (i + 1 < argc && !realpath(argv[++i], arg_kit)) snprintf(arg_kit, sizeof arg_kit, "%s", argv[i]);
         }
-        else if (!strcmp(argv[i], "--check") && i + 1 < argc)
-            check_dir = realpath(argv[++i], arg_check) ? arg_check : argv[i];
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
-    if (prepare && !getenv("LARECOMP_DATA_ROOT")) {  // next to the exe, wherever it was started from (as our launcher sets it)
-        static char dir[1024];
-        char *s = plat_exe_path(dir, sizeof dir) ? strrchr(dir, '\\') : NULL;
-        if (s) *s = 0, setenv("LARECOMP_DATA_ROOT", dir, 1);
-    }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
-    if (setup_dir) return setup_headless(setup_dir, prepare);
-    if (check_dir) {
-        int st = setup_check(check_dir);
-        if (st == SETUP_IDLE) printf("ok\n");
-        else printf("failed %s\n", SETUP_NAME[st]);
-        fflush(stdout);
-        return st != SETUP_IDLE;
+    if (headless) return setup_cli_run();
+    if (getenv("LARECOMP_MENU_SFX_TEST")) {  // (test: the menu sounds loaded now, each logged)
+        extern void menu_sfx_set_game_dir(const char *dir);
+        extern void menu_sfx_load_now(void);
+        menu_sfx_set_game_dir(root);
+        menu_sfx_load_now();
     }
-    if (build_romfs) {  // --build-romfs: <root>/romfs.bin, the image the game reads, from <root>/romfs/ (the launcher's setup)
-        char dir[1100], img[1100], why[256] = "";
-        snprintf(dir, sizeof dir, "%s/romfs", root);
-        snprintf(img, sizeof img, "%s/romfs.bin", root);
-        if (romfs_image_ok(img, why, sizeof why)) return 0;
-        if (!romfs_build(dir, img, NULL, why, sizeof why)) { fprintf(stderr, "romfs image: %s\n", why); return 1; }
-        return 0;
+#if LARECOMP_IOSEXPORT
+    if (build_ios) {  // (the iOS export without the start screen: runtime/iosexport.c)
+        extern bool iosexport_run_cli(const char *kit, const char *game_dir);
+        return iosexport_run_cli(arg_kit, root) ? 0 : 1;
     }
+#else
+    if (build_ios) { fprintf(stderr, "the iOS export isn't in this build of LAS Recomp\n"); return 1; }
+#endif
     for (bool title = !skip_launcher;;) {
-        if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
-            extern void launcher_lg_run(const char *root);
-            launcher_lg_run(root);
+        if (title && no_launcher) {
+            fprintf(stderr, "[main] LARECOMP_NO_LAUNCHER is set: not showing the start screen - exiting\n");
+            exit(3);
+        }
+        if (title) {  // start screen (runtime/ui/launcher.mm): game files setup, seed choice, settings
+            extern void launcher_run(const char *root);
+            launcher_run(root);
         }
         boot(root);
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested

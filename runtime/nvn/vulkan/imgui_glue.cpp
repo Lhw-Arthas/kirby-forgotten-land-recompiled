@@ -5,12 +5,47 @@
 
 extern "C" {
 #include "vk.h"
+#include "record.h"
 }
+
+// imgui_impl_vulkan.cpp: fixed vertex input draws nothing on this driver while dynamic vertex input is enabled.
+extern "C" int las_imgui_dyn_vertex = 0;
+
+#ifdef __ANDROID__
+// The backend's vertex shader with the swapchain's pre-rotation (device.c sc_quarter) in its push constants: the same
+// projection as the stock shader, then turned by (cos, sin). From Nycolazs's LASRecomp-Android-Plus (MIT).
+static const char kImguiVert[] =
+    "#version 450 core\n"
+    "layout(location = 0) in vec2 aPos;\n"
+    "layout(location = 1) in vec2 aUV;\n"
+    "layout(location = 2) in vec4 aColor;\n"
+    "layout(push_constant) uniform uPushConstant { vec2 uScale; vec2 uTranslate; vec2 uRot; } pc;\n"
+    "out gl_PerVertex { vec4 gl_Position; };\n"
+    "layout(location = 0) out struct { vec4 Color; vec2 UV; } Out;\n"
+    "void main() {\n"
+    "  Out.Color = aColor;\n"
+    "  Out.UV = aUV;\n"
+    "  vec2 p = aPos * pc.uScale + pc.uTranslate;\n"
+    "  gl_Position = vec4(pc.uRot.x * p.x - pc.uRot.y * p.y, pc.uRot.y * p.x + pc.uRot.x * p.y, 0.0, 1.0);\n"
+    "}\n";
+extern "C" uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords);  // (shaders.c)
+#endif
+
+// (device.c, each window frame) the swapchain's pre-rotation for everything ImGui draws into it
+extern "C" void vk_imgui_prerotation(int quarter) { ImGui_ImplVulkan_SetPreRotation(quarter); }
 
 // Per ImGui context (the start screen and the in-game menu each have one, and the start screen comes back after an
 // in-place reboot while the menu's context lives on): the backend keeps its data in the current context.
 extern "C" bool vk_imgui_backend_init(void) {
     if (ImGui::GetIO().BackendRendererUserData) return true;
+#ifdef __ANDROID__
+    static uint32_t *spv;
+    static size_t nwords;
+    if (!spv) spv = vk_glsl_to_spirv(kImguiVert, STAGE_VERTEX, "imgui.vert", &nwords);
+    if (spv) ImGui_ImplVulkan_SetVertexShader(spv, nwords * 4);
+    else LOG("[vk] ImGui: the pre-rotation vertex shader didn't compile: the stock one\n");
+#endif
+    las_imgui_dyn_vertex = g_vk.vids;
     ImGui_ImplVulkan_InitInfo ii = {};
     ii.ApiVersion = VK_API_VERSION_1_3;
     ii.Instance = g_vk.inst;
@@ -27,14 +62,31 @@ extern "C" bool vk_imgui_backend_init(void) {
     ii.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     ii.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
     ii.PipelineRenderingCreateInfo.pColorAttachmentFormats = &g_vk.sc_format;
-    ii.CheckVkResultFn = [](VkResult err) { if (err < 0) LOG("[vk] ImGui: Vulkan call failed: %d\n", err); };
     bool ok = ImGui_ImplVulkan_Init(&ii);
     if (!ok) LOG("[vk] ImGui Vulkan backend init failed\n");
+    // The font texture now (the fonts were added before this): ImGui uploads it with a submission and a queue wait of
+    // its own, which its NewFrame would otherwise make at the first frame, while the recorder thread (record.c) may
+    // be submitting. Here the recorder is drained first, so the queue is idle.
+    if (ok) {
+        rec_drain();
+        ImGui_ImplVulkan_CreateFontsTexture();
+    }
     return ok;
+}
+
+// The fonts were added again (the menus' language changed, runtime/ui/i18n.mm): a new font texture, with the queue
+// idle as above (the old one may still be in a frame in flight)
+extern "C" void vk_imgui_fonts_rebuild(void) {
+    if (!ImGui::GetIO().BackendRendererUserData) return;
+    rec_drain();
+    vkDeviceWaitIdle(g_vk.dev);
+    ImGui_ImplVulkan_DestroyFontsTexture();
+    ImGui_ImplVulkan_CreateFontsTexture();
 }
 
 extern "C" void vk_imgui_backend_shutdown(void) {
     if (!ImGui::GetIO().BackendRendererUserData) return;
+    rec_drain();  // (the queue is the recorder's: idle for the wait below)
     vkDeviceWaitIdle(g_vk.dev);
     ImGui_ImplVulkan_Shutdown();
 }
@@ -62,7 +114,7 @@ extern "C" uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h) {
     rg.bufferOffset = s.off;
     rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     rg.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
-    vkCmdCopyBufferToImage(cb, s.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+    rec_CmdCopyBufferToImage(cb, s.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vi.image = img;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;

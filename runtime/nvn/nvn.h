@@ -31,6 +31,8 @@ typedef struct NvnTexture {
     uint64_t pool_offset;
     void *backend;  // renderer-side texture
     uint64_t debug_id;
+    uint32_t pool_refs;  // texture pool entries that name it (cleared when it is finalized: runtime/nvn/objects.c)
+    bool format_views;   // named through a view in a format the backend can only give with a flag (Metal: PixelFormatView)
     char label[64];
 } NvnTexture;
 
@@ -48,12 +50,22 @@ typedef struct {
     uint8_t swizzle[4];
 } NvnTextureView;  // our layout of the guest NVNtextureView (0x28 bytes)
 
+// A view naming a texture (pool entry, render target, clear, copy): one in another format is told to the backend before
+// the texture is used through it.
+void backend_texture_view_format(NvnTexture *tex, uint32_t format);  // (runtime/nvn/metal.m, vulkan/textures.c)
+static inline void nvn_texture_note_view(NvnTexture *t, const NvnTextureView *v) {
+    if (t && v && (v->setmask & 4) && v->format != t->format) backend_texture_view_format(t, v->format);
+}
+
 typedef struct {
     NvnTexture *tex;
     NvnTextureView view;
     bool has_view;
-    uint64_t guest;  // the game's NVNtexture object it was registered with (objects.c: a finalized texture leaves the slot)
+    uint32_t dead_format;  // the texture registered here was finalized (NVN format + 1; 0 = no): tex is NULL
 } NvnTexEntry;
+
+// A draw named a texture pool slot whose texture was finalized (runtime/nvn/objects.c): logged, a few times
+void nvn_dead_slot_sampled(const NvnTexEntry *e, uint32_t slot);
 
 typedef struct NvnDescPool {
     uint64_t addr;
@@ -67,8 +79,6 @@ typedef struct NvnShaderStage {
     const uint8_t *control;   // control section
     uint32_t const_offset, const_size;  // compiler constants (bound as c1), within the code blob
     void *backend;
-    uint64_t content_hash;  // the code and constants as SetShaders found them (objects.c): with the address, the key of the
-                            // translated program (the game reloads shader archives elsewhere: another shader at an address)
 } NvnShaderStage;
 
 typedef struct NvnProgram {
@@ -86,19 +96,20 @@ typedef struct NvnWindow {
 typedef struct NvnSync {
     volatile int signaled;
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
-    volatile uint64_t ticket;  // with the render thread: the jobs queued when the game fenced (rt_fence_ticket), 0 = none
 } NvnSync;
 
 // ---- command recording (stored in guest command memory)
+typedef struct CmdSpill CmdSpill;  // (cmdbuf.c) host memory a list goes on in once the game's chunk is full
 typedef struct {
-    uint64_t mem;    // current command memory chunk (guest address)
+    uint64_t mem;    // current command memory chunk (guest address, or a spill's)
     uint64_t size;   // chunk size
     uint64_t used;   // bytes used in chunk
     uint64_t start;  // first record of the list being recorded
     uint64_t callback, callback_data;
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
-    uint64_t obj_tag;  // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
+    uint64_t chunk;  // the guest chunk added last
+    CmdSpill *spills;
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
@@ -125,7 +136,6 @@ enum {
     CMD_COPY_TEXTURE_TO_TEXTURE, CMD_DOWNSAMPLE, CMD_UPDATE_UNIFORM_BUFFER, CMD_FENCE_SYNC, CMD_WAIT_SYNC,
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
-    CMD_OBJECT,  // (ours) x[0]: the game object the following draws belong to, 0 = none (frame interpolation)
     CMD_COUNT
 };
 
@@ -137,20 +147,3 @@ void backend_execute(uint64_t handle);            // run a recorded command list
 void backend_present(NvnTexture *tex);            // show a texture in the window
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);
-// render thread (vulkan/renderthread.c): with LARECOMP_RENDER_THREAD off these run the backend call on the spot
-bool rt_active(void);
-bool rt_on_render_thread(void);
-void rt_submit(uint64_t handle);
-// fences recorded in command lists (objects.c): with the render thread a sync fenced in a list takes the ticket of the
-// job that runs the list when it is submitted, and nvnSyncWait waits for that job (and its GPU work) only
-void nvn_list_begin(uint64_t list);
-void nvn_list_fence(uint64_t list, uint64_t sync);
-void nvn_list_call(uint64_t list, const uint64_t *called, int n);
-void nvn_list_submitted(uint64_t list, uint64_t ticket);
-void rt_present(NvnTexture *tex);
-void rt_call(void (*fn)(void *), void *arg);
-void rt_drain(void);
-uint64_t rt_fence_ticket(void);
-void rt_wait_ticket(uint64_t ticket);
-void rt_reset(void);
-uint64_t renderer_game_frame(void);  // presents the game has made (the backend's own count: renderer_present_count)

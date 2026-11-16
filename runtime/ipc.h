@@ -73,6 +73,7 @@ static inline IpcBuf *in_buf(IpcReq *req, int i) {
 Service *service_new(const char *name, ServiceHandler h, void *state);
 Service *service_lookup(const char *name);  // from the registry (services/*.c)
 void ipc_return_object(IpcResp *resp, Service *s);
+void ipc_set_service_access(const char *npdm_path);  // sm refuses services outside the npdm's list
 
 typedef struct { const char *name; ServiceHandler handler; } ServiceDef;
 #ifdef __APPLE__

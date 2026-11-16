@@ -8,7 +8,7 @@ SECS=${1:-60}
 LOG="boot-${2:-last}.log"
 export PATH="/c/msys64/ucrt64/bin:$PATH"
 cd "$WORK" || exit 2
-LARECOMP_GAME_LIB=build/lasgame.dll timeout "$SECS" ./build/lasrecomp.exe extracted --play > "$LOG" 2>&1
+LARECOMP_GAME_LIB=build/lasgame.dll timeout "$SECS" ./build/ForgottenLandRecomp.exe extracted --play > "$LOG" 2>&1
 code=$?
 echo "exit $code ($([ $code = 124 ] && echo 'still running at the time limit' || echo 'stopped by itself')), $(wc -l < "$LOG") log lines"
 grep -cE '^\[kernel\] CreateThread' "$LOG" | sed 's/^/threads created: /'

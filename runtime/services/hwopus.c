@@ -4,7 +4,8 @@
 //
 // IHardwareOpusDecoderManager: 0 Open(params {u32 rate, u32 channels}, u32 work size, transfer memory),
 //   1 GetWorkBufferSize(params), 2 OpenForMultiStream, 3 GetWorkBufferSizeForMultiStream (multistream: not seen yet).
-// IHardwareOpusDecoder: 0 DecodeInterleavedOld, 4 DecodeInterleavedWithPerfOld, 6 DecodeInterleaved(u8 reset).
+// IHardwareOpusDecoder: 0 DecodeInterleavedOld, 4 DecodeInterleavedWithPerfOld, 6 DecodeInterleavedWithPerfAndResetOld,
+//   8 DecodeInterleaved (7.0.0+: u8 reset, A in, B out; Kirby's stage music, https://switchbrew.org/wiki/Audio_services).
 //   Input buffer: {u32 size BE, u32 final range BE} + packet. Output: s16 interleaved at the opened rate.
 //   Returns u32 bytes consumed, u32 samples per channel (+ u64 time in microseconds for 4 / 6).
 #include <libavcodec/avcodec.h>
@@ -75,13 +76,13 @@ static int opus_decode(OpusDec *d, const uint8_t *data, uint32_t size, int16_t *
 static void opus_decoder(Service *s, IpcReq *req, IpcResp *resp) {
     OpusDec *d = s->state;
     switch (req->cmd) {
-    case 0: case 4: case 6: {  // DecodeInterleaved*(in packet buffer, out PCM buffer)
+    case 0: case 4: case 6: case 8: {  // DecodeInterleaved*(in packet buffer, out PCM buffer)
         IpcBuf *in = in_buf(req, 0), *out = out_buf(req, 0);
         if (!in || !out || in->size < 8) { resp->result = 111 | (6 << 9); return; }  // (module 111 codec: bad input)
         const uint8_t *p = (const uint8_t *)(uintptr_t)in->addr;
         uint32_t size = be32(p);
         if (8 + (uint64_t)size > in->size) { resp->result = 111 | (6 << 9); return; }
-        if (req->cmd == 6 && req->data_size >= 1 && IN(uint8_t, 0)) {
+        if ((req->cmd == 6 || req->cmd == 8) && req->data_size >= 1 && IN(uint8_t, 0)) {
             pthread_mutex_lock(&d->lock);
             avcodec_flush_buffers(d->ctx);  // reset: a new stream
             pthread_mutex_unlock(&d->lock);
