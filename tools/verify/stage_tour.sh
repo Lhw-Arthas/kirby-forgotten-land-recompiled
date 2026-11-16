@@ -9,6 +9,7 @@
 #   TOUR_ONLY=<regex>   only the steps matching it      TOUR_LOOP=1   start over at the end (soak), until stopped
 #   TOUR_END=<frame>    last frame of a run (6600)      TOUR_HOLD=<frames> after the step loads before skipped draws
 #   TOUR_SECS=<s>       wall-clock limit of a run (600)                      count (600)
+#   TOUR_WRAP=<command> a prefix for each game run (a queue that holds the PC for one run at a time)
 #   TOUR_SEED=<n>       random play instead of the light input (soak: with a large TOUR_END / TOUR_SECS, or TOUR_LOOP)
 set -u
 GAME=$(cd "${1:?usage: stage_tour.sh <game folder> <out folder>}" && pwd)
@@ -52,16 +53,10 @@ run_step() {  # run_step <step>: one run, its record appended to tour.jsonl
         export LARECOMP_NO_USER_INPUT=1 LARECOMP_INPUT="$BOOT,$PLAY" LARECOMP_STAGE="$step" LARECOMP_LOG_FILES=1
         export LARECOMP_AUDIO_GAIN=0 LARECOMP_AUDIO_WAV="$(win "$wav")"  # (the game's sound to a file, none to the speakers)
         export LARECOMP_WINDOW_SHOT=$END LARECOMP_SHOT_PATH="$(win "$shot")" LARECOMP_EXIT_AFTER_SHOT=1
-        ./build/ForgottenLandRecomp.exe "$GAME" --play > "$log" 2>&1 &
-        pid=$!
-        ( sleep "$SECS"; kill "$pid" 2>/dev/null && echo "[tour] killed after ${SECS}s" >> "$log" ) &
-        watchdog=$!
-        wait "$pid"
-        echo "[tour] exit $?" >> "$log"
-        kill "$watchdog" 2>/dev/null
+        ${TOUR_WRAP:-} bash "$ROOT/tools/verify/stage_run.sh" "$SECS" "$log" "$GAME"
     )
     "$PY" "$ROOT/tools/verify/stage_check.py" check "$step" "$log" "$shot" "$wav" "$HOLD" >> "$OUT/tour.jsonl"
-    rm -f "$wav"  # (tens of MB a run; its loudness is in the record)
+    tail -1 "$OUT/tour.jsonl" | grep -q 'silent"' || rm -f "$wav"  # (tens of MB a run: kept only when it was silent)
     tail -1 "$OUT/tour.jsonl" | "$PY" -c "import json,sys; r=json.load(sys.stdin); print('[tour] %s: %s' % (r['stage'], r['verdict']))"
 }
 
