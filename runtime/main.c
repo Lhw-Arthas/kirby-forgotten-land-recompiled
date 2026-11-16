@@ -227,6 +227,7 @@ static void boot(const char *root) {
     kernel_init();
     dispatch_init();
 
+    { extern void ipc_set_service_access(const char *); ipc_set_service_access(npdm_path); }
     uint32_t stack_size = 0x100000;
     int prio = 44;
     FILE *f = fopen(npdm_path, "rb");
