@@ -929,6 +929,8 @@ typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
+static _Atomic int jobs_pending, jobs_done;  // translations and builds queued or running; finished ever (vk_build_hold)
+int vk_builds_pending(void) { return atomic_load(&jobs_pending); }  // (device.c: the pipeline cache saved after a burst)
 
 static void *worker(void *a) {
     (void)a;
@@ -942,6 +944,8 @@ static void *worker(void *a) {
         pthread_mutex_unlock(&jobs_lock);
         j->fn(j->arg);
         free(j);
+        atomic_fetch_add(&jobs_done, 1);
+        atomic_fetch_sub(&jobs_pending, 1);
     }
     return NULL;
 }
@@ -970,6 +974,8 @@ static void *translator(void *a) {
         pthread_mutex_unlock(&tjobs_lock);
         j->fn(j->arg);
         free(j);
+        atomic_fetch_add(&jobs_done, 1);
+        atomic_fetch_sub(&jobs_pending, 1);
     }
     return NULL;
 }
@@ -980,6 +986,7 @@ static void run_translate(void (*fn)(void *), void *arg) {
     if (!started) { started = true; pthread_t t; pthread_create(&t, NULL, translator, NULL); }
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
+    atomic_fetch_add(&jobs_pending, 1);
     pthread_mutex_lock(&tjobs_lock);
     if (tjobs_tail) tjobs_tail->next = j; else tjobs_head = j;
     tjobs_tail = j;
@@ -995,13 +1002,16 @@ static void run_job(void (*fn)(void *), void *arg) {
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
         int n = plat_cpu_count();  // (the process's affinity mask: a process held to a few cores, few workers)
         if (n <= 0) n = SDL_GetNumLogicalCPUCores();
+        int cpus = n;
         n -= 4;
         if (n < 4) n = 4;
         if (n > 16) n = 16;
+        LOG("[vk] %d shader / pipeline build threads (%d logical CPUs for this process)\n", n, cpus);
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
+    atomic_fetch_add(&jobs_pending, 1);
     pthread_mutex_lock(&jobs_lock);
     if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
     jobs_tail = j;
@@ -1109,7 +1119,9 @@ static void skip_note(int why, bool compute) {
     }
     skip_top[j].n++;
 }
-#define SKIP(why) do { stat_skipped++; if (log_skips) skip_note(why, false); } while (0)
+static uint64_t cum_build_skips;  // draws skipped for a program or pipeline still being built, never reset (vk_build_hold)
+#define SKIP(why) do { int w_ = (why); stat_skipped++; cum_build_skips += w_ == SK_PROG_BUILDING || w_ == SK_PIPE_BUILDING; \
+                       if (log_skips) skip_note(w_, false); } while (0)
 #define SKIP_CS(why) do { stat_skipped++; if (log_skips) skip_note(why, true); } while (0)
 static void skip_log(void) {
     if (log_skips <= 0) return;
@@ -1172,6 +1184,43 @@ static void builds_check(void) {
             builds[s].what, (unsigned long long)builds[s].c0, (unsigned long long)builds[s].c1);
     }
     pthread_mutex_unlock(&builds_lock);
+}
+
+// At each present (device.c, the render thread). A frame with many draws skipped because their programs or pipelines
+// are still being built (the first visit of an area: hundreds at once) is not shown: the render thread waits here for
+// the builds, up to 10 s a frame, so the game waits with it, and the window keeps the last frame shown. Skipping
+// instead, 2 cores with a cold driver cache showed a black screen for half a minute and more while the game played on
+// (a fifth of the draws missing was enough for black: the lighting pass). A few new programs (an effect seen for the
+// first time) are not held for: those draws pop in as before. begin(): a run of held frames starts. notice(done,
+// total): from a second into the run, 4 times a second, the builds finished since it started of those plus the rest.
+bool vk_build_hold(void (*begin)(void), void (*notice)(int done, int total)) {
+    static uint64_t l_draws, l_skips, since;  // since: the run's first held frame (0: the last frame was shown)
+    static int done0;
+    uint64_t drawn = cum_draws - l_draws, skipped = cum_build_skips - l_skips;
+    int jobs = atomic_load(&jobs_pending);
+    bool hold = skipped >= 16 && (skipped * 3 >= drawn || jobs >= 8);
+    if (hold) {
+        uint64_t t0 = SDL_GetTicksNS(), painted = 0;
+        if (!since) {
+            since = t0, done0 = atomic_load(&jobs_done);
+            if (begin) begin();
+        }
+        while (atomic_load(&jobs_pending) > 0 && SDL_GetTicksNS() - t0 < 10000000000ull) {
+            uint64_t now = SDL_GetTicksNS();
+            if (notice && now - since > 1000000000ull && now - painted >= 250000000ull) {
+                painted = now;
+                int done = atomic_load(&jobs_done) - done0;
+                notice(done, done + atomic_load(&jobs_pending));
+            }
+            SDL_DelayNS(1000000);
+        }
+        static int nlog;
+        if (nlog++ < 200)
+            LOG("[vk] frame held %.0f ms for %d shader / pipeline builds (%llu draws waiting, %llu drawn)\n",
+                (SDL_GetTicksNS() - t0) / 1e6, jobs, (unsigned long long)skipped, (unsigned long long)drawn);
+    } else since = 0;
+    l_draws = cum_draws, l_skips = cum_build_skips;
+    return hold;
 }
 
 const char *renderer_stats(void) {

@@ -106,6 +106,10 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                                                                          // unwind; runtime/hle/game_state.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
         snprintf(what, sizeof what, "This is a bug in LAS Recomp, not a problem with your game files or PC. %s", report);
+    } else if (has("device lost") || has("failed: -4 (")) {  // (VK_ERROR_DEVICE_LOST: the Vulkan backend's fatal lines)
+        snprintf(head, sizeof head, "Your graphics card stopped responding");
+        snprintf(what, sizeof what, "The graphics driver reset the GPU while the game was running (device lost). Update "
+                 "your graphics driver and try again. If it keeps happening, please report it with the log file below.");
     } else if (in_gpu_driver(g_pc)) {
         snprintf(head, sizeof head, "Your graphics driver crashed");
 #ifdef __ANDROID__
@@ -134,7 +138,9 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(head, sizeof head, "LAS Recomp stopped because of an error");
         snprintf(what, sizeof what, "%s", report);
     }
-    fprintf(stderr, "[crash] %s\n", head);
+    // (the fatal line again, after the backtrace: a launcher's excerpt of the log's last lines lost it above the trace)
+    size_t l = strlen(g_line);
+    fprintf(stderr, "[crash] %s: %s%s", head, g_line, l && g_line[l - 1] == '\n' ? "" : "\n");
     if (log_path && *log_path) snprintf(out, n, "%s\n\n%s\n\nLog file:\n%s", head, what, log_path);
     else snprintf(out, n, "%s\n\n%s", head, what);
 }
