@@ -1,50 +1,66 @@
 # Status
 
-This page says how far the game gets and what is known to be wrong. Every fix and the evidence
-for it is in [decisions.tsv](decisions.tsv).
+This page says how far the game gets in 0.3.0, how each part was checked, and what is known to be wrong.
+[testing.md](testing.md) describes the checks. [decisions.tsv](decisions.tsv) records the decisions of 0.1.0 to
+0.2.0 and their evidence.
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`).
 
+All numbers are from the developer PC (RTX 3050 Laptop 4 GB, 16 threads) unless a line says otherwise.
+
 ## What works
 
-| Stage | State |
-|---|---|
-| Translate and compile the game code | Works: `main`, `sdk` and `subsdk0` lift to C and build into `lasgame.dll` |
-| Boot | Works: SDK and game start-up, services, RomFS, threads, Vulkan device and window |
-| First screens | Works: the online prompt and the difficulty pick render and take input |
-| Opening movie | Plays |
-| Opening cutscene | Renders correctly |
-| First stage | Reached with scripted input. Kirby walks, the scene is lit and on screen |
-| Launcher | Works end to end: pick the game folder, build, cancel, play |
+| Part | State | How it was checked |
+|---|---|---|
+| Game code | `main`, `sdk` and `subsdk0` lift to C and build into `lasgame.dll` | Generator gate (`make verify`): 0 unsupported instructions in all 3 modules |
+| Boot | SDK and game start-up, services, RomFS, threads, Vulkan device and window | Service check (`make verify`). Vulkan validation from boot to the first stage: 0 errors |
+| Game data | Every RomFS file reads | Asset check (`make verify`): 9,373 files, all 36 movies and all 104 Opus files decode, all 25,689 textures are in supported formats |
+| Shaders | Every shader program translates and builds | Shader sweep (`make verify`): 14,232 programs, 0 failures |
+| Opening | The online prompt, the difficulty pick, the opening movie and cutscene | Scripted run: the capture at frame 3400 (the beach) matches v0.2.0 |
+| First stage | Kirby walks, the scene is lit, the guide clips play | Scripted runs: the capture at frame 5000 matches v0.2.0; `tools/input/stage1.txt` goes past the Spit guide |
+| Mouthful Mode | The car and the ring, drawn with their geometry stage | `tools/input/carmouth.txt` (the car's boost guide) |
+| Every stage | `LARECOMP_STAGE` starts a new game at any of the 109 stages | Stage tour (`tools/verify/stage_tour.sh`), one run per stage. TODO (coordinator): the final tour numbers |
+| Music and sound | Stage music plays through the game's Opus decoder; the reverb and delay effects run | In a v0.2.0 first-stage run the game called the decoder command `DecodeInterleaved` 6,922 to 14,254 times and got no samples back; it decodes now. `tools/test_audio_fx.c` checks the effects with the game's own parameters |
+| Launcher | Pick the game folder, build, cancel, rebuild, play | Unit tests in CI (`cargo test`, `node --test`). TODO (coordinator): Build and Play from a fresh unzip of the release |
 
-Reproduce the furthest point with `bash tools/run_scripted.sh <name> 170 "3400,5000"` and look at
-`<work>/runs/<name>/fin_5000.png`. `tools/boot_check.sh` runs a timed boot without input.
+Reproduce the opening and the first stage with `bash tools/run_scripted.sh <name> 170 "3400,5000"`, then look at
+`<work>/runs/<name>/fin_3400.png` and `fin_5000.png`. `tools/boot_check.sh` runs a timed boot without input.
+`make verify GAME=<dump>` runs every check above that needs the game.
 
 ## Known problems
 
-- Nothing past the first seconds of the first stage has been tried. Expect more missing shader instructions,
-  services and rendering faults.
-- 3D scenes run at about 30 fps, with long stalls the first time a pipeline is compiled.
-- Audio has only been checked for not crashing. Nobody has listened to it.
-- Input has only been tested through the scripted path, not with a real controller or keyboard.
-- One boot in four exited by itself with code 0 in an earlier session. A restart path that did exactly that is
-  fixed, but nobody has shown it was the cause, and it did not happen again in 44 later runs.
-- The launcher's build can fail to link when the work folder is on another drive or behind a long path.
+- Nobody has played the game start to finish. Bosses, the later worlds by real play, and the ending are not checked.
+- TODO (coordinator): the world map and Town result.
+- A first visit to an area pauses while its shaders build, on the "Preparing graphics for this area" notice. On a
+  2-core PC with a cold cache the pause at the beach was about 15 to 25 s (an older measurement). Fast PCs pause less.
+  Later visits use the shader cache: the longest pause on a second run was about 1.2 s, with a cold driver cache.
+- Rarely, the game crashed after the opening movie while the PC was heavily overloaded: a UI script read an empty
+  widget. It did not happen in 15 runs without other load, including runs that starved the game's threads on purpose
+  and 3,265 injected pauses.
+- A lost GPU device in Mouthful Mode was reported on 0.2.0 (issues #10 and #6). It did not happen on 0.2.0 or 0.3.0 in
+  20-minute runs at 4K on the developer PC. The log now names the memory the GPU was reading.
+- On AMD, an RX 550 showed a black screen (issue #11). The fixes follow the Vulkan spec, and a software Vulkan driver
+  (lavapipe) boots and draws the beach, but nothing has run on AMD hardware.
+- Online features do not work. Choose "Do Not Use" at the prompt.
+- 3D runs at 30 fps, the game's own pace on the Switch.
+- Only extracted `exefs` and `romfs` folders of the base game 1.0.0 are accepted. No `.nsp` or `.xci` files, and no
+  update.
+- Frame generation is off and untested.
+- Each tutorial clip's window may stay black for its first few seconds. This was seen in 0.2.0 and not checked again.
+- No rumble.
+- Keys are changed in the in-game menu (Controls) or in `larecomp.ini`, not in the launcher.
+- Windows only. LAS Recomp's code for Linux, macOS, iOS and Android is in the tree but not built.
 
 ## Stubs and shortcuts
 
-- `nfp:user` (amiibo) reports no reader.
-- `prepo:u`, `bcat:u` and `ectx:aw` log their calls and return success.
-- Compute shaders get a fixed 32 KB of shared memory.
-- Compute shader image stores (`SUST`) write float data only, and the image handle layout is inferred from the
-  game's shaders.
-- The shader translator rejects `EXIT` flow tests and `LEA` forms the game has not used so far.
-
-## Inherited from letsgo-recomp, still to sort out
-
-- The frame time handed to the graphics code is 33.3 ms (30 fps). Kirby runs at 60.
-- Ambient occlusion runs at half strength, because a title-screen check is always true.
-- The built-in start screen and F12 menu are letsgo-recomp's, with its graphics options (tuned for that game and
-  untested here). The launcher starts the game with `--play`, which skips the start screen.
-- The release packaging in the Makefile (`make dist`) has never been run for this project.
-- Many code comments still describe Let's Go behaviour.
+- `nfp:user` (amiibo) behaves like a console that never sees an amiibo.
+- Screenshots (`caps:su`, `caps:u`), NFC, `friend:u`, `mii:u` and the other services the game may use but has not
+  called in testing answer through the logging stub, which returns success.
+- `prepo:u` keeps play reports and never sends them. `bcat:u` has no deliveries. `nifm`, `ssl`, `bsd` and `ldn` act
+  as an offline console.
+- Shaders are not built ahead of time. LAS Recomp's shader preparation has no variant list for this game
+  (`runtime/nvn/shader_variants.txt` is empty), so each pipeline builds the first time it is drawn.
+- A compute shader that indexes shared memory with a register gets a fixed 32 KB of it.
+- Image stores (`SUST`) work only in compute shaders and only with all four components.
+- The translator still rejects some instruction forms, such as `LEA.X`. The shader sweep shows the game uses none of
+  them.

@@ -14,20 +14,33 @@ an emulator.
 
 ## Status
 
-See [docs/STATUS.md](docs/STATUS.md) for how far the game gets and what is known to be missing. In short: the
-game boots, plays its opening and reaches the first stage with correct graphics.
+Version 0.3.0 is rebuilt on [LAS Recomp](https://github.com/peiikai/LASRecomp)'s engine. The game boots, plays its
+opening and runs the first stage with scripted input, and a stage tour starts a game at each of its 109 stages. Stage
+music plays. A new area shows a "Preparing graphics" notice while its shaders build, instead of a black or half-drawn
+screen. [docs/STATUS.md](docs/STATUS.md) lists what has been checked and how, and the known problems.
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`). The
-launcher and the runtime accept any version of the game by program id, but only v1.0.0 has been built and run.
+launcher refuses other versions and the update when you pick the folder.
 
 ## Download
 
-Get `ForgottenLandRecomp-<version>-Windows-x64.zip` from the
+Get `ForgottenLandRecomp-0.3.0-Windows-x64.zip` from the
 [latest release](https://github.com/scarxity/kirby-forgotten-land-recompiled/releases/latest), unzip it, open
 `ForgottenLandLauncher.exe`, pick the folder that holds your `exefs` and `romfs`, then Build and Play. The zip holds
-tools only: the game code is built on your PC from your own copy, in about 16 minutes on a 16-thread PC. The launcher
-wants about 6.5 GB of free disk: your game files are hard-linked into the folder when they are on the same drive (no
-extra space) and copied (about 6 GB) when they are not. Its `README.txt` has the details. [CHANGELOG.md](CHANGELOG.md) lists what changed.
+tools only. The game code is built on your PC from your own copy, in about 7 minutes on a 16-thread PC.
+
+You need:
+
+- Windows 10 or 11, 64-bit.
+- A CPU with AVX2 (Intel Haswell, 2013, or newer; AMD Excavator or Zen, or newer).
+- A graphics driver with Vulkan 1.3.
+- 6.5 GB of free disk, which the launcher checks before it builds (1 GB to rebuild only the game code). The setup
+  links your `romfs` folder into the install folder when both are on the same drive, which takes no extra space, and
+  copies it (about 6 GB) when they are not. It writes no image of the game's data.
+- An install path under 200 characters. The launcher checks this too.
+
+The zip's `README.txt` has the controls and what to do when something goes wrong. [CHANGELOG.md](CHANGELOG.md) lists
+what changed.
 
 The zip also carries a `recomplauncher.json`, so [RecompLauncher](https://recomplauncher.com) can set the game up
 from the same folder, show its settings and start it.
@@ -38,17 +51,18 @@ from the same folder, show its settings and start it.
 |---|---|
 | `game/` | What names this game: `game.h` (program id, folders, modules) and `game.mk` (exe name, version) |
 | `runtime/` | The runtime, from LAS Recomp: kernel, services, NVN graphics on Vulkan, audio, input |
-| `tools/` | The generator that lifts the game's NSO modules to C (`gen.py`, `lifter.py`), the packaging and the tests |
+| `tools/` | The generator that lifts the game's NSO modules to C (`gen.py`, `lifter.py`), the packaging, the tests and the checks (`ci/`, `verify/`) |
 | `launcher/` | The launcher (Tauri 2): pick the game folder, build the game code, play |
 | `third_party/` | Bundled libraries, each under its own license |
-| `docs/` | Status, the upstream record, what the launcher expects from the runtime |
+| `docs/` | Status, testing, the upstream record, what the launchers expect from the runtime |
 
 Nothing derived from the game lives in this repository. The extracted game files, the generated C and the build
-output all go to a **work folder** outside it (`../work/kfl` by default, `WORK=` to change).
+output go to a **work folder** outside it. Pass it to `make` as `WORK=`. The scripts in `tools/` default to
+`../work/kfl`.
 
 ## Build from source (Windows)
 
-Tools:
+Install the tools once:
 
 1. [Git for Windows](https://git-scm.com/download/win), Python 3.12, Node.js 20+, Rust (for the launcher).
 2. MSYS2 with the UCRT64 packages, in PowerShell:
@@ -56,41 +70,76 @@ Tools:
    winget install --id MSYS2.MSYS2 -e
    $env:MSYSTEM='UCRT64'; C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm --disable-download-timeout make mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-sdl3 mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-vulkan-devel mingw-w64-ucrt-x86_64-shaderc mingw-w64-ucrt-x86_64-spirv-tools mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gdb mingw-w64-ucrt-x86_64-vulkan-memory-allocator mingw-w64-ucrt-x86_64-vulkan-validation-layers"
    ```
-3. The generator's Python environment, in the repository folder:
+   To build the release zip, also install `mingw-w64-ucrt-x86_64-nasm` (`make deps-windows` needs it).
+3. The generator's Python environment, in the repository folder (the Makefile looks for `.venv`):
    ```powershell
-   python -m venv .venv; .venv\Scripts\python.exe -m pip install lz4 capstone unicorn
+   python -m venv .venv; .venv\Scripts\python.exe -m pip install capstone==5.0.9 unicorn==2.1.4 lz4==4.4.5
    ```
 
-Then either use the launcher:
+### With the launcher
 
 ```powershell
 cd launcher; npm install; npx tauri build
 .\src-tauri\target\release\kfl-recomp-launcher.exe
 ```
 
-Picking the game folder links it as the work folder's `extracted`. Press **Build**, then **Play**. Build builds the
-runtime, checks the folder holds a RomFS and builds the game code. No copy of the game's data is made: the game reads
-the `romfs` folder as it is.
+Started inside a checkout, the launcher builds with MSYS2 `make` in `..\work\kfl` (`KFL_WORK` changes it). Picking
+the game folder links it as the work folder's `extracted`. Press **Build**, then **Play**. Build runs the same `make`
+steps as below.
 
-Or build by hand in Git Bash, with your `exefs` and `romfs` in `../work/kfl/extracted/` (the game reads the `romfs`
-folder as it is, so there is no data image to build):
+### By hand
+
+In Git Bash, with your `exefs` and `romfs` in `../work/kfl/extracted/`:
 
 ```bash
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
-make -j16 ../work/kfl/build/lasrecomp.exe   # the runtime
-make gen                                    # translate the game code to C
-make -j16                                   # compile it (about 10 minutes on 16 threads)
-cd ../work/kfl && LARECOMP_GAME_LIB=build/lasgame.dll ./build/lasrecomp.exe extracted --play
+W=../work/kfl
+make WORK=$W -j16 $W/build/ForgottenLandRecomp.exe   # the runtime
+make WORK=$W gen                                     # translate the game code to C, in $W/generated
+make WORK=$W -j16                                    # compile it into $W/build/lasgame.dll
+cd $W && LARECOMP_GAME_LIB=build/lasgame.dll ./build/ForgottenLandRecomp.exe extracted --play
 ```
+
+`make gen` lifts every module `game/game.h` lists (`main`, `sdk`, `subsdk0`) with the Python in `.venv`. `GAME=`
+points it at another dump, `GEN=` and `B=` move the generated C and the build. The game reads the `romfs` folder as it
+is, so there is no data image to build.
+
+### Tests
+
+[docs/testing.md](docs/testing.md) explains each check. None of them puts game data in the repository.
+
+```bash
+make ci-test                                # build the runtime, then run what CI runs (no game files)
+make WORK=$W test-find-game test-setup-cli  # the game-folder search and the launchers' commands, on synthetic dumps
+make verify-selftest                        # the self-tests of tools/verify
+make WORK=$W verify GAME=$W/extracted       # the checks that need the game; output in $W/verify-out
+python tools/check_game_identity.py         # the launchers and READMEs agree with game/game.h
+(cd launcher/src-tauri && cargo test --locked) && (cd launcher && node --test)
+```
+
+### The release zip
+
+```bash
+make deps-windows   # the LGPL FFmpeg the release links
+make gen-helper     # the generator, frozen with PyInstaller (Python 3.12 via py -3.12; GEN_PY= picks another)
+make zig            # the compiler
+make dist           # build/dist/ForgottenLandRecomp-<version>-Windows-x64.zip
+```
+
+`tools/dist.mk` says what goes into the zip and checks that nothing of the game does.
 
 ## Credits
 
-- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai (MIT), the Switch recompiler this project is built on:
-  the runtime (kernel, services, graphics, audio, input) and the game code generator are LAS Recomp's, copied at the
-  commit named in [docs/UPSTREAM.md](docs/UPSTREAM.md) with its own copyright notices kept
-- [letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp) by raulzrrs (MIT), where this port started: the first
-  Kirby port was made from it, and its services for this game are carried over
-- The launcher's layout follows [Recompia](https://github.com/Dittobyte/Recompia)'s; its code and art are original
+- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai (MIT) is the engine this version is built on: the
+  runtime (kernel, services, graphics, audio, input) and the game code generator, copied at the commit named in
+  [docs/UPSTREAM.md](docs/UPSTREAM.md) with its own copyright notices kept.
+- [letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp) by raulzrrs (MIT) is where this port started. Versions
+  0.1.0 to 0.2.0 were built on it, and its Opus decoder and offline network services are still here.
+- Ryujinx (MIT, [its licence](third_party/ryujinx/LICENSE.txt)): the reverb and delay effects follow its algorithms,
+  with two defects fixed, and the shader translator follows its decoding of a few instructions.
+- The launcher's layout follows [Recompia](https://github.com/Dittobyte/Recompia)'s. Its code and art are original.
+- Lhw-Arthas fixed the Chinese language codes
+  ([#7](https://github.com/scarxity/kirby-forgotten-land-recompiled/pull/7)).
 
 ## License
 

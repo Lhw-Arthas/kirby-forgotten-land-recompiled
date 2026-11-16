@@ -16,7 +16,7 @@ export function primaryAction(s) {
   return { label: 'Play', act: 'play' };
 }
 
-export const REBUILD_NOTE = 'The game code was built by another version of this program. Build it again to play. It takes about 15 minutes.';
+export const REBUILD_NOTE = 'The game code was built by another version of this program. Build it again to play. It takes about 7 minutes on a 16-thread PC.';
 
 export function toolsMissing(s) {
   const list = s.tools_missing.join(', ');

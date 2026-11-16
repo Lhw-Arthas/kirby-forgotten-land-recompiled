@@ -11,7 +11,7 @@ live in `tools/ci/run.sh`, so a PC runs the same thing with `make ci-test`.
 
 | Job | Checks |
 |---|---|
-| `runtime` | The runtime builds (`build/ForgottenLandRecomp.exe`, MSYS2 UCRT64). LAS Recomp's game-free tests: build cache, process handling, delete guard, data move, movie extractor, kernel condition variable, rumble, active pad, Vulkan fence, validation, overlay and sync-error regressions (simulated, no driver), guest heap, thread stack, lazy commit, SIMD rounding, settings, pacing, LED, crash dialog. The shader translator's fuzz run and its output through `glslc` and `spirv-val`. The find-game test on synthetic dumps. |
+| `runtime` | The runtime builds (`build/ForgottenLandRecomp.exe`, MSYS2 UCRT64). LAS Recomp's game-free tests: build cache, process handling, delete guard, data move, movie extractor, kernel condition variable, rumble, active pad, Vulkan fence, validation, overlay and sync-error regressions (simulated, no driver), guest heap, thread stack, lazy commit, SIMD rounding, settings, pacing, LED, crash dialog. This repo's tests of the command memory spill and the audio effects. The shader translator's fuzz run and its output through `glslc` and `spirv-val`. The find-game test on synthetic dumps. |
 | `launcher` | `cargo test --locked` in `launcher/src-tauri`, `node --test` in `launcher`. |
 | `repo` | No game data in the tree (`tools/ci/no_game_data.sh`: Switch game extensions, `romfs/` `exefs/` `generated/`, `lasgame.*`, keys, any file over 1 MiB outside `third_party/`). The upstream sync tool's test. The generator's `--dyn-base` test. The self-test of every `tools/verify/*.py` that has a `--self-test` flag, and of `tools/check_game_identity.py` once it has one. |
 
@@ -25,7 +25,7 @@ make ci-test            # builds, then runs the engine and repo suites
 bash tools/ci/run.sh engine repo     # the suites alone (build, engine, repo); needs the runtime built
 ```
 
-In Windows, run these in an MSYS2 UCRT64 shell (`docs/BUILD-windows.md`), with Python packages
+In Windows, run these in an MSYS2 UCRT64 shell (the README's "Build from source"), with Python packages
 `capstone==5.0.9 unicorn==2.1.4 lz4==4.4.5` for the `repo` suite. `PY=<python>` picks the interpreter.
 
 ## What `make verify` checks
@@ -45,9 +45,6 @@ check has run and passed.
 | Asset decode | Every RomFS file reads, every movie and sound decodes | `tools/verify/asset_check.py` |
 | Shader sweep | Every shader translates, validates and builds a pipeline on this PC's driver | `tools/verify/shader_sweep.sh` |
 | Stage tour | Every stage loads and renders without errors | `tools/verify/stage_tour.sh` |
-
-The tool names and command lines are the plan's; `verify.sh` is the one place to change when a tool lands under
-another name.
 
 ## What no check proves
 
