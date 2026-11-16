@@ -260,6 +260,7 @@ int main(int argc, char **argv) {
 #ifdef WITH_GLSL
         if (do_glsl) {
             key.glsl = 1;
+            if (rnd(2)) key.tex_uint = rnd64() & rnd64(), key.tex_sint = rnd64() & rnd64() & ~key.tex_uint;  // (integer views)
             ShaderInfo *g = maxwell_translate(prog, len, stage, &key);
             if (!g->msl) {
                 gl_tfail++;

@@ -601,8 +601,10 @@ static const char *tex_type_name(int t) {
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
 static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs, bool f16) {
-    sp(&c->body, "    { float4 t = %s;\n", call);
-    (void)slot;
+    const ShaderKey *k = c->glsl && slot >= 0 && slot < 64 && !c->info->tex[slot].shadow ? c->key : NULL;
+    const char *bits = k && k->tex_uint >> slot & 1 ? "uintBitsToFloat" : k && k->tex_sint >> slot & 1 ? "intBitsToFloat" : "";
+    if (*bits) sp(&c->body, "    { float4 t = %s(%s);\n", bits, call);
+    else sp(&c->body, "    { float4 t = %s;\n", call);
     if (f16) {
         // TEXS/TLDS .F16: components (in mask order) packed as half pairs into d0 (lo, hi) and d1 (lo, hi)
         int comps[4], n = 0;
@@ -2465,7 +2467,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                t->type == TEXTYPE_3D ? "image3D" : t->type == TEXTYPE_2D ? "image2D" : "image1D", i);
             continue;
         }
-        sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
+        const char *kind = key && !t->shadow && i < 64 ? (key->tex_uint >> i & 1 ? "u" : key->tex_sint >> i & 1 ? "i" : "") : "";
+        sp(&s, "layout(set = %d, binding = %d) uniform %s%s t%d;\n", set, 32 + i, kind, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
         case TEXTYPE_1D: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1, 1); }\n", i, i); break;

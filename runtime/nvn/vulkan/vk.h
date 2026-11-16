@@ -51,6 +51,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, dmabuf;
+    bool aniso, mirror_clamp;  // samplerAnisotropy, samplerMirrorClampToEdge (textures.c vk_sampler: without them, plainer samplers)
     // VK_EXT_vertex_input_dynamic_state (exec.c): the vertex layout is set per draw (vkCmdSetVertexInputEXT), not
     // baked into each pipeline - fewer pipelines. Off: no extension / feature, or LARECOMP_VK_DYN_VERTEX=0.
     bool vids;
@@ -168,6 +169,7 @@ VkFormat vk_view_format(TexBackend *b, VkFormat want);  // want, or the image's 
 void vk_convert_nv12(TexBackend *b, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off);  // exec.c
 VkImageView vk_dummy_color_view(uint32_t w, uint32_t h, uint32_t samples);
 VkSampler vk_sampler(NvnSamplerDesc *d);
+VkSampler vk_sampler_nearest(NvnSamplerDesc *d);  // (integer views: no filtering)
 VkSampler vk_default_sampler(bool linear);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.

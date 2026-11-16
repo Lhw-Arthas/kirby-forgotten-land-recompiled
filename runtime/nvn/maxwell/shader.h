@@ -52,6 +52,10 @@ typedef struct {
                             // after flip_y: keys without it hash as before - shader caches stay valid.)
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
+    // (GLSL) texture slots bound to unsigned / signed integer views: declared usampler / isampler, the texel's raw
+    // bits in the registers as Maxwell gives them. (A float sampler on an integer view is undefined: NVIDIA returns
+    // the raw bits, other drivers need not.)
+    uint64_t tex_uint, tex_sint;
 } ShaderKey;
 
 typedef struct {

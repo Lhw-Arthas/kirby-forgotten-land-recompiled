@@ -2250,6 +2250,7 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     b = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    for (int i = 0; i < 2; i++) { h ^= i ? fkey->tex_sint : fkey->tex_uint; h *= 0x100000001B3ull; }
     return h;
 }
 
@@ -2276,10 +2277,11 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[3]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    static struct { uint64_t code[3]; ShaderKey vkey; uint8_t rt[8]; uint64_t tex_int[2]; uint32_t gen; Prog *prog; } m;
     bool on = key_memo_on();
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
-        m.code[1] == np->stages[1].code_addr && m.code[2] == np->stages[2].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8)) {
+        m.code[1] == np->stages[1].code_addr && m.code[2] == np->stages[2].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8) &&
+        m.tex_int[0] == fkey->tex_uint && m.tex_int[1] == fkey->tex_sint) {
         prof_prog_memo++;
         prog_fp_check(m.prog, np);  // (as a table hit)
         return m.prog;
@@ -2287,7 +2289,8 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr; m.code[2] = np->stages[2].code_addr;
-        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.tex_int[0] = fkey->tex_uint; m.tex_int[1] = fkey->tex_sint;
+        m.gen = key_gen; m.prog = p;
     }
     return p;
 }
@@ -2295,12 +2298,18 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     bool gs = np->stage_mask & 4, vs_only = (np->stage_mask & 0x3F) == 1;
     if (!(np->stage_mask & 1) || (!(np->stage_mask & 2) && !vs_only)) return NULL;
-    if (gs && !g_vk.geometry) return NULL;
+    if (gs && !g_vk.geometry) {
+        static bool said;
+        if (!said) LOG("[vk] a program with a geometry shader: its draws are skipped (the GPU has no geometryShader)\n");
+        said = true;
+        return NULL;
+    }
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < (gs ? 3 : 2); i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    for (int i = 0; i < 2; i++) { h ^= i ? fkey->tex_sint : fkey->tex_uint; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -2807,6 +2816,20 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
 }
 
+// The integer kind (rt_kind: 2 unsigned, 1 signed, 0 none) of the format a texture entry is viewed as: sampled through
+// a usampler / isampler (ShaderKey.tex_uint / tex_sint) with a nearest sampler (integer formats can't be filtered)
+static int entry_int_kind(const NvnTexEntry *e) {
+    if (!e || !e->tex) return 0;
+    return rt_kind(e->has_view && (e->view.setmask & 4) ? e->view.format : e->tex->format);
+}
+static int slot_int_kind(int stage, const ShaderTexture *t) {
+    int slot = ((int)t->handle_offset - 0x20) / 8;
+    uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
+    uint32_t tic = h & 0xFFFFF;
+    if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count || t->shadow || t->is_image) return 0;
+    return entry_int_kind(&((NvnTexEntry *)st.tpool->entries)[tic]);
+}
+
 // The storage view of the image an image slot (SUST) names: image handles follow the texture ones from 0x120
 // (translate.c IMAGE_HANDLES), each an index into the texture pool (objects.c nvnDeviceGetImageHandle). (From the v0.2.0
 // runtime, 382e8cb.)
@@ -3080,7 +3103,10 @@ static void resolve_feedback(Prog *pr) {
             bool self_write = t == st.rt.depth && st.ds[0] && st.ds[1];
             TexBackend *src = vk_tex(t, true);
             Snap *existing = NULL;
-            for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
+            // (the same texture object can be made again in another format or size: its old copy is no snapshot of it)
+            for (int k = 0; k < nsnaps; k++)
+                if (snaps[k].key == t && snaps[k].copy.image && snaps[k].copy.format == src->format &&
+                    snaps[k].copy.width == src->width && snaps[k].copy.height == src->height) existing = &snaps[k];
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
             static const VkComponentMapping id = {0};
             if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
@@ -5930,11 +5956,15 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             nvn_dead_slot_sampled(e, tic);
         }
     }
-    if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    bool int_view = !st_->shadow && entry_int_kind(ent);
+    if (h && st.spool && tsc < (uint32_t)st.spool->count) {
+        NvnSamplerDesc *d = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+        smp = int_view ? vk_sampler_nearest(d) : vk_sampler(d);
+    }
     if (st_->shadow)
         shadow_slot_check(stage, st_, i, h, tic, ent, ent && ent->tex ? (naliases ? alias_read(ent->tex) : ent->tex) : NULL, &view);
     if (!view) view = vk_dummy_view(st_->type);
-    if (!smp) smp = vk_default_sampler(true);
+    if (!smp) smp = vk_default_sampler(!int_view);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
 }
 
@@ -6723,6 +6753,14 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
+    if (pr && atomic_load(&pr->state) == 1) {  // (fragment textures bound to integer views: the program made for them)
+        for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+            int k = slot_int_kind(1, &pr->fi->tex[i]);
+            if (k == 2) fkey.tex_uint |= 1ull << i;
+            else if (k == 1) fkey.tex_sint |= 1ull << i;
+        }
+        if (fkey.tex_uint || fkey.tex_sint) pr = get_program(st.program, &vkey, &fkey);
+    }
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
     g_mirror_w = 0;
     if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames - renderer.m's key)

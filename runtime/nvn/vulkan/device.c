@@ -195,13 +195,28 @@ static void va_explain(uint64_t a) {
     pthread_mutex_unlock(&va_lk);
 }
 
+// Each distinct validation message (by its VUID) and how often it came: its first 3 are logged in full, the counts at
+// the end of the run (validation_exit), so runs before and after a fix compare by number.
+static struct { int32_t id; uint32_t count; bool error; char name[96]; } va_ids[256];
+static int va_nids;
+static pthread_mutex_t va_ids_lk = PTHREAD_MUTEX_INITIALIZER;
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
     (void)type, (void)user;
-    static atomic_uint n;
     bool stop = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && getenv("LARECOMP_VK_VALIDATION_STOP");
-    if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT &&
-        (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) LOG("[vk] %s\n", d->pMessage);
+    if (sev < VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) return VK_FALSE;
+    pthread_mutex_lock(&va_ids_lk);
+    int i = 0;
+    while (i < va_nids && va_ids[i].id != d->messageIdNumber) i++;
+    if (i == va_nids && i < 256) {
+        va_ids[i].id = d->messageIdNumber;
+        va_ids[i].error = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        snprintf(va_ids[i].name, sizeof va_ids[i].name, "%s", d->pMessageIdName ? d->pMessageIdName : "?");
+        va_nids++;
+    }
+    uint32_t seen = i < 256 ? va_ids[i].count++ : 0;
+    pthread_mutex_unlock(&va_ids_lk);
+    if (stop || seen < 3) LOG("[vk] %s\n", d->pMessage);
     if (stop) {
         LOG("[vk] stopping at the first validation error\n");
         fflush(stderr);
@@ -769,7 +784,18 @@ static void create_device(void) {
 
     // features the backend relies on (all present on current desktop drivers)
     VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
+    VkPhysicalDeviceVulkan11Features have11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &have12};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have11};
+    // (an extension listed doesn't mean its features are: asking for one the GPU lacks fails vkCreateDevice)
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT have_cbc = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
+    if (g_vk.custom_border) have_cbc.pNext = have.pNext, have.pNext = &have_cbc;
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT have_div = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT};
+    if (g_vk.divisor) have_div.pNext = have.pNext, have.pNext = &have_div;
+    VkPhysicalDeviceFaultFeaturesEXT have_ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    if (fault) have_ff.pNext = have.pNext, have.pNext = &have_ff;
+    VkPhysicalDeviceAddressBindingReportFeaturesEXT have_va = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT};
+    if (g_va_report) have_va.pNext = have.pNext, have.pNext = &have_va;
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
     if (placed_ext) have12.pNext = &have_placed;
@@ -793,6 +819,11 @@ static void create_device(void) {
     if (pbin_ext) have_pbin.pNext = &have_m5, have_m5.pNext = have.pNext, have.pNext = &have_pbin;
 #endif
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    // (custom border colours: our samplers don't know their image's format)
+    g_vk.custom_border = g_vk.custom_border && have_cbc.customBorderColors && have_cbc.customBorderColorWithoutFormat;
+    g_vk.divisor = g_vk.divisor && have_div.vertexAttributeInstanceRateDivisor;
+    g_fault_ext = fault = fault && have_ff.deviceFault;
+    g_va_report = g_va_report && fault && have_va.reportAddressBinding;
     {   // what the driver offers for building pipelines (one line, for #92 reports)
         VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         VkPhysicalDeviceProperties2 pr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
@@ -948,7 +979,7 @@ static void create_device(void) {
                                             .storageBuffer8BitAccess = have12.storageBuffer8BitAccess,
                                             .scalarBlockLayout = have12.scalarBlockLayout, .bufferDeviceAddress = g_vk.bda, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
+                                            .storageBuffer16BitAccess = have11.storageBuffer16BitAccess, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
@@ -977,7 +1008,8 @@ static void create_device(void) {
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
     b->fillModeNonSolid = h->fillModeNonSolid;
-    b->samplerAnisotropy = h->samplerAnisotropy;
+    b->samplerAnisotropy = g_vk.aniso = h->samplerAnisotropy;
+    g_vk.mirror_clamp = have12.samplerMirrorClampToEdge;
     b->textureCompressionBC = h->textureCompressionBC;
 #if PLAT_TOUCH
     b->textureCompressionASTC_LDR = h->textureCompressionASTC_LDR;  // (phones: the game's UI icons are ASTC, sampled natively)
@@ -1004,6 +1036,24 @@ static void create_device(void) {
         ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
         g_shader_stats = true;
         LOG("[vk] shader statistics on (LARECOMP_VK_SHADER_STATS): one [stats] line per pipeline stage, pipelines not cached\n");
+    }
+    {   // the GPU and what it has, near the top of every log (a report without a log line for its GPU can't be told apart)
+        const VkPhysicalDeviceLimits *l = &g_vk.props.limits;
+        static const char *const types[] = {"other", "integrated", "discrete", "virtual", "CPU"};
+        LOG("[vk] gpu: vendor %#x device %#x, %s, api %u.%u.%u, driver version %#x\n", g_vk.props.vendorID,
+            g_vk.props.deviceID, g_vk.props.deviceType < 5 ? types[g_vk.props.deviceType] : "?",
+            VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
+            VK_API_VERSION_PATCH(g_vk.props.apiVersion), g_vk.props.driverVersion);
+#define ON(x) ((x) ? "on" : "OFF")
+        LOG("[vk] features: BC textures %s, 64-bit integers %s, geometry shaders %s, storage image writes without format %s, "
+            "vertex/fragment stores %s, robust buffers %s, custom border colours %s, instance divisors %s, host memory "
+            "import %s, dual-source blending %s, line fill %s, anisotropy %s, mirror clamp %s, cube arrays %s; max storage "
+            "buffer %llu MB, push constants %u bytes\n", ON(b->textureCompressionBC), ON(b->shaderInt64), ON(b->geometryShader),
+            ON(b->shaderStorageImageWriteWithoutFormat), ON(g_vk.ssbo_chunks), ON(b->robustBufferAccess),
+            ON(g_vk.custom_border), ON(g_vk.divisor), ON(g_vk.host_import), ON(b->dualSrcBlend), ON(b->fillModeNonSolid),
+            ON(g_vk.aniso), ON(g_vk.mirror_clamp), ON(b->imageCubeArray), (unsigned long long)(l->maxStorageBufferRange >> 20),
+            l->maxPushConstantsSize);
+#undef ON
     }
     VkPhysicalDeviceAddressBindingReportFeaturesEXT en_va = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT, .reportAddressBinding = VK_TRUE};
@@ -2136,6 +2186,11 @@ static _Noreturn void validation_exit(void) {
         messenger = VK_NULL_HANDLE;
         if (f) f(g_vk.inst, m, NULL);
     }
+    pthread_mutex_lock(&va_ids_lk);
+    LOG("[vk] validation: %d distinct messages\n", va_nids);
+    for (int i = 0; i < va_nids; i++)
+        LOG("[vk] validation: %6u x %s %s\n", va_ids[i].count, va_ids[i].error ? "error  " : "warning", va_ids[i].name);
+    pthread_mutex_unlock(&va_ids_lk);
     LOG("[vk] validation run: ending without GPU teardown\n");
     fflush(stdout);
     fflush(stderr);
