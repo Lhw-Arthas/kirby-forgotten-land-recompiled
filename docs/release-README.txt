@@ -19,7 +19,7 @@ What you need
 - A graphics card whose driver has Vulkan 1.3.
 - The Microsoft Edge WebView2 runtime, which the launcher window uses. Windows 11 has it. Most Windows 10 PCs have it
   too. If the launcher does not open, install it from https://developer.microsoft.com/microsoft-edge/webview2/
-- 6.5 GB of free disk, on top of this folder's __ZIPMB__ MB. The launcher checks it before it builds (see Disk space).
+- 6.5 GB of free disk, on top of this folder's 272 MB. The launcher checks it before it builds (see Disk space).
 - A short folder path, under 200 characters (for example C:\Games\ForgottenLandRecomp). Windows stops the build at
   long paths, so the launcher refuses one before it starts.
 
