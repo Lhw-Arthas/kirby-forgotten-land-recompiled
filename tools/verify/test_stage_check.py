@@ -55,4 +55,14 @@ with tempfile.TemporaryDirectory() as d:
     open(log, 'w').write(LOG % 0 + '*** exception c0000005 accessing 0\n')
     r = stage_check.check('Cat/Stage/Step01', log, os.path.join(d, 'none.png'), snd, 600)
     assert r['fatal'] == '*** exception c0000005 accessing 0' and r['verdict'].startswith('FAIL: fatal'), r
+
+    # draws skipped in frames the engine held off the screen (vk_build_hold) are not seen: only the rest count
+    png(shot, 4, 3, (200, 100, 50))
+    wav(snd, 0.1)
+    open(log, 'w').write((LOG % 7).replace('7 skipped,', '7 skipped (7 in held frames),'))
+    r = stage_check.check('Cat/Stage/Step01', log, shot, snd, 600)
+    assert r['skipped_after_hold'] == 0 and r['verdict'] == 'PASS', r
+    open(log, 'w').write((LOG % 7).replace('7 skipped,', '7 skipped (5 in held frames),'))
+    r = stage_check.check('Cat/Stage/Step01', log, shot, snd, 600)
+    assert r['skipped_after_hold'] == 2 and r['verdict'] == 'FAIL: skipped draws', r
 print('stage_check: ok')
