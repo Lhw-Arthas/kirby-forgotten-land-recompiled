@@ -330,12 +330,20 @@ static void pipeline_cache_tag(char *out, size_t n) {
     shader_cache_tag(out, n, gpu);
 }
 
-static void *pipeline_cache_saver(void *a) {  // every 3 minutes, when it grew
+// When it grew: once a burst of builds is over (at most every 15 s), and every 3 minutes while builds go on. Every 3
+// minutes alone, a first visit's burst (a minute or more on 2 cores) was lost to a crash or a kill before the save, and
+// the next start built it all again.
+static void *pipeline_cache_saver(void *a) {
     (void)a;
+    extern int vk_builds_pending(void);
+    uint64_t last = SDL_GetTicks();
     for (;;) {
-        SDL_Delay(180000);
+        SDL_Delay(5000);
         if (rq_stopping()) break;  // (quitting: backend_quit saves it)
+        uint64_t now = SDL_GetTicks();
+        if (now - last < 15000 || (vk_builds_pending() && now - last < 180000)) continue;
         vk_pipeline_cache_save();
+        last = now;
     }
     return NULL;
 }

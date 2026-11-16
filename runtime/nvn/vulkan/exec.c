@@ -930,6 +930,7 @@ static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 static _Atomic int jobs_pending, jobs_done;  // translations and builds queued or running; finished ever (vk_build_hold)
+int vk_builds_pending(void) { return atomic_load(&jobs_pending); }  // (device.c: the pipeline cache saved after a burst)
 
 static void *worker(void *a) {
     (void)a;
