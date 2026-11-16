@@ -1,7 +1,7 @@
 // Shader sweep: every Maxwell shader program in the player's RomFS through the Vulkan backend's shader path, offline.
 // Files are read as the game ships them: loose BNSH containers (*.bfsha) and every *.cmp (a 4-byte size, then a
-// zstd frame) decompressed in memory and scanned for BNSH containers. Each distinct program (vertex + fragment, or
-// compute) is translated (runtime/nvn/maxwell/translate.c, GLSL as on this GPU), compiled the way
+// zstd frame) decompressed in memory and scanned for BNSH containers. Each distinct program (vertex [+ geometry] [+ fragment],
+// or compute) is translated (runtime/nvn/maxwell/translate.c, GLSL as on this GPU), compiled the way
 // runtime/nvn/vulkan/shaders.c does, validated with SPIRV-Tools (Vulkan 1.3), and, unless --no-vk, made into shader
 // modules and a pipeline on this PC's driver. Nothing is written into the repo: the report and the failing programs'
 // GLSL go to <out>.
@@ -369,7 +369,9 @@ static const VkDynamicState DYN[] = {
     VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
     VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE};
 
-static VkResult graphics_pipeline(VkShaderModule vm, VkShaderModule fm, const ShaderInfo *vi, const ShaderInfo *fi, VkPipelineLayout pl) {
+// gm: the geometry stage or NULL; fm NULL: a vertex stage alone, rasterizer discard (vulkan/exec.c's vertex-only draws)
+static VkResult graphics_pipeline(VkShaderModule vm, VkShaderModule gm, VkShaderModule fm, const ShaderInfo *vi, const ShaderInfo *fi,
+                                  VkPipelineLayout pl) {
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDescription vb = {0, 64, VK_VERTEX_INPUT_RATE_VERTEX};
     uint32_t na = 0;
@@ -381,16 +383,20 @@ static VkResult graphics_pipeline(VkShaderModule vm, VkShaderModule fm, const Sh
     VkFormat cf[8];
     VkPipelineColorBlendAttachmentState cba[8] = {0};
     uint32_t nc = 0;
-    for (int rt = 0; rt < 8; rt++) if (fi->out_mask & (1u << rt)) nc = (uint32_t)rt + 1;
+    for (int rt = 0; fi && rt < 8; rt++) if (fi->out_mask & (1u << rt)) nc = (uint32_t)rt + 1;
     for (uint32_t rt = 0; rt < nc; rt++) cf[rt] = VK_FORMAT_R16G16B16A16_SFLOAT, cba[rt].colorWriteMask = 0xF;
-    VkPipelineShaderStageCreateInfo stages[2] = {
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vm, .pName = "main"},
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fm, .pName = "main"}};
+    VkPipelineShaderStageCreateInfo stages[3];
+    uint32_t ns = 0;
+    const struct { VkShaderStageFlagBits bit; VkShaderModule m; } st[3] = {
+        {VK_SHADER_STAGE_VERTEX_BIT, vm}, {VK_SHADER_STAGE_GEOMETRY_BIT, gm}, {VK_SHADER_STAGE_FRAGMENT_BIT, fm}};
+    for (int i = 0; i < 3; i++)
+        if (st[i].m) stages[ns++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                                       .stage = st[i].bit, .module = st[i].m, .pName = "main"};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                                                 .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
+                                                 .rasterizerDiscardEnable = !fm, .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
     VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -400,7 +406,7 @@ static VkResult graphics_pipeline(VkShaderModule vm, VkShaderModule fm, const Sh
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = nc,
                                         .pColorAttachmentFormats = cf, .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT_S8_UINT,
                                         .stencilAttachmentFormat = VK_FORMAT_D32_SFLOAT_S8_UINT};
-    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
+    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = ns,
                                        .pStages = stages, .pVertexInputState = &vis, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = pl};
@@ -443,7 +449,8 @@ static uint32_t *compile(int prog, int stage, const char *src, size_t *nw) {
         shaderc_compiler_t comp = shaderc_compiler_initialize();
         shaderc_compile_options_t o = shaderc_compile_options_initialize();
         shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
-        shaderc_shader_kind kind = stage == STAGE_VERTEX ? shaderc_vertex_shader : stage == STAGE_FRAGMENT ? shaderc_fragment_shader : shaderc_compute_shader;
+        shaderc_shader_kind kind = stage == STAGE_VERTEX ? shaderc_vertex_shader : stage == STAGE_FRAGMENT ? shaderc_fragment_shader
+                                 : stage == STAGE_GEOMETRY ? shaderc_geometry_shader : shaderc_compute_shader;
         shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind, "sweep", "main", o);
         const char *m = shaderc_result_get_error_message(r), *p = strstr(m, "error: ");
         fail(prog, stage, "glsl", p ? p + 7 : m, src, m);
@@ -469,20 +476,28 @@ static uint32_t *compile(int prog, int stage, const char *src, size_t *nw) {
 
 static atomic_long n_ok, n_graphics, n_compute, n_other;
 
-static void run_vk(int prog, int stage, uint32_t *const *spv, const size_t *nw, int nmod, const ShaderInfo *a, const ShaderInfo *b) {
-    VkShaderModule m[2] = {0};
+// m[i]: the module of stage mstage[i] (STAGE_*): compute alone, or vertex [geometry] [fragment]
+static void run_vk(int prog, int stage, uint32_t *const *spv, const size_t *nw, const int *mstage, int nmod, const ShaderInfo *a,
+                   const ShaderInfo *b) {
+    VkShaderModule m[3] = {0}, by[6] = {0};
     Layout l;
     bool ok = false;
-    for (int i = 0; i < nmod; i++)
+    VkShaderStageFlags all = 0;
+    for (int i = 0; i < nmod; i++) {
         if (!(m[i] = vk_module(spv[i], nw[i]))) { fail(prog, stage, "vk", "vkCreateShaderModule failed", a->msl, b ? b->msl : NULL); goto out; }
-    if (!make_layout(&l, spv, nw, nmod, nmod == 1 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)) {
+        by[mstage[i]] = m[i];
+        all |= mstage[i] == STAGE_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT : mstage[i] == STAGE_FRAGMENT ? VK_SHADER_STAGE_FRAGMENT_BIT
+             : mstage[i] == STAGE_GEOMETRY ? VK_SHADER_STAGE_GEOMETRY_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    if (!make_layout(&l, spv, nw, nmod, all)) {
         fail(prog, stage, "vk", "pipeline layout", a->msl, b ? b->msl : NULL);
         goto out;
     }
     long before = g_messages;
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    VkResult r = nmod == 1 ? compute_pipeline(m[0], l.pl) : graphics_pipeline(m[0], m[1], a, b, l.pl);
+    VkResult r = by[STAGE_COMPUTE] ? compute_pipeline(by[STAGE_COMPUTE], l.pl)
+                                   : graphics_pipeline(by[STAGE_VERTEX], by[STAGE_GEOMETRY], by[STAGE_FRAGMENT], a, b, l.pl);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     progs[prog].ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
     free_layout(&l);
@@ -496,10 +511,43 @@ out:
     if (ok) n_ok++;
 }
 
+// A graphics program: vertex, geometry (gs < 0: none), fragment (fs < 0: none, the vertex stage alone with rasterizer
+// discard). Each stage's key gets the outputs of the stage before (shader.h); the clip space flags stay 0 here.
+static void run_graphics(int pi, int vs, int gs, int fs) {
+    const Prog *p = &progs[pi];
+    static const int stage[3] = {STAGE_VERTEX, STAGE_GEOMETRY, STAGE_FRAGMENT};
+    static const char *const tag[3] = {"vs", "gs", "fs"};
+    const int code[3] = {vs, gs, fs};
+    ShaderInfo *si[3] = {0};
+    uint32_t *spv[3] = {0};
+    size_t nw[3] = {0};
+    int ms[3], n = 0;
+    uint32_t out_mask = 0;
+    for (int i = 0; i < 3; i++) {
+        if (code[i] < 0) continue;
+        ShaderKey k = {0};
+        k.glsl = 1;
+        k.vs_out_mask = out_mask;
+        si[i] = translate(&codes[code[i]], stage[i], &k);
+        if (!si[i]->msl) { fail(pi, stage[i], "translate", si[i]->error, NULL, NULL); goto out; }
+        out_mask = si[i]->out_mask;
+        if (g_dump && strstr(files[p->file], g_dump)) dump("dump", tag[i], pi, files[p->file], si[i]->msl);
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!si[i]) continue;
+        if (!(spv[n] = compile(pi, stage[i], si[i]->msl, &nw[n]))) goto out;
+        ms[n++] = stage[i];
+    }
+    if (g_vk_on) run_vk(pi, fs >= 0 ? STAGE_FRAGMENT : STAGE_VERTEX, spv, nw, ms, n, si[0], si[2] ? si[2] : si[1]);
+    else n_ok++;
+out:
+    for (int i = 0; i < 3; i++) free(spv[i]), maxwell_free(si[i]);
+}
+
 static void run_program(int pi) {
     const Prog *p = &progs[pi];
-    for (int s = 1; s < 4; s++)
-        if (p->code[s] >= 0) { n_other++; fail(pi, SLOT_STAGE[s], "sweep", "tessellation / geometry stage (not translated)", NULL, NULL); return; }
+    for (int s = 1; s < 3; s++)
+        if (p->code[s] >= 0) { n_other++; fail(pi, SLOT_STAGE[s], "sweep", "tessellation stage (not translated)", NULL, NULL); return; }
     if (p->code[5] >= 0) {
         n_compute++;
         ShaderKey k = {0};
@@ -509,33 +557,16 @@ static void run_program(int pi) {
         if (g_dump && strstr(files[p->file], g_dump)) dump("dump", "cs", pi, files[p->file], si->msl);
         size_t nw = 0;
         uint32_t *spv = compile(pi, STAGE_COMPUTE, si->msl, &nw);
-        if (spv && g_vk_on) run_vk(pi, STAGE_COMPUTE, &spv, &nw, 1, si, NULL);
+        const int ms = STAGE_COMPUTE;
+        if (spv && g_vk_on) run_vk(pi, STAGE_COMPUTE, &spv, &nw, &ms, 1, si, NULL);
         else if (spv) n_ok++;
         free(spv);
         maxwell_free(si);
         return;
     }
-    if (p->code[0] < 0 || p->code[4] < 0) { n_other++; fail(pi, p->code[0] < 0 ? STAGE_FRAGMENT : STAGE_VERTEX, "sweep", "program without a vertex or fragment stage", NULL, NULL); return; }
+    if (p->code[0] < 0) { n_other++; fail(pi, STAGE_FRAGMENT, "sweep", "program without a vertex stage", NULL, NULL); return; }
     n_graphics++;
-    ShaderKey vk_ = {0}, fk = {0};
-    vk_.glsl = fk.glsl = 1;
-    ShaderInfo *vi = translate(&codes[p->code[0]], STAGE_VERTEX, &vk_), *fi = NULL;
-    uint32_t *spv[2] = {0};
-    size_t nw[2] = {0};
-    if (!vi->msl) { fail(pi, STAGE_VERTEX, "translate", vi->error, NULL, NULL); goto out; }
-    fk.vs_out_mask = vi->out_mask;
-    fi = translate(&codes[p->code[4]], STAGE_FRAGMENT, &fk);
-    if (!fi->msl) { fail(pi, STAGE_FRAGMENT, "translate", fi->error, NULL, NULL); goto out; }
-    if (g_dump && strstr(files[p->file], g_dump)) dump("dump", "vs", pi, files[p->file], vi->msl), dump("dump", "fs", pi, files[p->file], fi->msl);
-    spv[0] = compile(pi, STAGE_VERTEX, vi->msl, &nw[0]);
-    spv[1] = compile(pi, STAGE_FRAGMENT, fi->msl, &nw[1]);
-    if (!spv[0] || !spv[1]) goto out;
-    if (g_vk_on) run_vk(pi, STAGE_FRAGMENT, spv, nw, 2, vi, fi);
-    else n_ok++;
-out:
-    free(spv[0]), free(spv[1]);
-    maxwell_free(vi);
-    if (fi) maxwell_free(fi);
+    run_graphics(pi, p->code[0], p->code[3], p->code[4]);
 }
 
 static atomic_int next_prog;
