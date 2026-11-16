@@ -37,6 +37,7 @@ carries one of this repo's fixes; the engine stays as LAS has it otherwise.
   place of the `region_common` checks.
 - `runtime/paths.c`, `runtime/platform/windows.c`: message boxes named after the game; Windows: the session log is
   `game.log` (`game.h` GAME_LOG).
+- `runtime/nvn/objects.c`: a packaged 3D texture's layout word gives its block depth too (bits 4-7).
 - `runtime/nvn/maxwell/translate.c`: VOTE.VTG is a no-op, EXIT honours its flow test (EXIT.FCSM_TR goes on), LEA's
   lo forms.
 - `tools/game_addresses.py`: an empty address table is allowed. `tools/gen.py`: an ADR whose register a BR uses soon
