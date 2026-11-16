@@ -82,7 +82,8 @@ cd ../work/kfl && LARECOMP_GAME_LIB=build/lasgame.dll ./build/lasrecomp.exe extr
 ## Credits
 
 - [letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp) by raulzrrs, the runtime and generator this port starts from
-- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai, which letsgo-recomp is built on
+- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai (MIT), the Switch recompiler and runtime that letsgo-recomp is built on.
+  This port also follows its later work directly for fixes and design
 - The launcher's layout follows [Recompia](https://github.com/Dittobyte/Recompia)'s; its code and art are original
 
 ## License
