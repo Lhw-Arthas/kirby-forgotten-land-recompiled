@@ -31,6 +31,18 @@ How to start
    later; it starts over from the beginning.
 5. Click "Play". Next time the launcher shows Play straight away.
 
+Updating: unzip a new version over the old folder. If the new version needs the game code built again, the launcher
+says so and offers "Rebuild game code" (about 15 minutes; your game folder is not needed again).
+
+Closing the launcher ends a build in progress (Build again later; it starts over). A game that is running keeps
+running.
+
+Keep the path of this folder short, under about 200 characters (for example C:\Games\ForgottenLandRecomp): Windows
+stops the build at long paths, and the launcher says so before it starts. It also checks the free disk space first.
+
+If an antivirus removes or blocks lasgen\lasgen.exe or zig\zig.exe, the build cannot run. Restore them (or unzip again)
+and allow this folder in the antivirus.
+
 Disk space: the game data image (romfs.bin, 5.9 GB) and the game code (about 115 MB) are kept in the extracted
 folder here. A romfs.bin already in your game folder, on the same drive, is hard-linked instead of copied and takes
 no extra space. While building, the translated code and the compiler's files take a few hundred MB more, deleted
