@@ -55,6 +55,22 @@ static void *signal_waiter(void *unused) {
     return NULL;
 }
 
+// The SDK's Signal is user space until the key says there is a waiter: it takes the mutex the waiter released and
+// skips the svc while the key reads 0. This thread is that signaller, looking at the key the moment the mutex is free.
+enum { KEY_ROUNDS = 200 };
+static volatile int key_round, key_seen_round;
+static int key_unset_at_release;
+static void *key_observer(void *unused) {
+    (void)unused;
+    for (int round = 1; round <= KEY_ROUNDS; round++) {
+        while (key_round != round) {}
+        while (__atomic_load_n(&mutex_word, __ATOMIC_SEQ_CST)) {}
+        if (!__atomic_load_n(&condition_word, __ATOMIC_SEQ_CST)) key_unset_at_release++;
+        key_seen_round = round;
+    }
+    return NULL;
+}
+
 // The address arbiter's read-modify-writes race user space's own updates of the word (exclusive load / store, no
 // kernel lock); this thread is that user space.
 static uint32_t arbiter_word;
@@ -91,6 +107,22 @@ int main(void) {
         pthread_join(signaler, NULL);
         mutex_release((uint64_t)&mutex_word);
     }
+    {   // The key is set before the mutex is released: a signaller that takes the mutex then sees the waiter.
+        pthread_t observer;
+        assert(pthread_create(&observer, NULL, key_observer, NULL) == 0);
+        for (int round = 1; round <= KEY_ROUNDS; round++) {
+            mutex_word = waiter.handle;
+            condition_word = 0;
+            key_round = round;
+            uint32_t r = svc_wait_process_wide_key((uint64_t)&mutex_word, (uint64_t)&condition_word, waiter.handle, 100000);
+            assert(r == R_TIMEOUT);
+            while (key_seen_round != round) {}
+        }
+        pthread_join(observer, NULL);
+        if (key_unset_at_release) fprintf(stderr, "FAIL: the key read 0 after the mutex was released in %d of %d waits\n",
+                                         key_unset_at_release, KEY_ROUNDS);
+        assert(!key_unset_at_release);
+    }
     {   // A pending CancelSynchronization is for WaitSynchronization only: a condition variable wait and a polling
         // WaitSynchronization (timeout 0) leave it, the next blocking WaitSynchronization returns cancelled.
         KObject *ev = calloc(1, sizeof *ev);
@@ -121,6 +153,6 @@ int main(void) {
     }
     pthread_cond_destroy(&waiter.cond);
     puts("PASS: timeout returns unlocked; repeated SDK reacquire; signal returns owned; contended ownership transfer; "
-         "cancel kept for WaitSynchronization; atomic address arbiter updates");
+         "key set before the mutex is released; cancel kept for WaitSynchronization; atomic address arbiter updates");
     return 0;
 }

@@ -427,6 +427,9 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
     uint32_t mbefore = rdw(mutex), kbefore = rdw(key);
+    // The key first, as the console's kernel does: the SDK's Signal skips the svc while the key reads 0, so a signaller
+    // that took the just-released mutex in user space would otherwise see no waiter and the wake-up was lost.
+    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     mutex_release(mutex);
     bool traced = !kt_timed_key(key, timeout >= 0);
     if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
@@ -434,7 +437,6 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
-    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     // Timed out / cancelled: returns without the mutex, as Horizon does - nn::os takes it again itself (TimedWait on
     // 0xEA01 calls the critical section's Enter). Taking it here as well left the thread holding it when Enter ran:
     // Enter saw its own handle in the lock word and ArbitrateLock waited on itself forever (issue #19's thread dump: a
