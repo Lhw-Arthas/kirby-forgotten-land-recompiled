@@ -108,7 +108,7 @@ const views = {
         ? `<p class="bad" role="alert">${esc(toolsMissing(s))}</p>`
         : `<p>${s.packaged ? 'The bundled game code generator and compiler are in this folder.' : 'MSYS2 clang, make and the Python environment are installed.'}</p>`)}
       ${step(3, 'Game code', s.built, `
-        <p>${s.built ? 'The game code is built for this PC.' : s.rebuild ? REBUILD_NOTE : s.packaged ? PACKAGED_BUILD : 'Builds the runtime, checks your game files, then translates the game code from them and compiles it for this PC. About 10 minutes on a 16-thread CPU.'}</p>
+        <p>${s.built ? 'The game code is built for this PC.' : s.rebuild ? REBUILD_NOTE : s.packaged ? PACKAGED_BUILD : 'Builds the runtime, checks your game files, then translates the game code from them and compiles it for this PC. About 7 minutes on a 16-thread CPU.'}</p>
         ${s.work_error ? `<p class="bad" role="alert">${esc(s.work_error)}</p>` : ''}
         ${s.phase === 'failed' ? `<p class="bad" role="alert">${esc(s.error)}</p>` : ''}
         ${progress(s)}
