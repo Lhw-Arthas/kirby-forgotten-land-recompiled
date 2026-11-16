@@ -12,9 +12,10 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 path = 'runtime/nvn/vulkan/device.c'
 source = subprocess.check_output(['git','show',f'{args.ref}:{path}'],cwd=root,text=True) if args.ref else (root/path).read_text()
-production = source[source.index('static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb('):source.index('static bool has_ext(')]
+production = source[source.index('// Each distinct validation message'):source.index('static bool has_ext(')]
 harness = r'''
 #include <assert.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -28,6 +29,12 @@ static VkDebugUtilsMessengerEXT messenger;
 static const char *scenario;
 static unsigned instance_calls, callback_calls;
 static bool requested_validation;
+static bool g_va_report;  // (the address-binding report: no driver extensions here, so never registered)
+static VKAPI_ATTR VkBool32 VKAPI_CALL va_cb(VkDebugUtilsMessageSeverityFlagBitsEXT s, VkDebugUtilsMessageTypeFlagsEXT t,
+                                            const VkDebugUtilsMessengerCallbackDataEXT *d, void *u) { (void)s,(void)t,(void)d,(void)u; return VK_FALSE; }
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count, VkExtensionProperties *props) {
+    (void)layer,(void)props; *count=0; return VK_SUCCESS;
+}
 #define LOG(...) fprintf(stderr,__VA_ARGS__)
 #define FATAL(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); _Exit(19); } while (0)
 static const char *const *SDL_Vulkan_GetInstanceExtensions(Uint32 *count) {
