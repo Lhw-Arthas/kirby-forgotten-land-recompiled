@@ -66,7 +66,8 @@
     "11": "The game files could not be copied. Check that the disk has about 6.5 GB free.",
     "12": "The game code did not build. The log in the game's folder says why.",
     "13": "The build tools are missing from this copy. Install the recomp again.",
-    "14": "The game data image (romfs.bin) could not be read. Extract the romfs again."
+    "14": "The game data image (romfs.bin) could not be read. Extract the romfs again.",
+    "15": "That is the game's update, not the base game. Extract the base game, version 1.0.0, without the update."
   },
   "looks": { "graphics": "vulkan" },
   "actions": [
