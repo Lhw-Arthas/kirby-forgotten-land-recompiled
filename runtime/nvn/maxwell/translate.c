@@ -147,7 +147,9 @@ typedef struct {
     int brx_vars;
     const char *gs_out;    // (geometry, from the program header) output primitive, its vertices at most, invocations
     int gs_max_vertices, gs_invocations;
+    uint8_t gm_atomics;    // (GLSL) RED's operations on global memory, bits of GM_ATOMIC: GMATOM_<op>(word, value)
 } Ctx;
+static const char *const GM_ATOMIC[] = {"atomicAdd", "atomicMin", "atomicMax", "atomicAnd", "atomicOr", "atomicXor"};
 typedef struct BrxTab BrxTab;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -1825,6 +1827,35 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                     sp(&c->body, "      if (ok) *(device uint *)(gmem + ga + %du) = %s;\n", k * 4, R(d == RZ ? RZ : d + k));
         }
         sp(&c->body, "    }\n");
+    } else if (OPM(0xebf8000000000000ull, 0xfff8000000000000ull)) {  // RED: an atomic on global memory, no result
+        // [Ra (+ Ra+1: .E) + imm20 (bits 28-47)] op= Rb (bits 0-7); size bits 20-22 (0 U32, 1 S32), op bits 23-25 (0 ADD,
+        // 1 MIN, 2 MAX, 5 AND, 6 OR, 7 XOR; MIN / MAX unsigned only). Other sizes and INC / DEC are refused.
+        int size = (int)bits(w, 20, 3), op = (int)bits(w, 23, 3), b = (int)bits(w, 0, 8);
+        static const int8_t fn_of[8] = {0, 1, 2, -1, -1, 3, 4, 5};
+        int fn = fn_of[op];
+        if (!c->glsl || size > 1 || fn < 0 || (size == 1 && (fn == 1 || fn == 2))) {
+            fail(c, "RED form %016llx", (unsigned long long)w);
+            return;
+        }
+        int64_t off = sbits(w, 28, 20);
+        char addr[256];
+        if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
+        else if (bits(w, 48, 1)) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
+        else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
+        c->info->uses_gmem = true;
+        c->uses_gmem_store = c->info->uses_gmem_store = true;
+        c->gm_atomics |= (uint8_t)(1u << fn);
+        sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr, (unsigned long long)maxwell_gmem_base,
+           (unsigned long long)maxwell_gmem_size);
+        if (c->stage == STAGE_COMPUTE || maxwell_gmem_mirror) {  // (the dispatch's fast copy first, as STG)
+            c->info->uses_gmem_map = true;
+            sp(&c->body, "      uint fw = ok ? %s(uint(ga)) : 0xFFFFFFFFu;\n", maxwell_gmem_mirror ? "gfind" : "gfindw");
+            sp(&c->body, "      if (fw != 0xFFFFFFFFu) %s(gfast_.w[fw], %s); else if (%s) GMATOM_%s(uint(ga >> 2), %s);\n", GM_ATOMIC[fn], R(b),
+               maxwell_gmem_mirror ? "false" : "ok", GM_ATOMIC[fn], R(b));
+        } else {
+            sp(&c->body, "      if (ok) GMATOM_%s(uint(ga >> 2), %s);\n", GM_ATOMIC[fn], R(b));
+        }
+        sp(&c->body, "    }\n");
     } else if (emit_half(c, w)) {
     } else if (OPM(0x50f8000000000000ull, 0xfff8000000000000ull)) {  // FSWZADD
         // per quad lane (laneid & 3), 2 bits of the swizzle pick: a+b, b-a, a-b, b
@@ -2302,6 +2333,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->uses_gmem_store)
             sp(&s, "#define GMW(i, v) gmem_.w[i] = (v)\n#define GMAND(i, m) atomicAnd(gmem_.w[i], m)\n"
                    "#define GMOR(i, m) atomicOr(gmem_.w[i], m)\n");
+        for (int f = 0; f < 6; f++)
+            if (c->gm_atomics >> f & 1) sp(&s, "#define GMATOM_%s(i, v) %s(gmem_.w[i], v)\n", GM_ATOMIC[f], GM_ATOMIC[f]);
     } else if (info->uses_gmem && !maxwell_gmem_lazy) {  // the heap in windows, one binding each, plain branches (shader.h)
         int n = maxwell_gmem_chunks(), ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
         for (int k = 0; k < n; k++)
@@ -2324,9 +2357,16 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             }
             sp(&s, "#define GMW(i, v) GMW_(i, v)\n#define GMAND(i, m) GMAND_(i, m)\n#define GMOR(i, m) GMOR_(i, m)\n");
         }
+        for (int f = 0; f < 6; f++) {
+            if (!(c->gm_atomics >> f & 1)) continue;
+            sp(&s, "void GMATOM_%s(uint i, uint v) { uint c = i >> %du, o = i & 0x%xu;\n", GM_ATOMIC[f], ws, (1u << ws) - 1);
+            for (int k = 0; k < n; k++) sp(&s, "  if (c == %du) { %s(gmem%d_.w[o], v); return; }\n", k, GM_ATOMIC[f], k);
+            sp(&s, "}\n");
+        }
     } else if (info->uses_gmem) {  // chunks imported lazily: a table of device addresses, buffer references (shader.h)
         int ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
-        bool direct = stage != STAGE_COMPUTE;  // (compute: its storage buffers are in gfast_ already)
+        bool direct = stage == STAGE_VERTEX || stage == STAGE_FRAGMENT;  // (compute: its storage buffers are in gfast_
+                                                                          // already; geometry: the table only)
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GChunks { uvec4 gchunk[%d]; };\n", cs, GMEM_CHUNK_BINDING, GMEM_CHUNKS_MAX);
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GW { uint w[]; };\n", c->uses_gmem_store ? "" : "readonly ");
         // Misses are counted with atomics on GMiss: a side effect, which in a fragment shader turns early depth / stencil
@@ -2381,6 +2421,14 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             if (fn[f].last) snprintf(lim, sizeof lim, "o + %du", fn[f].last); else snprintf(lim, sizeof lim, "o");
             sp(&s, " uint c = GMC(i); o = GMO(i); uvec4 e = gchunk[c]; if (%s < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); %s } "
                        "gmiss(c, i); %s }\n", lim, fn[f].act, fn[f].miss);
+        }
+        for (int f = 0; f < 6; f++) {  // (RED: as GMAND1 / GMOR1 above)
+            if (!(c->gm_atomics >> f & 1)) continue;
+            sp(&s, "void GMATOM_%s(uint i, uint v) { uint o;", GM_ATOMIC[f]);
+            for (int k = 0; direct && k < GMEM_DIRECT_MAX; k++)
+                sp(&s, " o = i - gd[%d].x; if (o < gd[%d].y) { %s(gdir%d_.w[o], v); return; }", k, k, GM_ATOMIC[f], k);
+            sp(&s, " uint c = GMC(i); o = GMO(i); uvec4 e = gchunk[c]; if (o < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); "
+                   "%s(p.w[o], v); return; } gmiss(c, i); }\n", GM_ATOMIC[f]);
         }
         sp(&s, "#define GMR(i) GMR1(i)\n");
         if (c->uses_gmem_store) sp(&s, "#define GMW(i, v) GMW1(i, v)\n#define GMAND(i, m) GMAND1(i, m)\n#define GMOR(i, m) GMOR1(i, m)\n");

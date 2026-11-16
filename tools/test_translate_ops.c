@@ -258,6 +258,39 @@ static int write_glsl(const char *dir) {
         }
         maxwell_free(s);
     }
+    {   // (GLSL) RED.E.ADD.S32 [R2+16], R4 and RED.E.OR [R2], R4: atomics on global memory, through the fast copy table in
+        // compute, the heap in a vertex shader (the car Kirby geometry stages' kind)
+        uint64_t red = 0xebf8000000000000ull | 1ull << 48 | PT_GUARD | 2ull << 8 | 4;
+        const Case rc = {.name = "RED.E.ADD / RED.E.OR", .insn = {mov32i(2, 0x10000), mov32i(3, 0x72), mov32i(4, 1),
+                                                                    red | 1ull << 20 | 16ull << 28, red | 6ull << 23, 0}};
+        uint64_t prog[16];
+        int m = program(&rc, prog);
+        uint8_t buf[0x80 + sizeof prog] = {0};
+        memcpy(buf + 0x80, prog, (size_t)m * 8);
+        uint64_t gb = maxwell_gmem_base, gs = maxwell_gmem_size;
+        maxwell_gmem_base = 0x7200000000ull, maxwell_gmem_size = 0x400000000ull;
+        static const struct { int stage; const char *ext, *want; size_t hdr; } st[] = {
+            {STAGE_COMPUTE, "comp", "if (fw != 0xFFFFFFFFu) atomicAdd(gfast_.w[fw], r4); else if (ok) GMATOM_atomicAdd(uint(ga >> 2), r4);", 0},
+            {STAGE_VERTEX, "vert", "#define GMATOM_atomicOr(i, v) atomicOr(gmem_.w[i], v)", 0x80}};
+        for (int j = 0; j < 2; j++) {
+            ShaderKey key = {0};
+            key.glsl = 1;
+            ShaderInfo *s = maxwell_translate(st[j].hdr ? buf : (const uint8_t *)prog, st[j].hdr + (size_t)m * 8, st[j].stage, &key);
+            fprintf(names, "%02d_%s %s\n", n + 3 + j, st[j].ext, rc.name);
+            if (!s->msl || !strstr(s->msl, st[j].want) || !s->uses_gmem_store) {
+                printf("FAIL %s (%s): %s\n", rc.name, st[j].ext, s->msl ? "not the atomic" : s->error);
+                bad++;
+            } else {
+                snprintf(path, sizeof path, "%s/%02d_%s.%s", dir, n + 3 + j, st[j].ext, st[j].ext);
+                FILE *f = fopen(path, "w");
+                if (!f) { perror(path); return 2; }
+                fputs(s->msl, f);
+                fclose(f);
+            }
+            maxwell_free(s);
+        }
+        maxwell_gmem_base = gb, maxwell_gmem_size = gs;
+    }
     {   // (compute, GLSL) SUST.P.3D through a bindless handle LDC loaded from c[2] (image 1: byte 0x128) becomes an
         // imageStore on the image slot of that handle; a handle the code computes is refused, not guessed
         uint64_t sust = 0xeb20000000000000ull | PT_GUARD | 0xFull << 20 | 5ull << 33 | 7ull << 39 | 4ull << 8 | 0;  // [R4..R6], R0..R3, handle R7
