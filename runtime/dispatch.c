@@ -9,7 +9,8 @@
 #include "hle.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
-static FnTable tables[2];
+static FnTable tables[GAMELIB_MAX_MODULES];
+static uint32_t ntables;
 
 // HLE stubs live at fake addresses HLE_BASE + 16*i
 #define MAX_HLE 4096
@@ -114,27 +115,26 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
-    uint64_t nm = *g->main_count, ns = *g->sdk_count;
+    ntables = g->nmods < GAMELIB_MAX_MODULES ? g->nmods : GAMELIB_MAX_MODULES;
+    for (uint32_t t = 0; t < ntables; t++) {
+        const GameLibModule *m = &g->mods[t];
+        uint64_t n = *m->count;
+        const uint64_t *addrs = m->addrs;
 #ifdef LARECOMP_DYN_BASE
-    // The library lists the game's own addresses (gen.py --dyn-base): moved to where the window is (rt.h).
-    static uint64_t *moved[2];
-    const uint64_t *src[2] = {g->main_addrs, g->sdk_addrs}, cnt[2] = {nm, ns};
-    for (int t = 0; t < 2; t++) {
+        // The library lists the game's own addresses (gen.py --dyn-base): moved to where the window is (rt.h).
+        static uint64_t *moved[GAMELIB_MAX_MODULES];
         free(moved[t]);
-        moved[t] = malloc(cnt[t] * sizeof *moved[t]);
+        moved[t] = malloc(n * sizeof *moved[t]);
         if (!moved[t]) FATAL("out of memory\n");
-        for (uint64_t i = 0; i < cnt[t]; i++) moved[t][i] = src[t][i] - GUEST_CANON + GUEST_LO;
-    }
-    tables[0] = (FnTable){moved[0], g->main_fns, nm, moved[0][0], moved[0][nm - 1]};
-    tables[1] = (FnTable){moved[1], g->sdk_fns, ns, moved[1][0], moved[1][ns - 1]};
-#else
-    tables[0] = (FnTable){g->main_addrs, g->main_fns, nm, g->main_addrs[0], g->main_addrs[nm - 1]};
-    tables[1] = (FnTable){g->sdk_addrs, g->sdk_fns, ns, g->sdk_addrs[0], g->sdk_addrs[ns - 1]};
+        for (uint64_t i = 0; i < n; i++) moved[t][i] = addrs[i] - GUEST_CANON + GUEST_LO;
+        addrs = moved[t];
 #endif
+        tables[t] = (FnTable){addrs, m->fns, n, addrs[0], addrs[n - 1]};
+    }
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {
-    for (int t = 0; t < 2; t++) {
+    for (uint32_t t = 0; t < ntables; t++) {
         FnTable *ft = &tables[t];
         if (addr < ft->lo || addr > ft->hi) continue;
         uint64_t lo = 0, hi = ft->count;

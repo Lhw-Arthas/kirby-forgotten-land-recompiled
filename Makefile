@@ -50,6 +50,11 @@ endif
 # differs per arch (AArch64 hosts run the guest's FP/SIMD as inline asm, others use the portable C of simd.h), so a
 # cross build has its own generated-<arch>/ and build/<arch>/; SYSROOT is the target's root filesystem (headers, libs).
 GEN      ?= generated
+# GAME: the game files (exefs/, romfs/) `make gen` reads
+GAME     ?= extracted
+# the game's modules (game/game.h GAME_MODULES), main first: <name>:<address> each, and the names alone
+GAME_MODULES := $(shell sed -n 's/^\#define GAME_MODULES(X) //p' game/game.h | sed 's/X(\([a-z0-9_]*\), *\(0x[0-9a-fA-F]*\)) */\1:\2 /g')
+GAME_MODULE_NAMES := $(foreach m,$(GAME_MODULES),$(firstword $(subst :, ,$(m))))
 ifeq ($(PLATFORM),linux)
 HOSTARCH := $(patsubst arm64,aarch64,$(shell uname -m))
 ARCH     ?= $(HOSTARCH)
@@ -81,7 +86,7 @@ GENFLAGS := $(GENFLAGS_BASE)
 # the app itself holds none of it
 # (strip: with no generated code the space between the two would be all that's left, and $(if) takes a lone space as
 # true. No comment after the value: make keeps the spaces before it)
-GEN_SRC  := $(strip $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c))
+GEN_SRC  := $(strip $(foreach m,$(GAME_MODULE_NAMES),$(wildcard $(GEN)/$(m)/*.c)))
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/tools/gamelib_entry.o
 RT_SRC   := $(wildcard runtime/*.c runtime/*.cpp) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
             $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
@@ -210,7 +215,7 @@ endif
 
 # GAMELIB_ID: what the game code library is built from (the generator, the headers it is compiled against, the
 # flags). A library with another id is rebuilt by the start screen, never loaded.
-GAMELIB_SRCS := tools/game_addresses.py runtime/game_addresses/versions.h $(wildcard runtime/game_addresses/patches_v*.h) tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/chunk_bounds.py \
+GAMELIB_SRCS := game/game.h tools/game_addresses.py runtime/game_addresses/versions.h $(wildcard runtime/game_addresses/patches_v*.h) tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/chunk_bounds.py \
                 tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
                 runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
@@ -244,7 +249,7 @@ $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h
 
 $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) $(wildcard $(GEN)/main/main_build_id.txt)
 	@mkdir -p $(dir $@)
-	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_FULL_ID)"' -c $< -o $@
+	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_FULL_ID)"' -DGAMELIB_MODULES='$(foreach m,$(GAME_MODULE_NAMES),MOD($(m)))' -c $< -o $@
 $(B)/rt/gamelib.o: $(GAMELIB_SRCS)
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
@@ -336,8 +341,9 @@ $(B)/rt/zipfile.o: RTFLAGS += -I$(MINIZ)
 PY := $(firstword $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && ../$(PY) gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD)
-	cd tools && ../$(PY) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD)
+	cd tools && for m in $(GAME_MODULES); do n=$${m%%:*}; \
+	    $(abspath $(PY)) gen.py $$n $(abspath $(GAME))/exefs/$$n $${m#*:} $(abspath $(GEN))/$$n \
+	        $$([ $$n = sdk ] && echo --hle ../runtime/hle/hle_symbols.txt) $(GENSIMD) || exit 1; done
 
 gen-objs: $(GEN_OBJ)
 

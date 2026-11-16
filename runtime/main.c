@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "game_addresses.h"
+#include "game.h"
 #include "gamelib.h"
 #include "paths.h"
 #include "settings.h"
@@ -26,9 +27,10 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
     }
 }
 
-// nn::init::Start calls x2 right after nnosInitialize and x3 after nninitStartup, just before
-// nnMain: SDK constructors run early, the game's run once nninitStartup has set up its heap.
-// rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
+// nn::init::Start (game/game.h GAME_START_ARGS) with 4 arguments calls x2 right after nnosInitialize and x3 after
+// nninitStartup, just before nnMain: SDK constructors run early, the game's run once nninitStartup has set up its
+// heap. With 5 it calls x2 when the exception handler is ready, x3 after nninitStartup (every module) and x4 only
+// after nnMain returns. rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
 // __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
 static void module_init(Cpu *c, Module *m) {
     LOG("init %s (DT_INIT %llx, %llu init_array entries)\n", m->name, m->init, m->init_array_sz / 8);
@@ -36,8 +38,14 @@ static void module_init(Cpu *c, Module *m) {
     else run_array(c, m->init_array, m->init_array_sz);
 }
 
-static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
+static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that link against it
+    for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+}
 static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+#if GAME_START_ARGS == 5
+static void rtld_init_all(Cpu *c) { rtld_init_sdk(c), rtld_init_main(c); }
+static void rtld_nothing(Cpu *c) { (void)c; }
+#endif
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
@@ -231,12 +239,16 @@ static void boot(const char *root) {
     }
     LOG("main thread: prio %d, stack 0x%x\n", prio, stack_size);
 
-    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
+    uint64_t start = loader_find_symbol(GAME_START_SYMBOL);
     if (!start) FATAL("nn::init::Start not found\n");
-    uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
-    uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
+#if GAME_START_ARGS == 5  // nn::init::Start(thread_handle, args_region, exception_ready, init, fini)
+    uint64_t nothing = hle_register("<rtld_nothing>", rtld_nothing);
+    kernel_run_main(t, t->handle, 0, nothing, hle_register("<rtld_init_all>", rtld_init_all), nothing);
+#else  // nn::init::Start(thread_handle, args_region, init_sdk, init_main)
+    kernel_run_main(t, t->handle, 0, hle_register("<rtld_init_sdk>", rtld_init_sdk),
+                    hle_register("<rtld_init_main>", rtld_init_main), 0);
+#endif
 }
 
 // The log's first line after the log's own: this build and the machine, for bug reports. Nothing that identifies the

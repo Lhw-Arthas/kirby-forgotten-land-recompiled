@@ -67,8 +67,6 @@ extern uint64_t g_guest_lo;
 #define ALIAS_OFF        0x0100000000ull                 // (between HLE and the stacks)
 #endif
 #define GUEST_HI         (GUEST_LO + GUEST_SIZE)
-#define MAIN_BASE        (GUEST_LO + 0x0000000000ull)
-#define SDK_BASE         (GUEST_LO + 0x0004000000ull)
 #define HLE_BASE         (GUEST_LO + HLE_OFF)            // fake addresses for host-implemented functions
 #define HLE_SIZE         0x0000100000ull
 #define TLS_BASE         (GUEST_LO + TLS_OFF)
@@ -127,7 +125,7 @@ void kernel_init(void);
 void kernel_stop_threads(void (*idle)(void));  // reboot: unwind every guest thread and join it (idle: called while waiting)
 void kernel_reset(void);                       // reboot: empty handle table, memory map, thread list
 KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio);
-void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3);
+void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4);
 uint32_t kernel_current_thread_handle(void);
 Cpu *kernel_current_cpu(void);
 
