@@ -37,7 +37,9 @@ launcher:
 	# (relative to src-tauri: an absolute E:/... would be read as a URL)
 	cd launcher/src-tauri && TAURI_CONFIG='{"build":{"frontendDist":"../../build/launcher-web"}}' \
 	    TMP="$(shell cygpath -w $(abspath build/tmp))" TEMP="$(shell cygpath -w $(abspath build/tmp))" \
-	    RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --locked --features tauri/custom-protocol \
+	    RUSTFLAGS="-C target-feature=+crt-static --remap-path-prefix=$$(cygpath -w "$${CARGO_HOME:-$$USERPROFILE/.cargo}")=cargo \
+	    --remap-path-prefix=$$(cygpath -w "$${RUSTUP_HOME:-$$USERPROFILE/.rustup}")=rustup" \
+	    cargo build --release --locked --features tauri/custom-protocol \
 	    --target-dir "$(abspath $(LAUNCHER_OUT))"
 
 dist: launcher
@@ -75,6 +77,7 @@ dist: launcher
 	    -o -iname 'romfs*' -o -iname 'exefs' -o -iname 'lasgame.*' -o -iname 'generated' | grep .  # (nothing of the game)
 	# (no path of this machine inside: build/deps-win, debug info, zig's runtime. Not on CI: its paths name no one)
 	if [ "$${CI:-}" != true ]; then \
+	    : "$${USERPROFILE:?empty: an MSYS2 shell started from Git Bash drops it, pass USERPROFILE=... to make}"; \
 	    case "$$(basename "$$(cygpath -u "$$USERPROFILE")")" in runner|runneradmin) h= ;; *) h=$$(cygpath -m "$$USERPROFILE") ;; esac; \
 	    ! grep -rlaiF -e "$(CURDIR)" -e "$$(cygpath -m '$(CURDIR)')" -e "$$(cygpath -w '$(CURDIR)')" \
 	        $${h:+-e "$$h" -e "$$(cygpath -w "$$h")"} "$(DIST)"; fi
