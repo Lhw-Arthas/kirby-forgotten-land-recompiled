@@ -1,5 +1,5 @@
 #!/bin/bash
-# usage: tools/zig_slim.sh <game code flags>: the Windows release's compiler, build/zig-slim/ (shipped as zig/), made
+# usage: GAMELIB_MODULES="MOD(main) MOD(sdk) ..." tools/zig_slim.sh <game code flags>: the Windows release's compiler, build/zig-slim/ (shipped as zig/), made
 # from tools/fetch_zig.sh's build/zig/. The full zig compiles the MinGW C runtime and its own runtime library from
 # ~4000 source files on the player's machine at the first link; here they are built once, ahead of time, and only
 # what building the game code reads is kept:
@@ -26,7 +26,7 @@ done
 # 1. the headers: what the generated C (cpu.h, simd.h) and tools/gamelib_entry.c include
 printf '#include "cpu.h"\n#include "simd.h"\n' > $W/probe.c
 $Z/zig.exe cc "${flags[@]}" -Iruntime -c $W/probe.c -o $W/probe.o -MD -MF $W/probe.d
-$Z/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' -c tools/gamelib_entry.c -o $W/entry.o -MD -MF $W/entry.d
+$Z/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' "-DGAMELIB_MODULES=${GAMELIB_MODULES:?set GAMELIB_MODULES, as dist.mk does}" -c tools/gamelib_entry.c -o $W/entry.o -MD -MF $W/entry.d
 cp -R $Z/lib/include $O/lib/  # (the compiler's own headers, every target: see the top)
 n=$(find $O/lib/include -type f | wc -l)
 for h in $(cat $W/probe.d $W/entry.d | tr ' ' '\n' | tr -d '\r' | sed -n 's|^build/zig/lib/|lib/|p' | sort -u); do
@@ -69,7 +69,7 @@ echo "-NOIMPLIB" >> $O/rt/link.rsp
 rm -rf $W/cache2
 export ZIG_GLOBAL_CACHE_DIR="$(cygpath -w "$PWD/$W/cache2")" ZIG_LOCAL_CACHE_DIR="$(cygpath -w "$PWD/$W/cache2")"
 $O/zig.exe cc "${flags[@]}" -Iruntime -c $W/probe.c -o $W/probe2.o
-$O/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' -c tools/gamelib_entry.c -o $W/entry2.o
+$O/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' "-DGAMELIB_MODULES=${GAMELIB_MODULES:?set GAMELIB_MODULES, as dist.mk does}" -c tools/gamelib_entry.c -o $W/entry2.o
 (cd $W && "$OA/zig.exe" lld-link "@$(cygpath -w "$OA/rt/link.rsp")" "-LIBPATH:$(cygpath -w "$OA/rt")" \
     -OUT:probe2.dll dll.o host.a) || { echo "tools/zig_slim.sh: the slim zig's link failed"; exit 1; }
 built=$(find $W/cache2 -name '*.lib' | wc -l)

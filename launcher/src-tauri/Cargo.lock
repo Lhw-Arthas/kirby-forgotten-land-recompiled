@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "kfl-recomp-launcher"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "junction",
@@ -1682,6 +1682,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

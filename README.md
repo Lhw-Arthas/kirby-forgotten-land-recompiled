@@ -1,8 +1,9 @@
 # Kirby and the Forgotten Land Recompiled
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+<a href="https://recompstore.com/dev/scarxity"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recompstore.com/assets/press/verified-light.svg"><img alt="Verified developer on RecompStore" src="https://recompstore.com/assets/press/verified-dark.svg" height="48"></picture></a>
 
-An early, work-in-progress static recompilation of **Kirby and the Forgotten Land** (Nintendo Switch) for Windows.
+A work-in-progress static recompilation of **Kirby and the Forgotten Land** (Nintendo Switch) for Windows.
 The game's ARM64 code is translated to C and compiled for your PC, and a runtime stands in for the Switch. It is not
 an emulator.
 
@@ -14,8 +15,7 @@ an emulator.
 ## Status
 
 See [docs/STATUS.md](docs/STATUS.md) for how far the game gets and what is known to be missing. In short: the
-game boots, plays its opening and reaches the first stage with correct graphics, but it is **not tested beyond
-that and not playable yet**.
+game boots, plays its opening and reaches the first stage with correct graphics.
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`). The
 launcher and the runtime accept any version of the game by program id, but only v1.0.0 has been built and run.
@@ -35,10 +35,12 @@ from the same folder, show its settings and start it.
 
 | Path | What it is |
 |---|---|
-| `tools/` | The generator: lifts the game's NSO modules to C (`gen.py`, `lifter.py`) |
-| `runtime/` | The runtime: kernel, services, NVN graphics on Vulkan, audio, input |
+| `game/` | What names this game: `game.h` (program id, folders, modules) and `game.mk` (exe name, version) |
+| `runtime/` | The runtime, from LAS Recomp: kernel, services, NVN graphics on Vulkan, audio, input |
+| `tools/` | The generator that lifts the game's NSO modules to C (`gen.py`, `lifter.py`), the packaging and the tests |
 | `launcher/` | The launcher (Tauri 2): pick the game folder, build the game code, play |
 | `third_party/` | Bundled libraries, each under its own license |
+| `docs/` | Status, the upstream record, what the launcher expects from the runtime |
 
 Nothing derived from the game lives in this repository. The extracted game files, the generated C and the build
 output all go to a **work folder** outside it (`../work/kfl` by default, `WORK=` to change).
@@ -81,8 +83,11 @@ cd ../work/kfl && LARECOMP_GAME_LIB=build/lasgame.dll ./build/lasrecomp.exe extr
 
 ## Credits
 
-- [letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp) by raulzrrs, the runtime and generator this port starts from
-- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai, which letsgo-recomp is built on
+- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai (MIT), the Switch recompiler this project is built on:
+  the runtime (kernel, services, graphics, audio, input) and the game code generator are LAS Recomp's, copied at the
+  commit named in [docs/UPSTREAM.md](docs/UPSTREAM.md) with its own copyright notices kept
+- [letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp) by raulzrrs (MIT), where this port started: the first
+  Kirby port was made from it, and its services for this game are carried over
 - The launcher's layout follows [Recompia](https://github.com/Dittobyte/Recompia)'s; its code and art are original
 
 ## License

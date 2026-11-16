@@ -1,6 +1,6 @@
 # Status
 
-Not playable yet. This page says how far the game gets and what is known to be wrong. Every fix and the evidence
+This page says how far the game gets and what is known to be wrong. Every fix and the evidence
 for it is in [decisions.tsv](decisions.tsv).
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`).
@@ -30,7 +30,6 @@ Reproduce the furthest point with `bash tools/run_scripted.sh <name> 170 "3400,5
 - One boot in four exited by itself with code 0 in an earlier session. A restart path that did exactly that is
   fixed, but nobody has shown it was the cause, and it did not happen again in 44 later runs.
 - The launcher's build can fail to link when the work folder is on another drive or behind a long path.
-- Closing the launcher during a build may leave the compile running.
 
 ## Stubs and shortcuts
 
