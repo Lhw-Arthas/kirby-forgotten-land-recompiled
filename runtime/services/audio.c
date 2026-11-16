@@ -17,8 +17,8 @@
 // third_party/ryujinx/LICENSE.txt).
 // Voices decode PCM16 / ADPCM wave buffers, resample to 48 kHz, and mix into their destination mix's
 // buffers; sub mixes route into their destination; the final mix feeds the device sink, which we
-// downmix to stereo (or pass on as 5.1: Audio > Output) and push to an SDL audio stream. Effects and splitters
-// are not implemented.
+// downmix to stereo (or pass on as 5.1: Audio > Output) and push to an SDL audio stream. Effects: Delay, Reverb and
+// I3DL2 reverb (the others pass their input through); splitters are not implemented.
 #define WB_COUNT 4
 #define MIXBUF_MAX 24
 #define HIST 4
@@ -246,44 +246,7 @@ static int voice_prepare(Renderer *r, Voice *v) {
 static Mix *find_mix(Renderer *r, int32_t id) { return id >= 0 && (uint32_t)id < r->nmix && r->mix[id].used ? &r->mix[id] : NULL; }
 
 // ------------------------------------------------------------------ reverb (port of Ryujinx ReverbState/Command)
-typedef struct { float *buf; uint32_t sr, cur, last, count, max; } DelayLine;
-
-static void dl_set(DelayLine *d, float ms) {
-    uint32_t n = (uint32_t)roundf(d->sr * ms);
-    d->count = n < d->max ? n : d->max;
-    d->cur = 0;
-    d->last = d->count ? d->count - 1 : 0;
-}
-static void dl_init(DelayLine *d, uint32_t sr, float ms_max) {
-    d->sr = sr;
-    d->max = (uint32_t)roundf(sr * ms_max);
-    free(d->buf);
-    d->buf = calloc(d->max + 1, sizeof(float));
-    dl_set(d, ms_max);
-}
-static float dl_read(DelayLine *d) { return d->buf[d->cur]; }
-static float dl_update(DelayLine *d, float v) {
-    float o = d->buf[d->cur];
-    d->buf[d->cur++] = v;
-    if (d->cur >= d->last) d->cur = 0;
-    return o;
-}
-static float dl_tap_unsafe(DelayLine *d, uint32_t idx, int off) {
-    int t = (int)d->cur - ((int)idx + off);
-    if (t < 0) t += (int)d->count;
-    if (t < 0 || (uint32_t)t > d->max) return 0;
-    return d->buf[t];
-}
-static float dl_tap(DelayLine *d, uint32_t idx) {
-    if (idx >= d->count) idx = d->count ? d->count - 1 : 0;
-    return dl_tap_unsafe(d, idx, -1);
-}
-
-typedef struct { DelayLine dl; float rate; } DecayDelay;
-static float dd_update(DecayDelay *d, float v) {
-    float p = v - d->rate * dl_read(&d->dl);
-    return dl_update(&d->dl, p) + p * d->rate;
-}
+#include "audio_fx.h"  // (the delay lines, and the Delay and I3DL2 reverb effects)
 
 typedef struct {
     uint8_t input[6], output[6];
@@ -423,15 +386,38 @@ struct Effect {
     int32_t mix_id;
     uint32_t order;
     Reverb rv;
+    FxDelay dly;
+    FxI3dl2 i3;
+    bool fx_ready;  // dly / i3 set up
 };
+
+static bool fx_channels_ok(const FxIo *io) {
+    return (io->ch_max == 1 || io->ch_max == 2 || io->ch_max == 4 || io->ch_max == 6) &&
+           (io->ch == 1 || io->ch == 2 || io->ch == 4 || io->ch == 6) && io->ch <= io->ch_max;
+}
+
+// Delay (3) and I3DL2 reverb (5): set up when new, updated when their parameters change.
+static void effect_update_fx(Effect *fx, const uint8_t *e) {
+    const uint8_t *d = e + 0x20;
+    void *p = fx->type == 3 ? (void *)&fx->dly.p : (void *)&fx->i3.p;
+    size_t size = fx->type == 3 ? sizeof fx->dly.p : sizeof fx->i3.p;
+    if (!fx_channels_ok((const FxIo *)d)) return;
+    if (fx->fx_ready && !e[1] && !memcmp(p, d, size)) return;
+    bool init = e[1] || !fx->fx_ready || memcmp(p, d, 0x10);  // (new, or other channels)
+    memcpy(p, d, size);
+    if (fx->type == 3) init ? fx_delay_init(&fx->dly) : fx_delay_update(&fx->dly);
+    else init ? fx_i3dl2_init(&fx->i3) : fx_i3dl2_update(&fx->i3);
+    fx->fx_ready = true;
+}
 
 // Effect slot update from EffectInParameterVersion1 (0xC0 bytes: type, is_new, enabled, mix, buffers, order, data).
 static void effect_update(Effect *fx, const uint8_t *e) {
-    if (fx->type != e[0]) memset(&fx->rv.p, 0, sizeof fx->rv.p), fx->rv.ready = 0;
+    if (fx->type != e[0]) memset(&fx->rv.p, 0, sizeof fx->rv.p), fx->rv.ready = 0, fx->fx_ready = false;
     fx->type = e[0];
     fx->enabled = e[2];
     memcpy(&fx->mix_id, e + 4, 4);
     memcpy(&fx->order, e + 0x18, 4);
+    if (fx->type == 3 || fx->type == 5) { effect_update_fx(fx, e); return; }
     if (fx->type != 4) return;
     const uint8_t *d = e + 0x20;
     uint16_t ch_max, ch;
@@ -460,14 +446,19 @@ static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
     for (uint32_t order = 0; order < r->effects; order++) {
         for (uint32_t i = 0; i < r->effects; i++) {
             Effect *fx = &r->fx[i];
-            if (fx->type != 4 || fx->mix_id != mix_id || fx->order != order || !fx->rv.ready) continue;
-            int ch = fx->rv.p.ch;
+            if (fx->mix_id != mix_id || fx->order != order) continue;
+            const uint8_t *input, *output;
+            int ch;
+            if (fx->type == 4 && fx->rv.ready) input = fx->rv.p.input, output = fx->rv.p.output, ch = fx->rv.p.ch;
+            else if (fx->type == 3 && fx->fx_ready) input = fx->dly.p.io.input, output = fx->dly.p.io.output, ch = fx->dly.p.io.ch;
+            else if (fx->type == 5 && fx->fx_ready) input = fx->i3.p.io.input, output = fx->i3.p.io.output, ch = fx->i3.p.io.ch;
+            else continue;
             float *in[6], *out[6];
             int ok = 1;
             for (int c = 0; c < ch; c++) {
-                if (fx->rv.p.input[c] >= m->bufs || fx->rv.p.output[c] >= m->bufs) ok = 0;
-                in[c] = m->buf + (fx->rv.p.input[c] % MIXBUF_MAX) * N;
-                out[c] = m->buf + (fx->rv.p.output[c] % MIXBUF_MAX) * N;
+                if (input[c] >= m->bufs || output[c] >= m->bufs) ok = 0;
+                in[c] = m->buf + (input[c] % MIXBUF_MAX) * N;
+                out[c] = m->buf + (output[c] % MIXBUF_MAX) * N;
             }
             if (!ok) continue;
             static int no_reverb = -1;
@@ -475,9 +466,28 @@ static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
             static int toggle = -1;
             if (toggle < 0) toggle = getenv("LARECOMP_REVERB_TOGGLE") ? atoi(getenv("LARECOMP_REVERB_TOGGLE")) : 0;
             int off = no_reverb || !g_settings.reverb || (toggle && (r->elapsed_frames / toggle) % 2);
-            if (fx->enabled && !off) reverb_process(&fx->rv, in, out, N);
-            else
+            static int fx_log = -1;  // LARECOMP_AUDIO_FX_LOG=1: each second, every effect's input and output energy
+            if (fx_log < 0) fx_log = getenv("LARECOMP_AUDIO_FX_LOG") ? 1 : 0;
+            static double fx_e[16][2];
+            if (fx_log && i < 16)
+                for (int c = 0; c < ch; c++)
+                    for (uint32_t k = 0; k < N; k++) fx_e[i][0] += (double)in[c][k] * in[c][k];
+            if (fx->enabled && !off) {
+                if (fx->type == 4) reverb_process(&fx->rv, in, out, N);
+                else if (fx->type == 3) fx_delay_process(&fx->dly, in, out, N);
+                else fx_i3dl2_process(&fx->i3, in, out, N);
+            } else
                 for (int c = 0; c < ch; c++) if (in[c] != out[c]) memcpy(out[c], in[c], N * sizeof(float));
+            if (fx_log && i < 16) {
+                for (int c = 0; c < ch; c++)
+                    for (uint32_t k = 0; k < N; k++) fx_e[i][1] += (double)out[c][k] * out[c][k];
+                if (r->elapsed_frames % 200 == 199) {  // (dB re a full-scale int16 sine over one second)
+                    LOG("[audren] fx %u type %u: in %.1f dB, out %.1f dB\n", i, fx->type,
+                        10 * log10(fx_e[i][0] / (200.0 * N * 32768 * 32768 / 2) + 1e-30),
+                        10 * log10(fx_e[i][1] / (200.0 * N * 32768 * 32768 / 2) + 1e-30));
+                    fx_e[i][0] = fx_e[i][1] = 0;
+                }
+            }
         }
     }
 }
@@ -889,7 +899,7 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
         const uint8_t *v = vin + i * 0x170;
         if (v[9]) update_voice(r, &r->voice[i], v, op + o);
     }
-    // effects (not processed): report them as enabled/disabled per request
+    // effects: report them as enabled/disabled per request
     const uint8_t *ein = vin + voices_sz;
     oh[5] = neffects * 0x10;
     for (uint32_t i = 0; i < neffects && o + 0x10 <= out->size; i++, o += 0x10) {
@@ -899,7 +909,7 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
         static uint32_t seen_types;
         if (e[0] && e[0] < 32 && !(seen_types & (1u << e[0]))) {
             seen_types |= 1u << e[0];
-            LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], e[0] == 4 ? "" : " (not implemented)", i,
+            LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], e[0] >= 3 && e[0] <= 5 ? "" : " (not implemented)", i,
                 *(const int32_t *)(e + 4), e[2]);
         }
         if (e[0] && getenv("LARECOMP_AUDIO_LOG")) {
@@ -1144,6 +1154,7 @@ RT_ON_RESET(audio_reset) {
             if (r->stream) SDL_DestroyAudioStream(r->stream);
             if (r->wav) { wav_header(r->wav, r->wav_bytes, r->wav_ch); fclose(r->wav); }
             for (uint32_t m = 0; m < r->nmix; m++) free(r->mix[m].buf);
+            for (uint32_t e = 0; e < r->effects; e++) fx_delay_free(&r->fx[e].dly), fx_i3dl2_free(&r->fx[e].i3);
             free(r->voice), free(r->chres), free(r->chst), free(r->mix), free(r->fx);  // (reverb delay lines leak)
             free(r);
             g_rens[i] = NULL;
