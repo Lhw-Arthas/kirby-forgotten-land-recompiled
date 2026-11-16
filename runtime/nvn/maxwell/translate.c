@@ -1061,7 +1061,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
 
 #define OPM(val, mask) ((w & (uint64_t)(mask)) == (uint64_t)(val))
     if (OPM(0xe300000000000000ull, 0xfff0000000000000ull)) {  // EXIT
-        sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
+        int test = (int)bits(w, 0, 5);
+        // FCSM_TR (0x1c): the VOTE.VTG cull test's result, never set here (VOTE.VTG is a no-op): the vertex goes on
+        if (test == 0x1c) {
+        } else if (test != 0xf) fail(c, "EXIT with flow test %#x at %#x", test, pc);
+        else sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
     } else if (OPM(0xe330000000000000ull, 0xfff0000000000000ull)) {  // KIL
         c->info->uses_discard = true;
         if (getenv("LARECOMP_NO_DISCARD")) {
@@ -2640,7 +2644,10 @@ static bool static_stacks_resolve(const uint64_t *code, size_t end, const uint8_
                 if (!guarded) break;
                 continue;
             }
-            if (top12 == 0xe300000000000000ull) { if (!guarded) break; continue; }  // EXIT
+            if (top12 == 0xe300000000000000ull) {  // EXIT (EXIT.FCSM_TR goes on: emit_insn)
+                if (!guarded && (w & 0x1f) != 0x1c) break;
+                continue;
+            }
             int pk = (w & 0xfff8000000000000ull) == 0xf0f8000000000000ull ? 0 : top12 == 0xe340000000000000ull ? 1 :
                      top12 == 0xe350000000000000ull ? 2 : -1;      // SYNC / BRK / CONT
             if (pk >= 0) {
@@ -2734,7 +2741,7 @@ static bool struct_blocks(const uint64_t *code, size_t end, const uint8_t *label
         bool is_bra = (w & 0xfff0000000000020ull) == 0xe240000000000000ull;
         bool is_pop = (w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || top12 == 0xe340000000000000ull ||
                       top12 == 0xe350000000000000ull;
-        bool is_exit = top12 == 0xe300000000000000ull;
+        bool is_exit = top12 == 0xe300000000000000ull && (w & 0x1f) != 0x1c;  // (EXIT.FCSM_TR goes on: emit_insn)
         bool is_brx = top12 == 0xe250000000000000ull;
         if (!is_bra && !is_pop && !is_exit && !is_brx) continue;
         if (pr == PT && prn) continue;  // never runs
@@ -3266,7 +3273,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
                         if (c->brx[k].t[j] == pc) { sp(&c->body, "    brx_t%d = 0u;\n", k); c->uses_brx_t = true; }
             }
             uint64_t w_ = ((const uint64_t *)code)[i], t12_ = w_ & 0xfff0000000000000ull;
-            bool flow_ = (w_ & 0xfff0000000000020ull) == 0xe240000000000000ull || t12_ == 0xe300000000000000ull ||
+            bool flow_ = (w_ & 0xfff0000000000020ull) == 0xe240000000000000ull || (t12_ == 0xe300000000000000ull && (w_ & 0x1f) != 0x1c) ||
                          (w_ & 0xfff8000000000000ull) == 0xf0f8000000000000ull || t12_ == 0xe340000000000000ull ||
                          t12_ == 0xe350000000000000ull;
             if (!flow_) {
