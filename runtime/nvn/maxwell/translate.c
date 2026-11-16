@@ -139,6 +139,7 @@ typedef struct {
     bool ao_taps;          // the AO blur's taps follow rscale[65].y (ao_grid_fix)
     bool shadow_tap[2];    // the shadow map's texel size (x, y) is read: shadow_taps
     bool ao_pass;          // the AO pass: white while rscale[65].z > 0 (ao_grid_fix)
+    const uint8_t *label;  // the branch targets among the instruction words (image_handle)
     int lmem_words;        // the local memory array's size in words (lmem_size; MSL: always LMEM_WORDS)
     int smem_words;        // the shared memory array's size in words (lmem_size)
     // GLSL: each BRX whose jump table was read (brx_table_labels): its targets, so that static_stacks_resolve can walk
@@ -927,6 +928,66 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     else
         sprintf(call, "t%d.sample(s%d, %s%s%s%s%s)", slot, slot, cexpr, array ? ", " : "", layer, lod, off);
     write_tex_result(c, slot, call, mask, d, RZ, false, false);
+}
+
+// NVN keeps the bound handles in c[2]: textures from 0x20, images from 0x120 (8 bytes each). The backend binds an image
+// slot from the image bound at its handle (vulkan/exec.c shader_image_view); the bank itself is never read.
+#define HANDLE_CBUF 2
+#define IMAGE_HANDLES 0x120
+
+// Whether instruction w may write register r (an over-estimate: true unless it can't)
+static bool may_write(uint64_t w, int r) {
+    int d = (int)bits(w, 0, 8), top = (int)(w >> 52);
+    static const int psetp[] = {0x5b6, 0x4b6, 0x366, 0x367, 0x5bb, 0x4bb, 0x36b, 0x5b8, 0x4b8, 0x368, 0x509, 0x50a, 0x5d2};
+    for (size_t i = 0; i < sizeof psetp / sizeof psetp[0]; i++)
+        if (top == psetp[i]) return false;  // (ISETP FSETP DSETP PSETP CSETP HSETP2: predicates only)
+    // shortcut: arithmetic writes one register; a 64-bit result (DADD ...) into the handle's pair would be missed
+    if ((w >> 60) <= 5 || (w >> 51) == 0xf0c8 >> 3) return d == r;  // (and S2R)
+    if ((w & 0xf400000000000000ull) == 0xd000000000000000ull) {  // TEXS / TLDS / TLD4S: two pairs, Rd and bits 28-35
+        int d1 = (int)bits(w, 28, 8);
+        return (d != RZ && r >= d && r < d + 2) || (d1 != RZ && r >= d1 && r < d1 + 2);
+    }
+    return r >= d && r < d + 4;  // (loads and texture fetches: up to four)
+}
+
+// The c[2] byte offset register r holds at pc: the straight-line code before it must load r with a LDC or MOV from c[2]
+// (no branch target in between, nothing else writing r). -1: not found.
+static int64_t image_handle(Ctx *c, int r, uint32_t pc) {
+    for (size_t j = pc / 8; j-- > 1;) {
+        if (j % 4 == 0) continue;
+        uint64_t w = ((const uint64_t *)c->code)[j];
+        int d = (int)bits(w, 0, 8);
+        uint64_t op = w & 0xfff8000000000000ull;
+        if (op == 0xef90000000000000ull && bits(w, 8, 8) == RZ && bits(w, 36, 5) == HANDLE_CBUF &&
+            r >= d && r < d + (bits(w, 48, 3) == 5 ? 2 : 1))  // LDC c[2][imm] (.64: two handles)
+            return (int64_t)bits(w, 20, 16) + 4 * (r - d);
+        if (op == 0x4c98000000000000ull && bits(w, 34, 5) == HANDLE_CBUF && d == r)  // MOV c[2][imm]
+            return (int64_t)bits(w, 20, 14) * 4;
+        if (c->label[j] || may_write(w, r)) return -1;  // (a join, or an instruction that may write r)
+    }
+    return -1;
+}
+
+// SUST.P (untyped surface store, all four components): data Rd..Rd+3, integer coordinates from Ra, the image bound at
+// handle offset bits 36-48 (bit 51) or bindless through register bits 39-46 (yuzu surface_load_store.cpp layout)
+static void emit_sust(Ctx *c, uint64_t w, uint32_t pc) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), dim = (int)bits(w, 33, 3), hr = (int)bits(w, 39, 8);
+    int64_t off = bits(w, 51, 1) ? (int64_t)bits(w, 36, 13) * 4 : image_handle(c, hr, pc);
+    int type = dim == 0 ? TEXTYPE_1D : dim == 3 ? TEXTYPE_2D : dim == 5 ? TEXTYPE_3D : -1;
+    if (!c->glsl) { fail(c, "sust: GLSL only"); return; }
+    if (c->stage != STAGE_COMPUTE) { fail(c, "sust outside a compute shader"); return; }
+    if (bits(w, 20, 4) != 0xf) { fail(c, "sust: component mask %#x", (unsigned)bits(w, 20, 4)); return; }
+    if (type < 0) { fail(c, "sust: dimension %d", dim); return; }
+    if (off < IMAGE_HANDLES) { fail(c, "sust: image handle r%d not loaded from c[%d] at %#x", hr, HANDLE_CBUF, pc); return; }
+    int s = tex_slot(c, (uint32_t)off / 4, type, false, false);
+    c->info->tex[s].is_image = true;
+    int n = type == TEXTYPE_3D ? 3 : type == TEXTYPE_2D ? 2 : 1;
+    char co[160] = "", v[640] = "";
+    for (int i = 0; i < n; i++) sprintf(co + strlen(co), "%sint(%s)", i ? ", " : "", R(a == RZ ? RZ : a + i));
+    for (int i = 0; i < 4; i++) sprintf(v + strlen(v), "%s%s", i ? ", " : "", F(R(d == RZ ? RZ : d + i)));
+    // shortcut: the data goes out as float4, right for float / unorm images only; an integer image needs a uimage type
+    if (n == 1) sp(&c->body, "    imageStore(t%d, %s, float4(%s));\n", s, co, v);
+    else sp(&c->body, "    imageStore(t%d, int%d(%s), float4(%s));\n", s, n, co, v);
 }
 
 // ------------------------------------------------------------------ instruction translation
@@ -1960,6 +2021,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (!c->glsl) sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         else if (c->stage == STAGE_COMPUTE) sp(&c->body, "    barrier();\n");
         else sp(&c->body, "    /* bar */\n");  // GLSL barrier() is compute / tessellation only
+    } else if (OPM(0xeb20000000000000ull, 0xfff0000000000000ull)) {  // SUST.P
+        emit_sust(c, w, pc);
     } else {
         fail(c, "unknown instruction %016llx at %#x", (unsigned long long)w, pc);
     }
@@ -2380,6 +2443,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
+        if (t->is_image) {  // (stores only: no format qualifier, shaderStorageImageWriteWithoutFormat)
+            sp(&s, "layout(set = %d, binding = %d) uniform writeonly %s t%d;\n", set, 32 + i,
+               t->type == TEXTYPE_3D ? "image3D" : t->type == TEXTYPE_2D ? "image2D" : "image1D", i);
+            continue;
+        }
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
@@ -3250,6 +3318,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     c->smem_words = lmem_size((const uint64_t *)code, end, NULL, true);
     // collect branch targets (labels)
     uint8_t *label = calloc(end + 4, 1);
+    c->code = code, c->label = label;
     label[1] = 1;
     bool any_branch = false;
     for (size_t i = 0; i < end; i++) {

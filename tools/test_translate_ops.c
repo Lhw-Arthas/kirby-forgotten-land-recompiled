@@ -225,6 +225,32 @@ static int write_glsl(const char *dir) {
         }
         maxwell_free(s);
     }
+    {   // (compute, GLSL) SUST.P.3D through a bindless handle LDC loaded from c[2] (image 1: byte 0x128) becomes an
+        // imageStore on the image slot of that handle; a handle the code computes is refused, not guessed
+        uint64_t sust = 0xeb20000000000000ull | PT_GUARD | 0xFull << 20 | 5ull << 33 | 7ull << 39 | 4ull << 8 | 0;  // [R4..R6], R0..R3, handle R7
+        const Case ok = {.name = "SUST.P.3D, handle from c[2]", .insn = {mov32i(4, 1), ldc(7, 255, 2, 0x128, 4), mov32i(0, 0x3f800000), sust, 0}};
+        const Case no = {.name = "SUST.P.3D, computed handle", .insn = {mov32i(7, 0x128), sust, 0}};
+        uint64_t prog[16];
+        ShaderKey key = {0};
+        key.glsl = 1;
+        ShaderInfo *s = maxwell_translate((const uint8_t *)prog, (size_t)program(&ok, prog) * 8, STAGE_COMPUTE, &key);
+        fprintf(names, "%02d_comp %s\n", n + 1, ok.name);
+        if (!s->msl || !strstr(s->msl, "uniform writeonly image3D t0;") || !strstr(s->msl, "imageStore(t0, ivec3(") ||
+            s->ntex != 1 || !s->tex[0].is_image || s->tex[0].handle_offset != 0x128) {
+            printf("FAIL %s: %s\n", ok.name, s->msl ? "not an imageStore on the handle's image" : s->error);
+            bad++;
+        } else {
+            snprintf(path, sizeof path, "%s/%02d_comp.comp", dir, n + 1);
+            FILE *f = fopen(path, "w");
+            if (!f) { perror(path); return 2; }
+            fputs(s->msl, f);
+            fclose(f);
+        }
+        maxwell_free(s);
+        s = maxwell_translate((const uint8_t *)prog, (size_t)program(&no, prog) * 8, STAGE_COMPUTE, &key);
+        if (s->msl || !strstr(s->error, "image handle")) { printf("FAIL %s: %s\n", no.name, s->msl ? "translated" : s->error); bad++; }
+        maxwell_free(s);
+    }
     fclose(names);
     printf("%d cases x 3 stages written to %s, %d translation failures\n", n, dir, bad);
     return bad != 0;
