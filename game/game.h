@@ -12,7 +12,6 @@
 
 // The folders at the top of the game's RomFS: a folder holding all of them is the game's RomFS.
 #define GAME_ROMFS_MARKERS "msg", "gfx"
-#define GAME_ROMFS_FILES 9373  // the files in the game's RomFS (1.0.0): fewer is a copy that stopped partway
 
 // The program's modules in exefs, main first, then in load order, each at the game code's own address (rt.h
 // GUEST_CANON: the window may move). The Makefile's gen and the setup's generator read this list.

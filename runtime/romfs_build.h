@@ -39,8 +39,8 @@ void romfs_find_game(const char *dir, char *exefs, size_t exefs_size, char *romf
 // (runtime/setup_cli.c) takes either as the game's data. The search stops at the first of them.
 void romfs_find_game_image(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, char *image,
                            size_t image_size, bool *unusable);
-// Whether the file is a RomFS image the game can read: a plain RomFS (not IVFC), its tables inside the file, and the
-// game's files in it (GAME_ROMFS_FILES). false: why says what is wrong with it.
+// Whether the file is a RomFS image the game can read: a plain RomFS (not IVFC), its tables and every file's data
+// inside the file. false: why says what is wrong with it.
 bool romfs_image_ok(const char *path, char *why, size_t why_size);
 
 // Copies the folder tree src to dst (hard links where the file system allows: no second copy of 6 GB). progress as

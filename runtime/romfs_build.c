@@ -206,20 +206,27 @@ bool romfs_image_ok(const char *path, char *why, size_t why_size) {
             return false;
         }
     if (h[9] > size) { snprintf(why, why_size, "its data starts past its end (%llu bytes)", (unsigned long long)size); return false; }
-    // Files missing: the game reads a file whose open failed, without checking. The file table's entries: parent,
-    // sibling (u32), offset, size (u64), hash, name length (u32), name.
+    // Cut short: the game reads a file whose read failed, without checking. Every file's data must be inside the
+    // image. The file table's entries: parent, sibling (u32), offset, size (u64), hash, name length (u32), name.
     uint8_t *meta = malloc(h[8]);
     f = meta ? fopen(path, "rb") : NULL;
     bool got = f && fseeko(f, (off_t)h[7], SEEK_SET) == 0 && fread(meta, 1, h[8], f) == h[8];
     if (f) fclose(f);
-    int nfiles = 0;
-    for (uint64_t o = 0; got && o + 0x20 <= h[8]; nfiles++) {
-        uint32_t len;
-        memcpy(&len, meta + o + 0x1C, 4);
-        o += 0x20 + ((len + 3ull) & ~3ull);
+    uint64_t end = 0;
+    for (uint64_t o = 0; got && o + 0x20 <= h[8];) {
+        uint64_t off, len;
+        uint32_t name;
+        memcpy(&off, meta + o + 8, 8), memcpy(&len, meta + o + 0x10, 8), memcpy(&name, meta + o + 0x1C, 4);
+        if (off + len > end) end = off + len;
+        o += 0x20 + ((name + 3ull) & ~3ull);
     }
     free(meta);
-    if (got && nfiles < GAME_ROMFS_FILES) { snprintf(why, why_size, "only %d files: the game has %d", nfiles, GAME_ROMFS_FILES); return false; }
+    if (!got) { snprintf(why, why_size, "its file table can't be read"); return false; }
+    if (end > size - h[9]) {
+        snprintf(why, why_size, "its files end past its end (%llu of %llu bytes: cut short?)",
+                 (unsigned long long)size, (unsigned long long)(h[9] + end));
+        return false;
+    }
     return true;
 }
 

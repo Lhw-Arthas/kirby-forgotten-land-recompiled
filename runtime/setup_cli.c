@@ -169,8 +169,9 @@ static bool copy_exefs(const Found *f) {
 }
 #undef MOD
 
-// A RomFS that is not the whole game (a copy that stopped partway) or not readable is refused before the earlier setup is removed
-static bool romfs_complete(const Found *f) {
+// A RomFS that can't be read (a folder tree that can't be walked, an image cut short) is refused before the earlier
+// setup is removed. The search already found the folder by the game's marker folders.
+static bool romfs_readable(const Found *f) {
     char why[256] = "";
     if (!f->romfs[0]) {
         bool ok = romfs_image_ok(f->image, why, sizeof why);
@@ -179,7 +180,6 @@ static bool romfs_complete(const Found *f) {
     }
     RomfsLayout l;
     bool ok = romfs_layout(f->romfs, &l, why, sizeof why);
-    if (ok && l.nfiles < GAME_ROMFS_FILES) snprintf(why, sizeof why, "only %d files: the game has %d", l.nfiles, GAME_ROMFS_FILES), ok = false;
     romfs_layout_free(&l);
     if (!ok) LOG("[setup] %s: %s\n", f->romfs, why);
     return ok;
@@ -199,7 +199,7 @@ static int setup(bool rebuild_only) {
         LOG("[setup] %s: its main is not a version of the game this runtime supports\n", f.exefs);
         return VERSION;
     }
-    if (!romfs_complete(&f)) return BAD_IMAGE;
+    if (!romfs_readable(&f)) return BAD_IMAGE;
     mkdir(ROOT, 0755);
     if (!remove_setup()) return COPY;
     mkdir(ROOT, 0755);
