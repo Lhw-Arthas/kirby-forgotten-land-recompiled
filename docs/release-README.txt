@@ -14,6 +14,7 @@ NO GAME FILES ARE INCLUDED, and no game code: this zip holds only tools. You nee
 What you need
 -------------
 - Windows 10 or 11, 64-bit, and a graphics card with a Vulkan driver.
+- A CPU with AVX2 (Intel Haswell, 2013, or newer; AMD Excavator or Zen, or newer). The game code is built for it.
 - The Microsoft Edge WebView2 runtime, which the launcher window uses. Windows 11 has it. Most Windows 10 PCs have it
   too; if the launcher does not open, install it from https://developer.microsoft.com/microsoft-edge/webview2/
 - Free disk space: about 6.5 GB (see below), on top of this folder's 280 MB.
