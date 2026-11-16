@@ -1,0 +1,96 @@
+name: Build Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '可选：填写版本 tag（如 v1.0.0），留空则仅上传 artifact'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build Runtime (Windows / MSYS2)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    permissions:
+      contents: write   # 发 Release 需要
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            git
+            make
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-tools
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-vulkan-memory-allocator
+            mingw-w64-ucrt-x86_64-vulkan-validation-layers
+
+      - name: Cache pacman packages
+        uses: actions/cache@v4
+        with:
+          path: C:\msys64\var\cache\pacman\pkg
+          key: msys2-ucrt64-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: msys2-ucrt64-
+
+      - name: Build lasrecomp
+        run: |
+          make -j$(nproc) ../work/kfl/build/lasrecomp.exe
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+
+          if [ -f ../work/kfl/build/lasrecomp.exe ]; then
+            cp ../work/kfl/build/lasrecomp.exe dist/
+          else
+            find .. -name "lasrecomp.exe" -type f -exec cp {} dist/ \;
+          fi
+
+          if [ -f dist/lasrecomp.exe ]; then
+            ldd dist/lasrecomp.exe 2>/dev/null \
+              | grep '/ucrt64/bin/' \
+              | awk '{print $3}' \
+              | while read -r f; do cp "$f" dist/ 2>/dev/null || true; done
+          fi
+
+          echo "=== dist/ ==="
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lasrecomp-windows-ucrt64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Package zip
+        if: inputs.tag != ''
+        run: |
+          cd dist
+          zip -r ../lasrecomp-windows-ucrt64.zip .
+
+      - name: Create Release
+        if: inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          files: lasrecomp-windows-ucrt64.zip
+          generate_release_notes: true
+          draft: false
