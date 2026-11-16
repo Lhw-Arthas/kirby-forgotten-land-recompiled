@@ -64,6 +64,7 @@ suite_engine() {
     t settings 'python tools/test_settings.py'
     t pace 'python tools/test_pace.py'
     t led 'clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led.exe && build/test-led.exe'
+    t audio_fx 'clang -O2 tools/test_audio_fx.c -o build/test-audio-fx.exe && build/test-audio-fx.exe'
     t crash_explain 'clang -std=gnu11 -O1 tools/test_crash_explain.c -o build/test-crash-explain.exe && build/test-crash-explain.exe'
     # (GLSL only: the script's MSL comparison needs a reference commit; REF=HEAD satisfies it, the GLSL half is the check)
     t translate_glsl 'REF=HEAD tools/test_translate.sh 4000 "$(nproc)" glsl'
