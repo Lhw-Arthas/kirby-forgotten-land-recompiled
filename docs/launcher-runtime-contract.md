@@ -5,9 +5,9 @@ This page lists everything they rely on, so the runtime can change without break
 (program ids, folder names, file counts) come from `game/game.h`. The launcher keeps its own copy of them, checked by
 `tools/check_game_identity.py`.
 
-v0.2.0 implemented all of it in `runtime/main.c` (`setup_headless`) and `runtime/gamesetup.c`. The LAS engine has no
-headless setup (its setup lives in `runtime/ui/launcher.mm`), so the runtime side is rebuilt over LAS's
-`gamebuild_run`, `romfs_find_game` and `romfs_build`, and tested against this page and `tools/test_find_game.sh`.
+The runtime side is `runtime/setup_cli.c` (the commands), `runtime/romfs_build.c` (the search for the game's files, the
+copy and the RomFS checks) and `runtime/gamebuild.c` (the game code). The search is tested by
+`tools/test_find_game.sh`. When this page and `setup_cli.c` disagree, `setup_cli.c` is right and this page is the bug.
 
 ## Process rules for every command below
 
@@ -32,79 +32,99 @@ headless setup (its setup lives in `runtime/ui/launcher.mm`), so the runtime sid
 | `--setup <folder>` | `phase <name> <0..1> [(<slow file>, <n> min)]` lines, then `done` or `failed <reason>` | 0 for `done`, 1 for `failed` |
 | `--rebuild-code` | the same lines as `--setup` | the same |
 | `--prepare <folder>` | `progress <0..1> <text>` lines, ending with `progress 1 Ready` | 0, or the failure code of the table below |
-| `extracted --build-romfs` | none | 0 when `extracted/romfs.bin` is a good image (it returns at once if one exists), else 1 and `romfs image: <why>` on stderr |
+| `extracted --build-romfs` | none | 0 when `extracted` holds a RomFS (see `--status`), else 1 and `romfs image: no game RomFS (a romfs folder or a romfs.bin image) in extracted` on stderr |
 
-`--build-romfs` is used only by the launcher's developer mode, which builds from a source checkout.
+`--build-romfs` builds nothing: the game is served from the RomFS folder, so there is no image to write. It only checks
+that a RomFS is there, and only the launcher's developer mode runs it, to check the dump it linked as `extracted`.
 
 ### `--check <folder>`
 The setup's search and program id check, without copying. A folder holds the game when the search finds:
-- an `exefs` folder (any name, any depth up to the search limit) that holds `main` and `main.npdm`;
-- a RomFS: a folder holding every name of `GAME_ROMFS_MARKERS` (`msg` and `gfx`), or a `romfs.bin` image;
+- an `exefs` folder (any name) that holds `main` and `main.npdm`;
+- a RomFS: a folder holding every name of `GAME_ROMFS_MARKERS` (`msg` and `gfx`), or a `romfs.bin` image file;
 - a program id in `main.npdm` equal to `GAME_PROGRAM_ID`. The id is at `ACI0 + 0x10`, where the `ACI0` offset is the
   32-bit value at `META + 0x70`.
+
+The search looks in the picked folder and up to four levels below it (subfolders in name order, names that start with
+`.` skipped) and takes the first exefs, the first RomFS folder and the first `romfs.bin` it meets. It stops looking
+inside a folder that is itself the RomFS. It does not read the RomFS folder or the image: `--check` never answers
+`bad_image`.
 
 Reasons, in the order they are decided:
 
 | Reason | When |
 |---|---|
 | `not_found` | no exefs, or neither a RomFS folder nor a `romfs.bin`. Also when the exefs found is inside the data root's own `extracted` folder |
-| `package` | as `not_found`, and the search met a `.xci`, `.nsp`, `.nca`, `.nsz` or `.xcz` file |
-| `update` | the program id is the update's: `GAME_PROGRAM_ID + 0x800` (`01004D300C5AE800`). `game/game.h` has no define for it yet, so the engine side adds one |
+| `package` | as `not_found` (without the extracted-folder case), and the search met a `.xci`, `.nsp`, `.nca`, `.nsz` or `.xcz` file |
+| `update` | the program id is the update's: `GAME_UPDATE_PROGRAM_ID` in `game/game.h` (`GAME_PROGRAM_ID + 0x800`, `01004D300C5AE800`) |
 | `version` | any other program id, or an unreadable `main.npdm` |
 
-`update` is new in 0.3.0. `tools/test_find_game.sh` has a case for it (a `main.npdm` with `...E800`).
+`tools/test_find_game.sh` has a case for `update` (a `main.npdm` with `...E800`).
 The launcher and `--setup` must use one search, so they cannot disagree about a folder (0.2.0 fixed exactly that).
+`--check` looks at the program id only: a folder with the base game's id but a version this release does not support
+passes it, and `--setup` then answers `version` (see below).
 
 ### `--status`
 What is set up in the data root:
-- `ready`: `extracted/exefs` has the game's program id, `extracted/romfs.bin` is a readable image
-  (`romfs_image_ok`), and `extracted/lasgame.dll` exists with a `lasgame.dll.id` equal to this runtime's id for it
+- `ready`: `extracted/exefs` has the game's program id; the RomFS is set up, meaning `extracted/romfs` is the game's
+  RomFS (it holds the `GAME_ROMFS_MARKERS` folders `msg` and `gfx`) or `extracted/romfs.bin` is a readable image
+  (`romfs_image_ok`); and `extracted/lasgame.dll` exists with a `lasgame.dll.id` equal to this runtime's id for it
   (the library id and the game's build id, `gamelib_full_id`).
-- `build`: the same exefs and image, but the library is missing or its id differs. The game code needs building again
+- `build`: the same exefs and RomFS, but the library is missing or its id differs. The game code needs building again
   from the files already in `extracted` (a new version unzipped over an old folder). `--rebuild-code` does it.
 - `none`: anything else.
 
-The launcher runs it once per change of these four files' modification times: the runtime exe, `extracted/lasgame.dll`,
-`extracted/lasgame.dll.id` and `extracted/romfs.bin`. So the setup must write `lasgame.dll.id` last, after
-`lasgame.dll`.
+The launcher runs it once per change of the modification times of what it reads: the runtime exe,
+`extracted/lasgame.dll`, `extracted/lasgame.dll.id`, the folder `extracted/romfs` and `extracted/romfs.bin`. So the
+setup must write `lasgame.dll.id` last, after `lasgame.dll`.
 
 ### `--setup <folder>` and `--rebuild-code`
-`--setup` finds the game as `--check` does, replaces everything in `<data root>/extracted` that the setup made
-(never the folder the player picked, never a link, nothing outside `<data root>/extracted`), copies `exefs`, copies or
-builds `romfs.bin`, checks the image, then builds the game code. Hard links are used where the file system allows.
-Killing it at any point is safe: the next run starts over. `--rebuild-code` does only the last step, from the files in
-`extracted` (no folder argument; it reads the exefs there).
+`--setup` finds the game as `--check` does. Before it removes anything it refuses a `main` whose build id is not a
+supported version's (`version`: the supported one is 1.0.0), and a RomFS it cannot read (`bad_image`). Then it replaces
+what an earlier setup made in `<data root>/extracted` (`exefs`, `romfs`, `romfs.bin`, the library and its id; never the
+folder the player picked, never a link, nothing outside `<data root>/extracted`, and not `.gamebuild`), copies `exefs`,
+sets up the RomFS and builds the game code. The RomFS is set up in one of two ways:
+- the picked folder is copied into `extracted/romfs/`, file by file;
+- when the search found a `romfs.bin` image and no RomFS folder, that one file is copied to `extracted/romfs.bin` and no
+  `extracted/romfs/` is made.
 
-Phase names in `phase` lines, the fraction of the whole setup (copying and the image are the first 15%):
+Both use a hard link where the file system allows (the same NTFS volume), else a copy, so on the same drive the game's
+data takes no extra space and on another drive about 6 GB. No image is ever built.
+Killing it at any point is safe: the next run starts over, and the build reuses what `.gamebuild` still holds (a
+cancelled build resumes, an update compiles only the files that changed). `--rebuild-code` does only the build, from
+the files in `extracted` (no folder argument; it reads the exefs there, and answers `not_found` when `--status` would
+say `none`).
+
+Phase names in `phase` lines, the fraction of the whole setup (copying is the first 15%, the build the rest):
 
 | Name | Meaning | Fraction |
 |---|---|---|
 | `looking` | searching the folder | 0 |
-| `copying` | copying exefs and the image | up to 0.15 |
-| `image` | building `romfs.bin` from a RomFS folder | up to 0.15 |
-| `reading` | the generator is lifting the NSOs | from 0.15 |
-| `compiling` | compiling the game code | to 0.99 |
-| `finishing` | linking | 0.99 and over |
+| `copying` | copying exefs and the RomFS | 0 to 0.15 (progress by bytes while a folder is copied) |
+| `reading` | the build is preparing, checking its earlier work, and the generator is lifting the NSOs | from 0.15 |
+| `compiling` | compiling the game code (`Recompiling...`, or `Resuming compilation...` after a cancelled build) | up to 1 |
+| `finishing` | linking (`Finishing...`) | about 0.96 and over |
 
-A line is printed only when the phase, the fraction (in thousandths) or the step text changed. A step text ends with
-`(<file>, <n> min)` once one file has taken more than a minute (the file the compiler has been on longest), and the
-launcher shows that text as it is. The compiler's step texts begin `Reading`, `Compiling` or `Finishing`.
-`--rebuild-code` starts at `reading`.
+A line is printed only when the phase, the fraction (in thousandths) or the slow-file text changed. The slow-file text
+is `(<file>, <n> min)`, added once one file has taken more than a minute (the file the compiler has been on longest),
+and the launcher shows it as it is. The phase comes from the build's step text: one that begins `Finishing` is
+`finishing`, `Recompiling` or `Resuming` is `compiling`, anything else `reading`. `--rebuild-code` starts at `reading`.
 
 Failure reasons after `failed`: the `--check` ones, and
 
 | Reason | Meaning |
 |---|---|
-| `copy` | the files could not be copied (disk full, unreadable) |
+| `version` | also here: the exefs has the game's program id, but its `main` is not a supported version's NSO (`game_release_label`) |
+| `bad_image` | the picked RomFS cannot be read: a folder whose tree cannot be walked, or a `romfs.bin` that is not a plain RomFS (an IVFC image, say) or is cut short (a file's data ends past the end of the image). There is no count of the files |
+| `copy` | the files could not be copied (disk full, unreadable), or the earlier setup could not be removed |
 | `build` | the game code did not build (or the build left no usable library) |
 | `tools` | the generator or the compiler is missing from this install |
-| `bad_image` | the `romfs.bin` (the picked one or the built one) is not a RomFS the game can read |
 
 ### `--prepare <folder>` (RecompLauncher)
-The same setup as `--setup`, with the output RecompLauncher parses: `progress <0..1> <text>` where the text is the step
-text, or one of `Looking for the game files`, `Copying the game files`, `Writing the game data image`,
-`Reading the game code`, `Compiling the game code`, `Finishing`. Success ends with `progress 1 Ready` and exit 0.
-A failure exits with its code and prints nothing more:
+The same setup as `--setup`, with the output RecompLauncher parses: `progress <0..1> <text>` where the text is one of
+`Looking for the game files`, `Copying the game files`, `Reading the game code`, `Compiling the game code` and
+`Finishing`, followed by the slow-file text `(<file>, <n> min)` when there is one. Success ends with `progress 1 Ready`
+and exit 0. Without `LARECOMP_DATA_ROOT` the data root is the folder of the exe, wherever it was started from, and the
+folder argument is resolved before the working directory changes. A failure exits with its code and prints nothing more:
 
 | Code | Reason | Code | Reason |
 |---|---|---|---|
@@ -113,8 +133,8 @@ A failure exits with its code and prints nothing more:
 | 10 | `version` | 14 | `bad_image` |
 | 11 | `copy` | 15 | `update` |
 
-The codes are the setup's enum values (`SETUP_FAIL_NOT_FOUND` = 8 in order). `recomplauncher.json` `exit_codes` words
-each one for the player: it must have all eight.
+The codes are the enum in `runtime/setup_cli.c` (`NOT_FOUND` = 8, in the order of this table). `recomplauncher.json`
+`exit_codes` words each one for the player: it must have all eight.
 
 ## A game run
 Both launchers start `ForgottenLandRecomp.exe extracted --play` (RecompLauncher adds nothing; the Tauri launcher
@@ -149,9 +169,10 @@ In the data root (the install folder):
 | Path | Who | What |
 |---|---|---|
 | `extracted\exefs\` | setup | `main`, `main.npdm`, `sdk`, `subsdk0`, and `rtld` when the dump has it |
-| `extracted\romfs.bin` | setup | the game's data as one image, about 6 GB |
+| `extracted\romfs\` | setup | the game's RomFS folder (`msg`, `gfx` and the rest), about 6 GB: hard links to the picked folder's files where possible |
+| `extracted\romfs.bin` | setup | only when the player picked a `romfs.bin` image instead of a RomFS folder: that file (a hard link or a copy), about 6 GB |
 | `extracted\lasgame.dll`, `extracted\lasgame.dll.id` | setup | the game code and the id `--status` compares |
-| `extracted\.gamebuild\` | setup | the generated C and the compiler's files, deleted when the build ends |
+| `extracted\.gamebuild\` | setup | the generated C and the compiler's files. Kept after the build, so the next one compiles only what changed and a cancelled one resumes; `--setup` does not remove it |
 | `larecomp.ini` | runtime, launcher | settings, `key = value` lines (`SETTINGS_FILE` in `runtime/settings.c`) |
 | `save\` | runtime | saves (`save\save_0\file0` and the rest) |
 | `cache\` | runtime | shader and pipeline caches |
@@ -160,7 +181,8 @@ In the data root (the install folder):
 | `crash-*.log` | launcher | copies of `game.log` after crashes |
 | `game-folder.txt` | launcher | the folder the player picked, until the build reads it |
 
-The setup only ever deletes entries it made in `extracted` (the list `rt_remove_game_files` holds) and refuses when
+The setup only ever deletes entries it made in `extracted` (`--setup` removes `exefs`, `romfs`, `romfs.bin`, the library
+and its id, by `rt_remove_game_file`, which refuses any name outside its list in `runtime/paths.c`) and refuses when
 `extracted` is a link or not `<data root>\extracted`. The launcher's developer mode links `extracted` to the player's
 dump on purpose, so a runtime started by it must never run `--setup`.
 
@@ -182,7 +204,9 @@ tool when it is absent):
 
 The launcher's own copy of the game's values: `PROGRAM_ID` and `UPDATE_ID` (program ids), `MODULES` (`main`, `sdk`,
 `subsdk0`: the exefs files its developer-mode check requires), the RomFS marker folders `msg` and `gfx`, the
-runtime's file name, `BUILD_BYTES` (6.5 GB free disk before a build) and `CODE_BYTES` (1 GB, a code-only rebuild).
+runtime's file name, `BUILD_BYTES` (6.5 GB free disk before a build: the worst case, the game's files copied to the drive; the launcher
+cannot tell beforehand whether they will be hard-linked, which costs none of it) and `CODE_BYTES` (1 GB, a code-only
+rebuild).
 `MAX_WORK_PATH` is 200 characters, measured with the bundled zig: the build adds about 45 below the install folder and
 Windows stops at 260.
 
@@ -194,7 +218,7 @@ the repo>`:
 
 ```
 make WORK=<w> -j<n> <w>/build/ForgottenLandRecomp.exe
-<work>\build\ForgottenLandRecomp.exe extracted --build-romfs        (cwd <work>)
+<work>\build\ForgottenLandRecomp.exe extracted --build-romfs        (cwd <work>; only checks the dump has a RomFS)
 make WORK=<w> gen
 make WORK=<w> -j<n>
 ```
