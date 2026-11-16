@@ -565,7 +565,10 @@ def main():
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
             if imm & (1 << 20):
                 imm -= 1 << 21
-            if m.in_text(pc + imm):
+            # (not a jump table's base: `adr xN, base ; ldrb/ldrh ; add xN, xN, idx, lsl #2 ; ... ; br xN` stays inside
+            # its function, which the table solver below needs whole)
+            table_base = any(m.words[j] == 0xD61F0000 | (w & 31) << 5 for j in range(i + 1, min(i + 9, len(m.words))))
+            if m.in_text(pc + imm) and not table_base:
                 start_set.add(pc + imm)
         elif (w & 0x9F000000) == 0x90000000:  # ADRP
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
