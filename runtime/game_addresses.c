@@ -8,7 +8,7 @@
 #include "rt.h"
 
 #define GA_ADDR(name, value) .name = UINT64_C(value),
-__attribute__((unused)) static const GameAddrs ga_v1_0_0 = {  // (unused while versions.h lists none)
+static const GameAddrs ga_v1_0_0 = {
 #include "game_addresses/patches_v1_0_0.h"
 #include "game_addresses/runtime_v1_0_0.h"
 };

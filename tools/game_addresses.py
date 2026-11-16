@@ -27,9 +27,7 @@ def load_table(path):
         if not match or match[1] in values:
             raise ValueError(f'Invalid or duplicate game-address definition: {line}')
         values[match[1]] = int(match[2], 16)
-    if not values:
-        raise ValueError('Empty game-address table')
-    return values
+    return values  # (empty: a game with no patch sites)
 
 
 def load_versions(path):
