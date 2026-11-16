@@ -715,11 +715,44 @@ static void host_test_frame(uint64_t frame) {
     }
 }
 
+// Script entries "@<event>+<N>:<button>:<len>" count from the first event whose name contains <event>: a movie the
+// game opened ("GuideMovie/Jump") or a RomFS file it read (input_event). A load takes a different number of frames
+// from run to run, so an entry anchored after it lands at the same moment of play. The events split the script into
+// parts in the order they first appear in it: once one has happened, the entries before it (the plain frame numbers,
+// the earlier events' entries) stop, so a part can keep trying something until the game shows it worked.
+static struct { char name[64]; _Atomic long frame; } g_anchor[32];
+static int g_nanchor;
+static _Atomic uint64_t g_last_frame;
+static pthread_once_t g_anchor_once = PTHREAD_ONCE_INIT;
+static void anchors_parse(void) {
+    for (const char *p = getenv("LARECOMP_INPUT"); p && (p = strchr(p, '@')) && g_nanchor < 32; p++) {
+        char nm[64];
+        if (sscanf(p, "@%63[^+,]+", nm) != 1) continue;
+        int i = 0;
+        while (i < g_nanchor && strcmp(g_anchor[i].name, nm)) i++;
+        if (i == g_nanchor) { snprintf(g_anchor[i].name, sizeof g_anchor[i].name, "%s", nm); g_anchor[i].frame = -1; g_nanchor++; }
+    }
+}
+static int anchor_index(const char *nm) {
+    for (int i = 0; i < g_nanchor; i++) if (!strcmp(g_anchor[i].name, nm)) return i;
+    return -1;
+}
+void input_event(const char *what) {
+    pthread_once(&g_anchor_once, anchors_parse);
+    for (int i = 0; i < g_nanchor; i++)
+        if (g_anchor[i].frame < 0 && strstr(what, g_anchor[i].name)) {
+            g_anchor[i].frame = (long)g_last_frame;
+            LOG("[input] anchor @%s at frame %ld (%s)\n", g_anchor[i].name, (long)g_last_frame, what);
+        }
+}
+
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip the opening on rando seeds)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
 void input_frame(uint64_t frame) {
     atomic_store(&rumble_frame_ms, SDL_GetTicks());
+    g_last_frame = frame;
+    pthread_once(&g_anchor_once, anchors_parse);
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
@@ -744,11 +777,22 @@ void input_frame(uint64_t frame) {
     int32_t lx = 0, ly = 0, rx = 0, ry = 0;
     static char buf[16384];  // (long scripted sessions: the perf walk is ~4 KB)
     snprintf(buf, sizeof buf, "%s", spec);
+    int part = -1;  // the latest event of the script that has happened
+    for (int i = 0; i < g_nanchor; i++) if (g_anchor[i].frame >= 0) part = i;
     for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
         unsigned long start = 0, len = 10;
-        char name[32] = "";
-        if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
-        if (frame < start || frame >= start + len) continue;
+        char name[32] = "", an[64];
+        if (*tok == '@') {
+            int i;
+            if (sscanf(tok, "@%63[^+]+%lu:%31[A-Z_0-9]:%lu", an, &start, name, &len) < 3 || (i = anchor_index(an)) < 0 || i != part)
+                continue;
+            if (frame < start + g_anchor[i].frame || frame >= start + g_anchor[i].frame + len) continue;
+        } else if (part >= 0) {
+            continue;
+        } else {
+            if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
+            if (frame < start || frame >= start + len) continue;
+        }
         if (!strcmp(name, "STICK_UP")) ly = 32767;
         else if (!strcmp(name, "STICK_DOWN")) ly = -32767;
         else if (!strcmp(name, "STICK_LEFT")) lx = -32767;
