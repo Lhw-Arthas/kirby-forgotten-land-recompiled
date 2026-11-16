@@ -419,6 +419,11 @@ impl App {
         let game = self.game();
         [self.exe(), self.lib(), id, game.join("romfs"), game.join("romfs.bin")].map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
     }
+    /// Only the game code is built again when the RomFS set up is a folder: an older version's romfs.bin can't serve
+    /// the game's movies, so that install is set up again from the folder picked (its compiled objects are reused).
+    fn code_only(&self, asked: bool) -> bool {
+        asked && matches!(self.mode, Mode::Packaged) && self.game().join("romfs").is_dir()
+    }
     /// The runtime's verdict. It runs a process, so the answer is kept until one of the files it reads changes.
     fn code(&self) -> Code {
         if self.work_problem.is_some() {
@@ -710,7 +715,7 @@ fn wait_step(app: &App) -> Result<(), String> {
 #[tauri::command]
 fn start_setup(app: St, code_only: Option<bool>) -> Result<(), String> {
     // only the game code, from the game files set up already: no folder to pick, none needed
-    let code_only = code_only.unwrap_or(false) && matches!(app.mode, Mode::Packaged);
+    let code_only = app.code_only(code_only.unwrap_or(false));
     let game = if code_only { None } else { Some(app.game_source().ok_or("Select your game folder first.")?) };
     if let (Mode::Dev(_), Some(game)) = (&app.mode, &game) {
         check_game(game)?;
@@ -990,6 +995,20 @@ mod tests {
         fs::remove_dir(root.join("extracted").join("romfs")).unwrap();
         fs::remove_file(root.join("extracted").join("romfs.bin")).unwrap();
         assert_eq!(app.stamp(), none);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_older_versions_romfs_image_is_set_up_again_not_only_rebuilt() {
+        let root = scratch("codeonly");
+        let mut app = app("", root.to_str().unwrap());
+        app.mode = Mode::Packaged;
+        fs::create_dir_all(root.join("extracted")).unwrap();
+        fs::write(root.join("extracted").join("romfs.bin"), "x").unwrap();
+        assert!(!app.code_only(true), "0.2.0's romfs.bin: the movies need the folder");
+        fs::create_dir_all(root.join("extracted").join("romfs")).unwrap();
+        assert!(app.code_only(true));
+        assert!(!app.code_only(false));
         fs::remove_dir_all(&root).unwrap();
     }
 
