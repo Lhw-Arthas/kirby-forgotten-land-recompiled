@@ -346,9 +346,9 @@ void rt_paths_init(void) {
         while (pointer_root(g_home, ptr, sizeof ptr)) {  // another folder chosen on the start screen
             if (ptr[0] && is_dir(ptr) && writable(ptr)) { snprintf(root, sizeof root, "%s", ptr); break; }
             char msg[1400];
-            if (!ptr[0]) snprintf(msg, sizeof msg, "LAS Recomp's data folder isn't available any more.\n\nIf it's on a "
+            if (!ptr[0]) snprintf(msg, sizeof msg, GAME_NAME "'s data folder isn't available any more.\n\nIf it's on a "
                                   "drive that isn't connected, connect it and try again.");  // (iOS: no path to show)
-            else snprintf(msg, sizeof msg, "LAS Recomp's data folder isn't available:\n%s\n\nIf it's on a drive that isn't "
+            else snprintf(msg, sizeof msg, GAME_NAME "'s data folder isn't available:\n%s\n\nIf it's on a drive that isn't "
                           "connected, connect it and try again.", ptr);
             const SDL_MessageBoxButtonData b[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Try again"},
                                                   {0, 1, "Use the default folder"},
@@ -368,11 +368,11 @@ void rt_paths_init(void) {
     char msg[1400];
     if (!is_dir(root) || !writable(root) || chdir(root) != 0) {
 #ifdef _WIN32
-        snprintf(msg, sizeof msg, "LAS Recomp can't write to its folder:\n%s\n\nIt keeps game files, saves and seeds "
-                 "next to the program. Move the \"LAS Recomp\" folder somewhere you can write to (e.g. Documents or "
+        snprintf(msg, sizeof msg, GAME_NAME " can't write to its folder:\n%s\n\nIt keeps game files, saves and settings "
+                 "next to the program. Move the \"" GAME_NAME "\" folder somewhere you can write to (e.g. Documents or "
                  "Desktop, not Program Files) and start it again.", root);
 #else
-        snprintf(msg, sizeof msg, "LAS Recomp can't write to its data folder:\n%s", root);
+        snprintf(msg, sizeof msg, GAME_NAME " can't write to its data folder:\n%s", root);
 #endif
         fail(msg);
     }

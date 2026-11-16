@@ -359,7 +359,7 @@ bool gamebuild_available(void) {
 
 ZipReader *gamebuild_ios_kit_open(const char *kit, char *why, size_t why_size) {
     Tools t;
-    if (!find_tools(&t) || !t.zig) { snprintf(why, why_size, "the game code builder is missing from this copy of LAS Recomp"); return NULL; }
+    if (!find_tools(&t) || !t.zig) { snprintf(why, why_size, "the game code builder is missing from this copy of " GAME_NAME); return NULL; }
     if (!kit || !*kit) { snprintf(why, why_size, "choose the iOS kit (.laskit) of this release"); return NULL; }
     struct stat st;
     if (stat(kit, &st) != 0) { snprintf(why, why_size, "the iOS kit isn't there any more: %s", kit); return NULL; }
@@ -448,7 +448,7 @@ static bool unpack_kit(ZipReader *z, char *dir, size_t dir_size, void (*progress
 
 // the tools taken out of the kit (gamebuild_ios_kit_open's)
 static bool find_ios_tools(Tools *t, ZipReader *kit, void (*progress)(double, const char *), char *why, size_t why_size) {
-    if (!find_tools(t) || !t->zig) { snprintf(why, why_size, "the game code builder is missing from this copy of LAS Recomp"); return false; }
+    if (!find_tools(t) || !t->zig) { snprintf(why, why_size, "the game code builder is missing from this copy of " GAME_NAME); return false; }
     t->ios = true;
     if (!kit) { snprintf(why, why_size, "no iOS kit"); return false; }
     char dir[1100];

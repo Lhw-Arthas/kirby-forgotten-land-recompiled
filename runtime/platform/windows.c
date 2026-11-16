@@ -537,7 +537,7 @@ static void require_cpu(void) {
 #else
     __builtin_cpu_init();
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    MessageBoxA(NULL, "LAS Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
+    MessageBoxA(NULL, GAME_NAME " needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
                 GAME_NAME, MB_ICONERROR | MB_OK);
     ExitProcess(1);
 #endif
