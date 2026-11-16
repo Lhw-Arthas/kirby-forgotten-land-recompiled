@@ -60,6 +60,7 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 66: case 900: break;  // SetCpuBoostMode(u32), SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled: no output
     case 60: {  // GetDefaultDisplayResolution
         int w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;
         LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);
@@ -74,6 +75,10 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 0: LOG("[am] application requested exit\n"); exit(0);
     case 9: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    // LockExit, SetPerformanceModeChangedNotification, SetFocusHandlingMode, SetRestartMessageEnabled,
+    // SetOutOfFocusSuspendingEnabled, SetIdleTimeDetectionExtension: settings with no output
+    case 1: case 12: case 13: case 14: case 16: case 62: break;
+    case 91: resp->copy_handles[resp->ncopy++] = new_event(); break;  // GetAccumulatedSuspendedTickChangedEvent
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
     default: UNHANDLED("ISelfController");
@@ -84,6 +89,7 @@ static void window_controller(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 1: OUT(uint64_t, 0) = 0x1234; resp_size(resp, 8); break;  // GetAppletResourceUserId
+    case 10: break;  // AcquireForegroundRights: no output
     default: UNHANDLED("IWindowController");
     }
 }
@@ -160,6 +166,7 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
     }
     case 23: memcpy(resp->data, "1.0.0", 6); resp_size(resp, 0x10); break;
     case 40: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // NotifyRunning
+    case 111: OUT(int32_t, 0) = 0; resp_size(resp, 4); break;  // QueryApplicationPlayStatisticsByUid: no entries
     case 130: case 140: resp->copy_handles[resp->ncopy++] = new_event(); break;
     default: UNHANDLED("IApplicationFunctions");
     }
