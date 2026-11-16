@@ -78,7 +78,7 @@ def wav_tail_rms(path, seconds=5.0):
 
 def check(stage, log_path, shot, wav, hold):
     rec = {'stage': stage, 'reached': False, 'load_frame': None, 'last_frame': 0, 'fatal': None, 'missing_fn': 0,
-           'translate_failed': 0, 'hang': False, 'skipped_after_hold': 0, 'held_frames': 0, 'noted': {}}
+           'translate_failed': 0, 'hang': False, 'timed_out': False, 'skipped_after_hold': 0, 'held_frames': 0, 'noted': {}}
     stats = []
     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
@@ -98,6 +98,8 @@ def check(stage, log_path, shot, wav, hold):
                 rec['translate_failed'] += 1
             if line.startswith('[hang]'):
                 rec['hang'] = True
+            if line.startswith('[tour] killed'):
+                rec['timed_out'] = True
             for key in NOTED:
                 if key in line:
                     k = re.sub(r'\(.*|->.*|x0=.*', '', line.strip()).strip()[:90]
@@ -114,6 +116,7 @@ def check(stage, log_path, shot, wav, hold):
     if rec['missing_fn']: why.append('missing function')
     if rec['translate_failed']: why.append('translate failed')
     if rec['hang']: why.append('hang')
+    if rec['timed_out']: why.append('timed out')
     if rec['reached'] and rec['held_frames'] < hold: why.append('held %d of %d frames' % (rec['held_frames'], hold))
     if rec['skipped_after_hold']: why.append('skipped draws')
     if rec['luma'] is None: why.append('no capture')
