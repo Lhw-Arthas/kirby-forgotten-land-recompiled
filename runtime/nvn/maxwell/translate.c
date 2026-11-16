@@ -2615,6 +2615,10 @@ static int64_t brx_table_ldc(const uint8_t *code, size_t i, size_t end, size_t *
         if (k % 4 == 0) continue;  // (scheduling words)
         seen++;
         uint64_t w = ((const uint64_t *)code)[k];
+        if ((w & 0xfff0000000000020ull) == 0xe240000000000000ull) {  // a BRA forward within (k, i]: both paths stay in
+            int64_t t = norm_target((int64_t)k * 8 + 8 + sbits(w, 20, 24));  // the window the walk checks
+            if (t > (int64_t)k * 8 && t <= (int64_t)i * 8) continue;
+        }
         if ((w & 0xfff0000000000000ull) >= 0xe200000000000000ull && (w & 0xfff0000000000000ull) <= 0xe350000000000000ull)
             return -1;  // flow control between: not straight-line
         if ((w & 0xfff8000000000000ull) == 0xef90000000000000ull && (int)bits(w, 0, 8) == ra) {  // LDC ra, c[idx][Rx + off]
@@ -2634,6 +2638,7 @@ static int64_t brx_table_ldc(const uint8_t *code, size_t i, size_t end, size_t *
                            (w & 0xfff0000000000020ull) != 0xe2a0000000000000ull && (w & 0xfff0000000000020ull) != 0xe2b0000000000000ull))
             continue;
         int64_t t = norm_target((int64_t)k * 8 + 8 + sbits(w, 20, 24));
+        if (k > from && k < i) continue;  // (a forward BRA inside the window: the walk allowed it)
         if (t > (int64_t)from * 8 && t <= (int64_t)i * 8) return -1;
     }
     *from_out = from;

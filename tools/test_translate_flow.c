@@ -35,11 +35,15 @@ static uint64_t bra(uint32_t at, uint32_t target, int pred, bool neg) {
     return 0xe24ull << 52 | (uint64_t)((target - at - 8) & 0xffffff) << 20 | (neg ? 1ull << 19 : 0) | (uint64_t)pred << 16 | 0xf;
 }
 static uint64_t exit_(void) { return 0xe30ull << 52 | 7ull << 16 | 0xf; }
+// LDC Rd, c[1][RZ + off] (32-bit); BRX Ra (to pc + 8 + Ra); @P MOV32I Rd, v
+static uint64_t ldc_c1(int rd, uint32_t off) { return 0xef9ull << 52 | 4ull << 48 | 1ull << 36 | (uint64_t)off << 20 | 7ull << 16 | (uint64_t)RZ << 8 | (uint64_t)rd; }
+static uint64_t brx(int ra) { return 0xe25ull << 52 | 7ull << 16 | (uint64_t)ra << 8 | 0xf; }
+static uint64_t mov32i_if(int pred, int rd, uint32_t v) { return 0x010ull << 52 | (uint64_t)v << 20 | (uint64_t)pred << 16 | 0xfull << 12 | (uint64_t)rd; }
 
 typedef struct {
     const char *name;
-    uint64_t code[16];  // from code address 0; scheduling words (0x00, 0x20, ...) are 0, gaps NOP
-    bool used[16];
+    uint64_t code[64];  // from code address 0; scheduling words (0x00, 0x20, ...) are 0, gaps NOP
+    bool used[64];
 } Case;
 
 static void put(Case *c, uint32_t at, uint64_t w) { c->code[at / 8] = w, c->used[at / 8] = true; }
@@ -76,22 +80,35 @@ static int cases(Case *cs) {
         put(c, 0x68, exit_());
         put(c, 0x70, bra(0x70, 0x70, 7, false));
     }
+    {   // a BRX through a jump table (cb1, entry 0: to the next instruction) loaded 40 instructions before it, with a
+        // forward @P0 BRA in between that lands before the BRX: the table is still read, so the program is structured
+        Case *c = &cs[n++];
+        *c = (Case){.name = "BRX through a cb1 table, a forward BRA between the LDC and the BRX"};
+        prologue(c);
+        put(c, 0x38, ldc_c1(4, 0));
+        put(c, 0x48, bra(0x48, 0x1d8, 0, false));
+        put(c, 0x50, mov32i(5, 0));
+        put(c, 0x1d8, brx(4));
+        put(c, 0x1e8, mov32i_if(0, 0, ONE));
+        put(c, 0x1f0, exit_());
+        put(c, 0x1f8, bra(0x1f8, 0x1f8, 7, false));
+    }
     return n;
 }
 
 // The shader blob: the 0x30-byte prefix our translator expects, the 0x50-byte program header (fragment, color target
 // 0 written from R0..R3) and the code
-static size_t blob(const Case *c, uint8_t out[0x80 + 128]) {
-    memset(out, 0, 0x80 + 128);
+static size_t blob(const Case *c, uint8_t out[0x80 + 512 + 1024]) {
+    memset(out, 0, 0x80 + 512 + 1024);  // (after the code: its constants, cb1, all zero: the jump table entries are 0)
     uint32_t h[20] = {0};
     h[0] = 2 | 3 << 5 | 5 << 10 | 3 << 17;
     h[18] = 0xf;
     memcpy(out + 0x30, h, sizeof h);
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 64; i++) {
         uint64_t w = c->used[i] ? c->code[i] : i % 4 == 0 ? 0 : NOP;
         memcpy(out + 0x80 + i * 8, &w, 8);
     }
-    return 0x80 + 128;
+    return 0x80 + 512;
 }
 
 static const char prelude[] =
@@ -100,7 +117,7 @@ static const char prelude[] =
     "template <class T, class U> static T as_type(U u) { static_assert(sizeof(T) == sizeof(U), \"size\"); T t; memcpy(&t, &u, sizeof t); return t; }\n"
     "static float as_f(uint u) { return as_type<float>(u); }\n"
     "struct u4 { uint v[4]; uint operator[](int i) const { return v[i]; } };\n"
-    "static u4 cb3[1];\n"
+    "static u4 cb1[1], cb3[1];\n"
     "static int fails;\n"
     "static void check(const char *name, float c, uint got, uint want) {\n"
     "    if (got != want) { printf(\"FAIL %s, c[3][0] = %g: R0 = 0x%08x, want 0x%08x\\n\", name, c, got, want); fails++; }\n"
@@ -118,7 +135,7 @@ int main(int argc, char **argv) {
     Case cs[8];
     int n = cases(cs), bad = 0;
     for (int i = 0; i < n; i++) {
-        uint8_t b[0x80 + 128];
+        uint8_t b[0x80 + 512 + 1024];
         size_t len = blob(&cs[i], b);
         ShaderKey key = {0};
         key.glsl = glsl;
