@@ -517,6 +517,10 @@ def main():
     ap.add_argument('--chunk', type=int, default=1500)  # functions per file at most
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
+    # bytes of C from which a function is compiled without optimization (optnone): the compiler's time on one function
+    # grows much faster than its size (zig -O1: 4 minutes for 210 KB of C, 9 for 14 MB; optnone: 8 seconds and 45). Not
+    # lower: the functions the game calls most are 100-190 KB (at 100 KB the game used 10-15% more CPU in a noisy test)
+    ap.add_argument('--huge-fn', type=int, default=200000)
     ap.add_argument('--new-chunk-bounds', action='store_true',
                     help='cut the files by size and save the cuts for this module build (tools/chunk_bounds.py)')
     ap.add_argument('--limit', type=int, default=0)
@@ -612,6 +616,8 @@ def main():
     def render(a):
         end, labels, tables = entries[a]
         lines = m.emit_function(a, end, labels, tables, hle)
+        if sum(len(l) + 1 for l in lines) > args.huge_fn:
+            lines[0] = '__attribute__((optnone, noinline)) ' + lines[0]
         r = getattr(m, '_refs', set())
         m._refs = set()
         return a, lines, r
