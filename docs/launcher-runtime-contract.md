@@ -42,7 +42,8 @@ The setup's search and program id check, without copying. A folder holds the gam
 - an `exefs` folder (any name) that holds `main` and `main.npdm`;
 - a RomFS: a folder holding every name of `GAME_ROMFS_MARKERS` (`msg` and `gfx`), or a `romfs.bin` image file;
 - a program id in `main.npdm` equal to `GAME_PROGRAM_ID`. The id is at `ACI0 + 0x10`, where the `ACI0` offset is the
-  32-bit value at `META + 0x70`.
+  32-bit value at `META + 0x70`;
+- a `main` whose build id is a supported version's (`game_release_label`; the supported one is 1.0.0).
 
 The search looks in the picked folder and up to four levels below it (subfolders in name order, names that start with
 `.` skipped) and takes the first exefs, the first RomFS folder and the first `romfs.bin` it meets. It stops looking
@@ -56,7 +57,7 @@ Reasons, in the order they are decided:
 | `not_found` | no exefs, or neither a RomFS folder nor a `romfs.bin`. Also when the exefs found is inside the data root's own `extracted` folder |
 | `package` | as `not_found` (without the extracted-folder case), and the search met a `.xci`, `.nsp`, `.nca`, `.nsz` or `.xcz` file |
 | `update` | the program id is the update's: `GAME_UPDATE_PROGRAM_ID` in `game/game.h` (`GAME_PROGRAM_ID + 0x800`, `01004D300C5AE800`) |
-| `version` | any other program id, or an unreadable `main.npdm` |
+| `version` | any other program id, an unreadable `main.npdm`, or a `main` that is not a supported version's NSO |
 
 `tools/test_find_game.sh` has a case for `update` (a `main.npdm` with `...E800`).
 The launcher and `--setup` must use one search, so they cannot disagree about a folder (0.2.0 fixed exactly that).
@@ -78,8 +79,8 @@ The launcher runs it once per change of the modification times of what it reads:
 setup must write `lasgame.dll.id` last, after `lasgame.dll`.
 
 ### `--setup <folder>` and `--rebuild-code`
-`--setup` finds the game as `--check` does. Before it removes anything it refuses a `main` whose build id is not a
-supported version's (`version`: the supported one is 1.0.0), and a RomFS it cannot read (`bad_image`). Then it replaces
+`--setup` finds the game as `--check` does, with the same verdict. Before it removes anything it refuses a RomFS it
+cannot read (`bad_image`). Then it replaces
 what an earlier setup made in `<data root>/extracted` (`exefs`, `romfs`, `romfs.bin`, the library and its id; never the
 folder the player picked, never a link, nothing outside `<data root>/extracted`, and not `.gamebuild`), copies `exefs`,
 sets up the RomFS and builds the game code. The RomFS is set up in one of two ways:
@@ -113,7 +114,6 @@ Failure reasons after `failed`: the `--check` ones, and
 
 | Reason | Meaning |
 |---|---|
-| `version` | also here: the exefs has the game's program id, but its `main` is not a supported version's NSO (`game_release_label`) |
 | `bad_image` | the picked RomFS cannot be read: a folder whose tree cannot be walked, or a `romfs.bin` that is not a plain RomFS (an IVFC image, say) or is cut short (a file's data ends past the end of the image). There is no count of the files |
 | `copy` | the files could not be copied (disk full, unreadable), or the earlier setup could not be removed |
 | `build` | the game code did not build (or the build left no usable library) |

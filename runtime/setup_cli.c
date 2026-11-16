@@ -102,7 +102,14 @@ static int find_verdict(const char *folder, Found *f) {
         if (!strncmp(a, b, n) && (a[n] == '/' || a[n] == '\\' || !a[n])) return NOT_FOUND;
     }
     uint64_t id = program_id(f->exefs);
-    return id == GAME_PROGRAM_ID ? 0 : id == GAME_UPDATE_PROGRAM_ID ? UPDATE : VERSION;
+    if (id == GAME_UPDATE_PROGRAM_ID) return UPDATE;
+    char label[32];
+    if (id != GAME_PROGRAM_ID || !game_release_label(f->exefs, label, sizeof label)) {
+        LOG("[setup] %s: program id %016llx, its main not a version this runtime supports\n", f->exefs,
+            (unsigned long long)id);
+        return VERSION;
+    }
+    return 0;
 }
 
 // ------------------------------------------------------------------ the lines
@@ -194,11 +201,6 @@ static int setup(bool rebuild_only) {
     Found f = {0};
     int r = find_verdict(g_folder, &f);
     if (r) return r;
-    char label[32];
-    if (!game_release_label(f.exefs, label, sizeof label)) {
-        LOG("[setup] %s: its main is not a version of the game this runtime supports\n", f.exefs);
-        return VERSION;
-    }
     if (!romfs_readable(&f)) return BAD_IMAGE;
     mkdir(ROOT, 0755);
     if (!remove_setup()) return COPY;
