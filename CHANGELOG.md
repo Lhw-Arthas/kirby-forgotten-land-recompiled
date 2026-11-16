@@ -25,7 +25,8 @@ an older version, the launcher offers "Rebuild game code".
 - **A faster first build.** About 7 minutes on a 16-thread PC, where 0.2.0 took about 16. The slowest file starts
   first, and the few functions over 200 KB of C are compiled without optimization
 - **No 6 GB image of the game's data.** The setup links your `romfs` folder into the install folder, or copies it
-  when it is on another drive, instead of writing a `romfs.bin` image
+  when it is on another drive, instead of writing a `romfs.bin` image. On an install updated from 0.2.0, "Rebuild game code"
+  sets it up this way from the folder picked before and deletes the old image
 - **Mouthful Mode looks right.** The Ring, Elevator and Dump Car models were drawn without their geometry stage, so
   Ring Mouth had no face. Geometry shaders work now, and all 14,232 shader programs in the game build on the test PC
 

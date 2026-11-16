@@ -62,6 +62,8 @@ Updating
 --------
 Unzip a new version over the old folder. If the new version needs the game code built again, the launcher says so and
 offers "Rebuild game code" (a few minutes; your game folder is not needed again).
+Coming from 0.2.0, the rebuild also links the game folder you picked then, in place of the romfs.bin 0.2.0 made (it
+deletes that file and frees about 6 GB). If that folder was moved or deleted, pick it again first.
 
 Closing the launcher ends a build in progress and every tool the build started (build again later: it carries on
 from the pieces already compiled). A game that is running keeps running.
