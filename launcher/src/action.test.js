@@ -12,7 +12,7 @@ test('primary action follows the setup state', () => {
   assert.equal(primaryAction({ ...base, built: false, tools_missing: ['MSYS2 clang'] }).act, 'go-setup');
   assert.equal(primaryAction({ ...base, built: false, phase: 'compile' }).busy, true);
   assert.equal(primaryAction({ ...base, built: false, phase: 'failed', error: 'boom' }).detail, 'boom');
-  assert.equal(primaryAction({ ...base, built: false, phase: 'image' }).busy, true);
+  assert.equal(primaryAction({ ...base, built: false, phase: 'files' }).busy, true);
   assert.equal(primaryAction(base).act, 'play');
   assert.equal(primaryAction({ ...base, running: true }).act, null);
 });
@@ -41,5 +41,6 @@ test('missing build tools say what to do', () => {
 
 test('every busy phase has a label', () => {
   for (const p of BUSY_PHASES) assert.ok(PHASE_LABEL[p], p);
-  assert.equal(PHASE_LABEL.image, 'Building the game data image');
+  assert.equal(PHASE_LABEL.files, 'Preparing the game files');
+  for (const p of BUSY_PHASES) assert.doesNotMatch(PHASE_LABEL[p], /image/i, `${p}: the runtime builds no image`);
 });

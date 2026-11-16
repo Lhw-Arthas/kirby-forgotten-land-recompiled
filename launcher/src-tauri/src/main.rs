@@ -21,7 +21,8 @@ const SETTING_KEYS: [&str; 3] = ["fullscreen", "resolution", "volume"];
 const PACKAGED_EXE: &str = "ForgottenLandRecomp.exe";
 /// Packaged mode: the folder the player picked, remembered until Build reads it.
 const PICKED_FILE: &str = "game-folder.txt";
-/// Free disk space the build needs (about 6.4 GB were in use at the peak of a real one), and the game code alone.
+/// Free disk space the build needs (about 6.4 GB were in use at the peak of a real one, the game files copied: a hard
+/// link on the same drive costs none of that, but the launcher cannot know beforehand), and the game code alone.
 const BUILD_BYTES: u64 = 6_500_000_000;
 const CODE_BYTES: u64 = 1_000_000_000;
 /// The longest install folder path the build works from. Measured with the bundled tools: the build failed to start its
@@ -36,7 +37,8 @@ enum Phase {
     #[default]
     Idle,
     Runtime,
-    Image,
+    /// Packaged mode: the runtime looking for the game files and copying them. Developer mode: checking the dump.
+    Files,
     Translate,
     Compile,
     Failed,
@@ -82,7 +84,7 @@ impl Mode {
     }
 }
 
-/// One stdout line of the runtime's `--setup` (runtime/main.c setup_headless) or `--check`.
+/// One stdout line of the runtime's `--setup` (runtime/setup_cli.c) or `--check`.
 #[derive(Debug, PartialEq)]
 enum SetupLine {
     Progress(Phase, f32, Option<String>),
@@ -95,7 +97,7 @@ fn parse_setup_line(line: &str) -> Option<SetupLine> {
     match w.next()? {
         "phase" => {
             let phase = match w.next()? {
-                "looking" | "copying" | "image" => Phase::Image,
+                "looking" | "copying" => Phase::Files,
                 "reading" => Phase::Translate,
                 "compiling" | "finishing" => Phase::Compile,
                 _ => return None,
@@ -114,11 +116,11 @@ fn setup_failure(reason: &str) -> String {
     match reason {
         "not_found" => "No game files were found in that folder. It needs your extracted exefs (it holds main and main.npdm) and romfs (it holds the folders msg and gfx), in it or in folders inside it.",
         "package" => "Those are packed game files (.xci, .nsp). Extract them first (exefs and romfs).",
-        "version" => "That is not Kirby and the Forgotten Land.",
+        "version" => "Those are not the files of Kirby and the Forgotten Land 1.0.0. They are from another game, or from a version of Kirby this release does not support. Extract version 1.0.0 of the base game.",
         "update" => "That is the game's update, not the base game. Extract the base game, version 1.0.0, without the update.",
         "copy" => "The game files could not be copied. Check the free disk space and try again.",
         "tools" => "The build tools are missing from this folder. An antivirus may have removed them. Unzip the release again and allow this folder in your antivirus.",
-        "bad_image" => "The game data image (romfs.bin) cannot be read. Pick a folder with the romfs folder itself.",
+        "bad_image" => "The game's romfs could not be read. If you picked a romfs.bin, it is cut short or is not a plain RomFS image. Extract the romfs folder again and pick the folder that holds it.",
         _ => "The game code did not build. Open the setup log for the details. If an antivirus is running, it may have blocked the compiler: allow this folder in it and build again.",
     }
     .into()
@@ -214,7 +216,7 @@ struct App {
     /// Why the last folder the player picked was not used, until the next pick.
     pick_error: Mutex<String>,
     /// The runtime's verdict, with the times of the files it was made from.
-    code: Mutex<Option<([Option<SystemTime>; 4], Code)>>,
+    code: Mutex<Option<([Option<SystemTime>; 5], Code)>>,
 }
 
 #[derive(Serialize)]
@@ -407,19 +409,22 @@ impl App {
             Mode::Packaged => self.game().join("lasgame.dll"),
         }
     }
-    fn image(&self) -> PathBuf {
-        self.game().join("romfs.bin")
-    }
     fn ini(&self) -> PathBuf {
         self.work.join("larecomp.ini")
+    }
+    /// The times of what `--status` reads: the runtime, the game code and its id, and the RomFS the setup copied (the
+    /// folder, or the romfs.bin the player picked instead).
+    fn stamp(&self) -> [Option<SystemTime>; 5] {
+        let id = PathBuf::from(format!("{}.id", self.lib().display()));
+        let game = self.game();
+        [self.exe(), self.lib(), id, game.join("romfs"), game.join("romfs.bin")].map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
     }
     /// The runtime's verdict. It runs a process, so the answer is kept until one of the files it reads changes.
     fn code(&self) -> Code {
         if self.work_problem.is_some() {
             return Code::None;
         }
-        let id = PathBuf::from(format!("{}.id", self.lib().display()));
-        let stamp = [self.exe(), self.lib(), id, self.image()].map(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
+        let stamp = self.stamp();
         let mut cache = self.code.lock().unwrap();
         if let Some((seen, code)) = &*cache {
             if *seen == stamp {
@@ -473,8 +478,8 @@ impl App {
         };
         c
     }
-    // returns at once when a valid image exists
-    fn build_image(&self) -> Command {
+    // the runtime builds nothing here: it only checks the dump linked as `extracted` holds a RomFS
+    fn check_romfs(&self) -> Command {
         let mut c = self.runtime();
         c.args(["extracted", "--build-romfs"]);
         hide_window(&mut c);
@@ -673,7 +678,7 @@ fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Re
 fn run_setup(app: &App, mut cmd: Command, log: &mut fs::File) -> Result<(), String> {
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let _ = writeln!(log, "== {cmd:?}");
-    let out = spawn_step(app, Phase::Image, cmd.stdout(Stdio::piped()).stderr(err))?.ok_or("no setup output")?;
+        let out = spawn_step(app, Phase::Files, cmd.stdout(Stdio::piped()).stderr(err))?.ok_or("no setup output")?;
     let mut end = None;
     for line in BufReader::new(out).lines().map_while(Result::ok) {
         match parse_setup_line(&line) {
@@ -727,7 +732,7 @@ fn start_setup(app: St, code_only: Option<bool>) -> Result<(), String> {
         }
         let phase = match (&app.mode, code_only) {
             (_, true) => Phase::Translate,
-            (Mode::Packaged, _) => Phase::Image,
+            (Mode::Packaged, _) => Phase::Files,
             _ => Phase::Runtime,
         };
         *job = Job { phase, ..Job::default() };
@@ -739,7 +744,7 @@ fn start_setup(app: St, code_only: Option<bool>) -> Result<(), String> {
             Mode::Dev(dev) => {
                 let exe = format!("{}/build/{PACKAGED_EXE}", dev.work_from_repo(&app.work).to_string_lossy().replace('\\', "/"));
                 run_step(&app, Phase::Runtime, dev.make(&app.work, &[&jobs, &exe]), &mut log)?;
-                run_step(&app, Phase::Image, app.build_image(), &mut log)?;
+                run_step(&app, Phase::Files, app.check_romfs(), &mut log)?;
                 run_step(&app, Phase::Translate, dev.make(&app.work, &["gen"]), &mut log)?;
                 run_step(&app, Phase::Compile, dev.make(&app.work, &[&jobs]), &mut log)
             }
@@ -918,7 +923,8 @@ mod tests {
 
     #[test]
     fn setup_lines_map_onto_the_phases() {
-        assert_eq!(parse_setup_line("phase copying 0.010"), Some(SetupLine::Progress(Phase::Image, 0.01, None)));
+        assert_eq!(parse_setup_line("phase looking 0.000"), Some(SetupLine::Progress(Phase::Files, 0.0, None)));
+        assert_eq!(parse_setup_line("phase copying 0.010"), Some(SetupLine::Progress(Phase::Files, 0.01, None)));
         assert_eq!(parse_setup_line("phase reading 0.200"), Some(SetupLine::Progress(Phase::Translate, 0.2, None)));
         assert_eq!(parse_setup_line("phase finishing 0.990"), Some(SetupLine::Progress(Phase::Compile, 0.99, None)));
         assert_eq!(
@@ -929,7 +935,7 @@ mod tests {
         assert_eq!(parse_setup_line("failed version"), Some(SetupLine::Failed("version".into())));
         assert_eq!(parse_setup_line("[paths] Forgotten Land Recomp 0.1.0"), None);
         assert_eq!(parse_setup_line("phase someday 0.5"), None);
-        assert!(setup_failure("version").contains("not Kirby"));
+        assert_eq!(parse_setup_line("phase image 0.100"), None, "the runtime builds no image: it has no such phase");
     }
 
     #[test]
@@ -963,6 +969,31 @@ mod tests {
     }
 
     #[test]
+    fn the_failure_texts_say_what_the_runtime_refused() {
+        let text = setup_failure("version");
+        assert!(text.contains("another game") && text.contains("version of Kirby") && text.contains("1.0.0"), "{text}");
+        assert!(!text.contains("That is not Kirby"), "{text}");
+        let text = setup_failure("bad_image");
+        assert!(text.contains("romfs.bin") && text.contains("romfs folder") && !text.contains("game data image"), "{text}");
+    }
+
+    #[test]
+    fn the_status_is_asked_again_when_the_romfs_folder_or_image_changes() {
+        let root = scratch("stamp");
+        let app = app("", root.to_str().unwrap());
+        let none = app.stamp();
+        fs::create_dir_all(root.join("extracted").join("romfs")).unwrap();
+        let folder = app.stamp();
+        assert_ne!(folder, none, "the setup's RomFS folder is what --status reads");
+        fs::write(root.join("extracted").join("romfs.bin"), "x").unwrap();
+        assert_ne!(app.stamp(), folder, "so is a romfs.bin the player picked");
+        fs::remove_dir(root.join("extracted").join("romfs")).unwrap();
+        fs::remove_file(root.join("extracted").join("romfs.bin")).unwrap();
+        assert_eq!(app.stamp(), none);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_dump_is_checked_the_way_the_setup_checks_it() {
         let root = scratch("dump");
         let npdm = |id: u64| {
@@ -987,7 +1018,7 @@ mod tests {
         assert_eq!(msg(check_game(&root)), setup_failure("update"));
         assert!(setup_failure("update").contains("base game"));
         fs::write(root.join("exefs").join("main.npdm"), npdm(0x0100_0000_0000_1234)).unwrap();
-        assert!(msg(check_game(&root)).contains("not Kirby") && msg(check_game(&root)).contains("0100000000001234"));
+        assert!(msg(check_game(&root)).contains("another game") && msg(check_game(&root)).contains("0100000000001234"));
         fs::write(root.join("exefs").join("main.npdm"), npdm(PROGRAM_ID)).unwrap();
         assert_eq!(check_game(&root), Ok(()));
         fs::remove_dir_all(&root).unwrap();

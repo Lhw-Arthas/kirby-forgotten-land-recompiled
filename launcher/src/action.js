@@ -1,4 +1,4 @@
-export const BUSY_PHASES = ['runtime', 'image', 'translate', 'compile'];
+export const BUSY_PHASES = ['runtime', 'files', 'translate', 'compile'];
 
 // The one thing the big button does next, from the backend status. Pure, so it can be tested without a window.
 export function primaryAction(s) {
@@ -27,7 +27,7 @@ export function toolsMissing(s) {
 
 export const PHASE_LABEL = {
   runtime: 'Building the runtime',
-  image: 'Building the game data image',
+  files: 'Preparing the game files',
   translate: 'Translating the game code',
   compile: 'Compiling the game code',
 };
