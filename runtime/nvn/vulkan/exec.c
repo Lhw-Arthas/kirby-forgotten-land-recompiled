@@ -1985,6 +1985,8 @@ typedef struct {
                                           // stage and no heap: empty); [3]: the geometry stage's
     VkPipelineLayout layout;
     bool vs_uses_vid;
+    bool vs_only;       // a vertex stage alone (the blend shape pass: global memory stores): an empty fragment stage and
+                        // pipelines with rasterizer discard
     _Atomic int state;  // 0 building, 1 ready, 2 failed
     uint64_t prep_vh, prep_fh;  // (prepared programs: their code hashes, for LARECOMP_PREP_CHECK)
     uint64_t fs_rt_hash;        // (LARECOMP_VK_SHADER_STATS: the fragment hash the GPU profile shows)
@@ -2152,7 +2154,11 @@ static bool translate_program_now(Prog *p) {
         maxwell_const_data = (const uint8_t *)(uintptr_t)(p->code[2] + p->cmax[2]), maxwell_const_size = p->cmax[2] != 0x10000 ? p->csize[2] : 0;
         p->gi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[2], p->cmax[2], STAGE_GEOMETRY, &p->gkey);
     }
-    if (p->vi->msl && (!p->gi || p->gi->msl)) {
+    if (p->vi->msl && p->vs_only) {
+        p->fi = calloc(1, sizeof *p->fi);
+        p->fi->stage = STAGE_FRAGMENT;
+        p->fi->msl = strdup("#version 460\nvoid main() {}\n");
+    } else if (p->vi->msl && (!p->gi || p->gi->msl)) {
         p->fkey.vs_out_mask = p->gi ? p->gi->out_mask : p->vi->out_mask;
         maxwell_const_data = (const uint8_t *)(uintptr_t)(p->code[1] + p->cmax[1]), maxwell_const_size = p->cmax[1] != 0x10000 ? p->csize[1] : 0;
         maxwell_push_base = p->vi->npush * 4u;  // (the fragment shader's words after them)
@@ -2281,8 +2287,8 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 }
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
-    bool gs = np->stage_mask & 4;
+    bool gs = np->stage_mask & 4, vs_only = (np->stage_mask & 0x3F) == 1;
+    if (!(np->stage_mask & 1) || (!(np->stage_mask & 2) && !vs_only)) return NULL;
     if (gs && !g_vk.geometry) return NULL;
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < (gs ? 3 : 2); i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
@@ -2296,7 +2302,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         prog_fp_check(prog_tab[slot].prog, np);
         return prog_tab[slot].prog;
     }
-    if (!gs) {  // prepared before the game (the same code and keys; never with a geometry stage)
+    if (!gs && !vs_only) {  // prepared before the game (the same code and keys; vertex + fragment only)
         uint64_t vh = shader_stage_hash(&np->stages[0]), fh = shader_stage_hash(&np->stages[1]);
         uint64_t ck = prog_content_key(vh, fh, vkey, fkey);
         Prog *pp = vh && fh && prep_progs_n ? PREP_GET(prep_progs, ck) : NULL;
@@ -2319,6 +2325,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
+    p->vs_only = vs_only;
     if (gs) {  // (the clip space epilogue at each vertex the geometry stage emits instead: shader.h)
         p->gkey = *vkey;
         p->vkey.flip_x = p->vkey.flip_y = p->vkey.depth_minus_one = false;
@@ -2687,6 +2694,7 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
                                                      .topology = topo_class_base(k->topo_class)};
     c->vs = (VkPipelineViewportStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     c->rs = (VkPipelineRasterizationStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                     .rasterizerDiscardEnable = k->prog->vs_only,
                                                      .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1};
     c->ms = (VkPipelineMultisampleStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                    .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
@@ -6795,7 +6803,7 @@ static void draw_(CmdRec *r, bool indexed) {
         while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
         pp = pipe_tab[pslot].pipe;
         if (!pp) {
-            if (shader_rec_recording() && !pr->gi) {  // (variant records: vertex + fragment programs only)
+            if (shader_rec_recording() && !pr->gi && !pr->vs_only) {  // (variant records: vertex + fragment programs only)
                 ShaderRec rec;
                 rec_from_state(&rec, vkey.flip_x, mode);
                 shader_rec_note(&rec);
