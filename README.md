@@ -1,6 +1,7 @@
 # Kirby and the Forgotten Land Recompiled
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+<a href="https://recompstore.com/dev/scarxity"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recompstore.com/assets/press/verified-light.svg"><img alt="Verified developer on RecompStore" src="https://recompstore.com/assets/press/verified-dark.svg" height="48"></picture></a>
 
 A work-in-progress static recompilation of **Kirby and the Forgotten Land** (Nintendo Switch) for Windows.
 The game's ARM64 code is translated to C and compiled for your PC, and a runtime stands in for the Switch. It is not
