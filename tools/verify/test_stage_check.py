@@ -52,4 +52,7 @@ with tempfile.TemporaryDirectory() as d:
 
     r = stage_check.check('Cat/Other/Step01', log, os.path.join(d, 'none.png'), os.path.join(d, 'none.wav'), 600)
     assert r['verdict'] == 'FAIL: step not loaded, fatal, missing function, no capture, no audio capture', r['verdict']
+    open(log, 'w').write(LOG % 0 + '*** exception c0000005 accessing 0\n')
+    r = stage_check.check('Cat/Stage/Step01', log, os.path.join(d, 'none.png'), snd, 600)
+    assert r['fatal'] == '*** exception c0000005 accessing 0' and r['verdict'].startswith('FAIL: fatal'), r
 print('stage_check: ok')

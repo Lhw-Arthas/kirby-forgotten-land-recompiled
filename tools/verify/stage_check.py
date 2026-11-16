@@ -3,7 +3,7 @@
   stage_check.py check <stage> <log> <shot.png> <audio.wav> <hold frames>   -> one JSON line (the stage's record)
   stage_check.py report <tour.jsonl>                                        -> a Markdown table; exit 1 if any stage failed
 
-A stage passes when its step's files were read (LARECOMP_STAGE took it there), nothing fatal, no missing function, no shader
+A stage passes when its step's files were read (LARECOMP_STAGE took it there), nothing fatal (FATAL or a crash), no missing function, no shader
 that failed to translate, no hang dump, no skipped draw once <hold frames> have passed since the step loaded (the shaders had
 time to build), the final window image is not black, and the game made sound in the last seconds. Unimplemented services and
 stubbed commands are listed, not failed: some are expected offline.
@@ -90,7 +90,7 @@ def check(stage, log_path, shot, wav, hold):
             if m:
                 stats.append((int(m.group(1)), int(m.group(3))))
                 rec['last_frame'] = int(m.group(1))
-            if line.startswith('FATAL') and not rec['fatal']:
+            if (line.startswith('FATAL') or line.startswith('*** exception')) and not rec['fatal']:
                 rec['fatal'] = line.strip()[:200]
             if 'no function at' in line:
                 rec['missing_fn'] += 1
