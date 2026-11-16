@@ -249,9 +249,9 @@ static const char *STAGE_NAME[] = {"VS", "FS", "GS", "TCS", "TES", "CS"};
 // slot (nn::gfx: vertex, hull, domain, geometry, pixel, compute) -> translator stage
 static const int SLOT_STAGE[6] = {STAGE_VERTEX, STAGE_TESS_CTRL, STAGE_TESS_EVAL, STAGE_GEOMETRY, STAGE_FRAGMENT, STAGE_COMPUTE};
 
-static void dump(const char *tag, int prog, const char *a, const char *b) {
+static void dump(const char *dir, const char *tag, int prog, const char *a, const char *b) {
     char p[1100];
-    snprintf(p, sizeof p, "%s/fail/%05d_%s.txt", g_out, prog, tag);
+    snprintf(p, sizeof p, "%s/%s/%05d_%s.txt", g_out, dir, prog, tag);
     FILE *f = fopen(p, "wb");
     if (!f) return;
     if (a) fputs(a, f);
@@ -274,7 +274,7 @@ static void fail(int prog, int stage, const char *phase, const char *msg, const 
         nclasses++;
         char tag[32];
         snprintf(tag, sizeof tag, "%s_%s", STAGE_NAME[stage], phase);
-        dump(tag, prog, src, detail);
+        dump("fail", tag, prog, src, detail);
     }
     if (i < nclasses) classes[i].programs++;
     char one[256];
@@ -286,6 +286,7 @@ static void fail(int prog, int stage, const char *phase, const char *msg, const 
 
 // ---------------------------------------------------------------- Vulkan (the feature set runtime/nvn/vulkan/device.c enables)
 static bool g_vk_on = true;
+static const char *g_dump;  // SWEEP_DUMP=<text>: the GLSL of every program from files whose path has it, in <out>/dump
 static long g_messages;
 static VKAPI_ATTR VkBool32 VKAPI_CALL on_message(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT t,
                                                  const VkDebugUtilsMessengerCallbackDataEXT *d, void *u) {
@@ -500,6 +501,7 @@ static void run_program(int pi) {
         k.glsl = 1;
         ShaderInfo *si = translate(&codes[p->code[5]], STAGE_COMPUTE, &k);
         if (!si->msl) { fail(pi, STAGE_COMPUTE, "translate", si->error, NULL, NULL); maxwell_free(si); return; }
+        if (g_dump && strstr(files[p->file], g_dump)) dump("dump", "cs", pi, files[p->file], si->msl);
         size_t nw = 0;
         uint32_t *spv = compile(pi, STAGE_COMPUTE, si->msl, &nw);
         if (spv && g_vk_on) run_vk(pi, STAGE_COMPUTE, &spv, &nw, 1, si, NULL);
@@ -519,6 +521,7 @@ static void run_program(int pi) {
     fk.vs_out_mask = vi->out_mask;
     fi = translate(&codes[p->code[4]], STAGE_FRAGMENT, &fk);
     if (!fi->msl) { fail(pi, STAGE_FRAGMENT, "translate", fi->error, NULL, NULL); goto out; }
+    if (g_dump && strstr(files[p->file], g_dump)) dump("dump", "vs", pi, files[p->file], vi->msl), dump("dump", "fs", pi, files[p->file], fi->msl);
     spv[0] = compile(pi, STAGE_VERTEX, vi->msl, &nw[0]);
     spv[1] = compile(pi, STAGE_FRAGMENT, fi->msl, &nw[1]);
     if (!spv[0] || !spv[1]) goto out;
@@ -556,6 +559,7 @@ int main(int argc, char **argv) {
     mkdir(g_out, 0755);
     snprintf(p, sizeof p, "%s/fail", g_out);
     mkdir(p, 0755);
+    if ((g_dump = getenv("SWEEP_DUMP"))) snprintf(p, sizeof p, "%s/dump", g_out), mkdir(p, 0755);
     snprintf(p, sizeof p, "%s/failures.tsv", g_out);
     g_tsv = fopen(p, "wb");
     if (!g_tsv) { perror(p); return 1; }
