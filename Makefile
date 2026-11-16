@@ -450,6 +450,11 @@ appimages:
 
 include tools/dist.mk
 
+# the launchers' commands on synthetic dumps (tools/test_setup_cli.sh); test-find-game is dist.mk's
+test-setup-cli: $(EXE)
+	bash tools/test_setup_cli.sh $(EXE)
+.PHONY: test-setup-cli
+
 .PHONY: dmg all gen gen-helper gen-objs runtime-objs deps deps-windows app dist appimage appimages
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
