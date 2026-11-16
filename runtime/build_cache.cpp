@@ -10,6 +10,7 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -118,7 +119,7 @@ bool valid_stem(const std::string &s) {
            s.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") == std::string::npos;
 }
 std::string generation(BuildCache *c, const char *module, int chunks) {
-    need((!strcmp(module, "main") || !strcmp(module, "sdk")) && chunks > 0 && chunks <= 10000,
+    need(valid_stem(module) && chunks > 0 && chunks <= 10000,
          "Invalid generated module.");
     std::ostringstream out;
     out << "LASGEN1\n" << chunks << '\n';
@@ -258,8 +259,13 @@ extern "C" bool build_cache_prepare_generation(BuildCache *c, const char *spec, 
         std::string identity = "LASGENKEY1\n" + key.finish() + "\n";
         auto record = c->root / "generation-identity";
         if (!fs::exists(record) || read(record, 128) != identity) {
-            for (const char *name : {"main.generation", "sdk.generation", "main", "sdk"})
-                fs::remove_all(c->root / name);
+            std::vector<std::string> modules;  // (every module the game has: a <module>.generation record and a <module> folder)
+            for (auto &e : fs::directory_iterator(c->root))
+                if (e.path().extension() == ".generation") modules.push_back(e.path().stem().string());
+            for (auto &m : modules) {
+                fs::remove_all(c->root / (m + ".generation"));
+                fs::remove_all(c->root / m);
+            }
             write(record, identity);
         }
         return true;
@@ -295,7 +301,7 @@ extern "C" bool build_cache_present(const char *game_dir) {
 }
 extern "C" bool build_cache_generation(BuildCache *c, const char *module, int *chunks) {
     try {
-        need(!strcmp(module, "main") || !strcmp(module, "sdk"), "Invalid module name.");
+        need(valid_stem(module), "Invalid module name.");
         auto record = read(c->root / (std::string(module) + ".generation"));
         std::istringstream in(record);
         std::string magic;
