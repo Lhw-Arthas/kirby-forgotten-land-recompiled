@@ -30,7 +30,6 @@ Reproduce the furthest point with `bash tools/run_scripted.sh <name> 170 "3400,5
 - One boot in four exited by itself with code 0 in an earlier session. A restart path that did exactly that is
   fixed, but nobody has shown it was the cause, and it did not happen again in 44 later runs.
 - The launcher's build can fail to link when the work folder is on another drive or behind a long path.
-- Closing the launcher during a build may leave the compile running.
 
 ## Stubs and shortcuts
 
