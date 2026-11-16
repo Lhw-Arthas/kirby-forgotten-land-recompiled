@@ -39,6 +39,8 @@ Link's Awakening feature or its data, and leaves the engine as LAS has it otherw
   Randomizer row.
 - `tools/gen.py`, `tools/lasgen.spec`: no randomizer patch variants.
 - `tools/menu_strings.py`: only the menus' own text (no warp, spoiler or tracker names).
+- `tools/build_deps_windows.sh`: FFmpeg keeps swresample (its Opus decoder needs it, for `services/hwopus.c`) and the
+  build checks that every decoder was built.
 - `tools/test_settings.c`, `tools/test_settings.py`: no cases for the removed settings.
 
 ## This repo's own files among them
@@ -50,8 +52,8 @@ Link's Awakening feature or its data, and leaves the engine as LAS has it otherw
   read hook), answered neutrally, and the `__cxa_throw` and `vector::at` diagnostics moved out of `hle/warp.c`.
 - `tools/upstream/`: the copy's lists and scripts.
 - The test harness and packaging scripts in `tools/` that LAS doesn't have (`run_scripted.sh`, `boot_check.sh`,
-  `test_find_game.sh`, `dist_licenses.sh`, `launcher_notice.py`, `frametime_summary.py`, `perf_summary.py`,
-  `winshot.ps1`).
+  `test_find_game.sh`, `dist_licenses.sh`, `dist.mk`, `launcher_notice.py`, `check_game_identity.py`,
+  `audio_check.py`, `input/`, `frametime_summary.py`, `perf_summary.py`, `winshot.ps1`).
 
 ## Bringing a LAS fix over
 
