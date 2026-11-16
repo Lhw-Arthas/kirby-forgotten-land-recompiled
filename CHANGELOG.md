@@ -81,7 +81,9 @@ an older version, the launcher offers "Rebuild game code".
 - Nobody has played the game start to finish. Boot, the opening, the first stage (scripted), Mouthful Mode's car and
   ring, and loading each stage directly in the stage tour are checked. Bosses, later worlds by real play, and the
   ending are not
-- TODO (coordinator): the world map and Town result, and the final stage tour numbers
+- Waddle Dee Town is checked by play: a scripted run cleared the first stage and walked into the Town with no error.
+  Starting the world map or the Town directly with the stage tour's shortcut crashes; that shortcut skips the story
+- TODO (coordinator): the final stage tour numbers
 - A first visit to an area pauses while its shaders build: about 15 to 25 s at the beach on a 2-core PC with a cold
   cache (an older measurement), less on faster PCs. Later visits pause about 1 s
 - Rarely, the game crashed after the opening movie while the PC was heavily overloaded. It did not happen in 15 runs

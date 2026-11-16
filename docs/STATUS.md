@@ -19,6 +19,7 @@ All numbers are from the developer PC (RTX 3050 Laptop 4 GB, 16 threads) unless 
 | Opening | The online prompt, the difficulty pick, the opening movie and cutscene | Scripted run: the capture at frame 3400 (the beach) matches v0.2.0 |
 | First stage | Kirby walks, the scene is lit, the guide clips play | Scripted runs: the capture at frame 5000 matches v0.2.0; `tools/input/stage1.txt` goes past the Spit guide |
 | Mouthful Mode | The car and the ring, drawn with their geometry stage | `tools/input/carmouth.txt` (the car's boost guide) |
+| Into the Town | The first stage played to its end, the rescue cutscene, then Waddle Dee Town | A scripted run on 0.3.0 cleared the first stage and stayed about 4 minutes in the Town (frames 18,840 to 25,920) with no error |
 | Every stage | `LARECOMP_STAGE` starts a new game at any of the 109 stages | Stage tour (`tools/verify/stage_tour.sh`), one run per stage. TODO (coordinator): the final tour numbers |
 | Music and sound | Stage music plays through the game's Opus decoder; the reverb and delay effects run | In a v0.2.0 first-stage run the game called the decoder command `DecodeInterleaved` 6,922 to 14,254 times and got no samples back; it decodes now. `tools/test_audio_fx.c` checks the effects with the game's own parameters |
 | Launcher | Pick the game folder, build, cancel, rebuild, play | Unit tests in CI (`cargo test`, `node --test`). TODO (coordinator): Build and Play from a fresh unzip of the release |
@@ -30,7 +31,8 @@ Reproduce the opening and the first stage with `bash tools/run_scripted.sh <name
 ## Known problems
 
 - Nobody has played the game start to finish. Bosses, the later worlds by real play, and the ending are not checked.
-- TODO (coordinator): the world map and Town result.
+- Starting the world map or Waddle Dee Town directly with `LARECOMP_STAGE` (a test shortcut that skips the story)
+  crashes. Reached by play, the Town runs without error.
 - A first visit to an area pauses while its shaders build, on the "Preparing graphics for this area" notice. On a
   2-core PC with a cold cache the pause at the beach was about 15 to 25 s (an older measurement). Fast PCs pause less.
   Later visits use the shader cache: the longest pause on a second run was about 1.2 s, with a cold driver cache.
