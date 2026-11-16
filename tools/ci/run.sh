@@ -44,7 +44,7 @@ suite_build() {
 suite_engine() {
     t build_cache 'python tools/test_build_cache.py'
     # (miniz first: the test would fetch it with the first bash on PATH, WSL's on a hosted runner)
-    xfail gamebuild_resume "its fixture has no exefs/subsdk0, the game's third module" 'bash tools/fetch_miniz.sh && python tools/test_gamebuild_resume.py'
+    t gamebuild_resume 'bash tools/fetch_miniz.sh && python tools/test_gamebuild_resume.py'
     t windows_processes 'python tools/test_windows_processes.py'
     t delete_guard 'python tools/test_delete_guard.py'
     t data_move 'python tools/test_data_move.py'

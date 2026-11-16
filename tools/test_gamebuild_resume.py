@@ -72,7 +72,8 @@ with tempfile.TemporaryDirectory() as temporary:
     (resources/'runtime/hle/hle_symbols.txt').write_text('fixture\n')
     main = b'NSO0' + bytes(0x3c) + bytes.fromhex('0123456789abcdef') + bytes(0x18) + b'fixture main'  # (the build ID: the library id)
     (game/'exefs/main').write_bytes(main)
-    (game/'exefs/sdk').write_bytes(b'fixture sdk')
+    for name in ('sdk', 'subsdk0'):  # (the modules after main that game/game.h lists)
+        (game/'exefs'/name).write_bytes(b'fixture ' + name.encode())
     generator = tmp/'generator.py'; generator.write_text(GENERATOR)
     cc = shlex.split(os.environ.get('CC','clang'))
     cxx = shlex.split(os.environ.get('CXX','clang++'))
@@ -160,20 +161,20 @@ with tempfile.TemporaryDirectory() as temporary:
     try:
         assert not run() and b'cancelled' in why.value,why.value
         assert (work/'in-progress').exists()
-        saved=len(list(work.glob('*.receipt'))); assert 0<saved<9
+        saved=len(list(work.glob('*.receipt'))); assert 0<saved<13
         cancel_enabled=False
         assert run(),why.value
-        assert not generators() and len(compiles())==10-saved
+        assert not generators() and len(compiles())==14-saved
         assert not (work/'main').exists() and not (work/'sdk').exists() and not (work/'in-progress').exists()
         output=next(p for p in game.glob('lasgame.*') if p.suffix!='.id')
         before=hashlib.sha256(output.read_bytes()).digest()
         (work/'main_000.o').write_bytes(b'corrupt')
         assert run(),why.value
-        assert len(compiles())==2 and len(generators())==2
+        assert len(compiles())==2 and len(generators())==3
         (work/'main').mkdir()
         (work/'main/main_000.c').write_text('corrupt source\n')
         assert run(),why.value
-        assert len(generators())==2 and len(compiles())==1
+        assert len(generators())==3 and len(compiles())==1
         before=hashlib.sha256(output.read_bytes()).digest() # PE link timestamps may differ after a successful relink
         fail_link=True
         assert not run() and b'link' in why.value,why.value
@@ -187,15 +188,15 @@ with tempfile.TemporaryDirectory() as temporary:
         assert len(compiles())==2 and not generators()
         (game/'exefs/main').write_bytes(main+b'changed input')
         assert run(),why.value
-        assert len(generators())==2 and len(compiles())==1
+        assert len(generators())==3 and len(compiles())==1
         relocated.parent.mkdir()
         shutil.copy(compiler, relocated) # contents/mode only; macOS system file flags are not part of the identity
         os.environ['LARECOMP_CC'] = str(relocated)
         assert run(),why.value
-        assert len(generators())==2 and len(compiles())==1 # moving the same binary does not recompile every object
+        assert len(generators())==3 and len(compiles())==1 # moving the same binary does not recompile every object
         (resources/'runtime/cpu.h').write_text('/* changed header */\n')
         assert run(),why.value
-        assert len(generators())==2 and len(compiles())==9
+        assert len(generators())==3 and len(compiles())==13
         print('Build scheduler: cancellation/resume, cleanup, repair, failed-build preservation, compiler relocation and invalidation passed')
     finally:
         for pid in list(processes): kill(pid)
