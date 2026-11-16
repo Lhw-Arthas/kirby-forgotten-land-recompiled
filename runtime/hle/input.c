@@ -629,6 +629,56 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
     }
 }
 
+// LARECOMP_VPAD="frame:<button>:frames,frame:<axis>=<value>:frames,frame:unplug:frames,...": an SDL virtual gamepad,
+// plugged in at the first frame, that the runtime finds and reads like a real one (the whole controller path: hot-plug,
+// mapping, dead zone, triggers). Buttons by position as in larecomp.ini ("south", "start", "dpad_up"...), axes
+// leftx / lefty / rightx / righty / ltrigger / rtrigger in SDL units (y down), "unplug" detaches it for that long.
+// Run without LARECOMP_INPUT and with LARECOMP_NO_USER_INPUT=0, or the controller is ignored as a player's would be.
+static void vpad_frame(uint64_t frame) {
+    static const char *spec = (const char *)1;
+    static SDL_JoystickID id;
+    static SDL_Joystick *joy;
+    if (spec == (const char *)1) spec = getenv("LARECOMP_VPAD");
+    if (!spec) return;
+    static const char *const axes[] = {"leftx", "lefty", "rightx", "righty", "ltrigger", "rtrigger"};
+    _Static_assert(sizeof axes / sizeof *axes == SDL_GAMEPAD_AXIS_COUNT, "SDL's gamepad axes");
+    bool btn[SDL_GAMEPAD_BUTTON_COUNT] = {0}, unplug = false;
+    int16_t ax[SDL_GAMEPAD_AXIS_COUNT] = {0};
+    char buf[4096];
+    snprintf(buf, sizeof buf, "%s", spec);
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        unsigned long start = 0, len = 10;
+        char name[32] = "";
+        int v = 0;
+        if (sscanf(tok, "%lu:%31[a-z_0-9=-]:%lu", &start, name, &len) < 2 || frame < start || frame >= start + len) continue;
+        char *eq = strchr(name, '=');
+        if (eq) { *eq = 0; v = atoi(eq + 1); }
+        for (int i = 0; eq && i < SDL_GAMEPAD_AXIS_COUNT; i++) if (!strcmp(name, axes[i])) ax[i] = (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
+        if (!strcmp(name, "unplug")) unplug = true;
+        int b = eq ? -1 : bind_pad_from_name(name);
+        if (b >= 0 && b < SDL_GAMEPAD_BUTTON_COUNT) btn[b] = true;
+    }
+    if (unplug && joy) {
+        LOG("[input] virtual gamepad unplugged (frame %llu)\n", (unsigned long long)frame);
+        SDL_CloseJoystick(joy), SDL_DetachVirtualJoystick(id), joy = NULL;
+    }
+    if (!unplug && !joy) {
+        SDL_VirtualJoystickDesc d;
+        SDL_INIT_INTERFACE(&d);
+        d.type = SDL_JOYSTICK_TYPE_GAMEPAD, d.name = "Virtual test gamepad";
+        d.naxes = SDL_GAMEPAD_AXIS_COUNT, d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        d.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1, d.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+        id = SDL_AttachVirtualJoystick(&d);
+        joy = id ? SDL_OpenJoystick(id) : NULL;
+        LOG("[input] virtual gamepad plugged in (frame %llu): %s\n", (unsigned long long)frame, joy ? "ok" : SDL_GetError());
+    }
+    if (!joy) return;
+    for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++) SDL_SetJoystickVirtualButton(joy, i, btn[i]);
+    for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)  // (a trigger at rest is -32768 on a joystick, 0 as a gamepad axis)
+        SDL_SetJoystickVirtualAxis(joy, i, i >= SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? (int16_t)(ax[i] * 2 - 32768 + (ax[i] > 0)) : ax[i]);
+}
+
 static void host_test_frame(uint64_t frame) {
     static const char *hspec, *bspec;
     static int init;
@@ -771,6 +821,7 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    vpad_frame(frame);
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
@@ -878,7 +929,7 @@ static void fill_state(Cpu *c) {
     if (ry < -16000) b |= 1ull << 23;
     *(uint64_t *)(s + 8) = b;
     static uint64_t last_b;
-    if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
+    if (b != last_b && (getenv("LARECOMP_INPUT") || getenv("LARECOMP_VPAD") || getenv("LARECOMP_HOST_INPUT"))) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
     last_b = b;
     *(int32_t *)(s + 16) = lx;
     *(int32_t *)(s + 20) = ly;
