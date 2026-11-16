@@ -304,8 +304,13 @@ $(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(MINIZ_OBJ)
 	mv -f $(dir $@)link/$(notdir $@) $@
 
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
+# (the object paths go in a response file for the linker itself: three modules' worth don't fit the command line
+# Windows allows once B is an absolute path, and a response file to clang makes it write one of its own to TMP, which
+# MSYS2's make doesn't pass on. printf is the shell's own; Windows: cygpath gives the linker its form of an MSYS path)
 $(GAMELIB): $(GEN_OBJ) | $(EXE)
-	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
+	@printf '%s\n' $^ $(if $(filter windows,$(PLATFORM)),| cygpath -m -f -) | sed 's/.*/"&"/' > $@.rsp
+	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp -Wl,@$(if $(filter windows,$(PLATFORM)),$(shell cygpath -m $@.rsp),$@.rsp)
+	rm -f $@.rsp
 	mv -f $@.tmp $@
 	echo $(GAMELIB_FULL_ID) > $@.id
 
