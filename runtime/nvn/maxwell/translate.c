@@ -210,6 +210,7 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
         if (dyn) c->info->ssbo_read = 0xFFFF;
         else if (off >= 0x110 && off < 0x210) c->info->ssbo_read |= (uint16_t)(1u << ((off - 0x110) >> 4));
         else if (off >= 0x510 && off < 0x610) c->info->ssbo_read |= (uint16_t)(1u << ((off - 0x510) >> 4));
+        else if (off >= 0x410 && off < 0x510) c->info->ssbo_read |= (uint16_t)(1u << ((off - 0x410) >> 4));  // (geometry)
     }
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
     if (dyn) c->info->cbuf_dynamic |= 1u << idx;
