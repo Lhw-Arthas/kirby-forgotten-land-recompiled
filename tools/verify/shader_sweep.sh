@@ -10,11 +10,12 @@ cd "$(dirname "$0")/../.."
 ROMFS=${1:?romfs dir}
 OUT=${2:?out dir}
 shift 2
-mkdir -p build/shader_sweep "$OUT"
+mkdir -p "$OUT"
 CC=${CC:-clang}
+# (the binary goes with its output: a sweep still running keeps its own)
 $CC -O2 -w -Iruntime -Iruntime/nvn -D_FILE_OFFSET_BITS=64 tools/verify/shader_sweep.c runtime/nvn/maxwell/translate.c \
-    runtime/nvn/vulkan/shaders.c -o build/shader_sweep/shader_sweep -lvulkan-1 -lshaderc_shared -lSPIRV-Tools-shared -lzstd
+    runtime/nvn/vulkan/shaders.c -o "$OUT/shader_sweep" -lvulkan-1 -lshaderc_shared -lSPIRV-Tools-shared -lzstd
 for d in /ucrt64/bin /c/msys64/ucrt64/bin; do
   [ -f "$d/VkLayer_khronos_validation.json" ] && export VK_ADD_LAYER_PATH="$(cygpath -w "$d")"
 done
-build/shader_sweep/shader_sweep "$ROMFS" "$OUT" "$@"
+"$OUT/shader_sweep" "$ROMFS" "$OUT" "$@"
