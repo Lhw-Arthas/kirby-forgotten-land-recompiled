@@ -1202,13 +1202,13 @@ static VkCompareOp compare_op(uint32_t f) {
     }
 }
 
-VkSampler vk_sampler(NvnSamplerDesc *d) {
-    if (d->backend) return (VkSampler)d->backend;
+// nearest: no filtering at all (integer formats can't be filtered: Maxwell reads them point-sampled)
+static VkSampler make_sampler(const NvnSamplerDesc *d, bool nearest) {
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    si.magFilter = d->mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    si.magFilter = d->mag_filter == 1 && !nearest ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     uint32_t mf = d->min_filter;
-    si.minFilter = (mf == 1 || mf == 3 || mf == 5) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-    si.mipmapMode = mf == 4 || mf == 5 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.minFilter = (mf == 1 || mf == 3 || mf == 5) && !nearest ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    si.mipmapMode = (mf == 4 || mf == 5) && !nearest ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     VkSamplerAddressMode modes[3];
     bool border = false;
     for (int i = 0; i < 3; i++) {
@@ -1227,13 +1227,13 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     if (mf <= 1) si.maxLod = si.minLod + 0.25f;  // not mipmapped: stay on the base level
     if (si.maxLod < si.minLod) si.maxLod = si.minLod;
     si.mipLodBias = d->lod_bias;
-    if (d->max_aniso > 1 && g_vk.aniso) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
+    if (d->max_aniso > 1 && g_vk.aniso && !nearest) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
     static float lodmin = -1;
     if (lodmin < 0) lodmin = getenv("LARECOMP_LOD_MIN") ? (float)atof(getenv("LARECOMP_LOD_MIN")) : 0;
     if (lodmin > 0 && mf > 1) si.minLod = fmaxf(si.minLod, lodmin);
     static int stest = -1;
     if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
-    if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = g_vk.aniso; si.maxAnisotropy = 16; }
+    if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = g_vk.aniso && !nearest; si.maxAnisotropy = 16; }
     if (d->compare_mode) {
         si.compareEnable = VK_TRUE;
         si.compareOp = getenv("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
@@ -1252,8 +1252,29 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     }
     VkSampler s;
     VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
-    d->backend = (void *)s;
     return s;
+}
+
+VkSampler vk_sampler(NvnSamplerDesc *d) {
+    if (!d->backend) d->backend = (void *)make_sampler(d, false);
+    return (VkSampler)d->backend;
+}
+
+// The same sampler without filtering, for integer views. (The descriptor has room for one sampler, which lives in the
+// game's memory: the nearest ones are kept here by the linear one's handle. Few descriptors are used on integer views;
+// past 1024 of them the linear one is returned.)
+VkSampler vk_sampler_nearest(NvnSamplerDesc *d) {
+    static struct { VkSampler linear, nearest; } tab[1024];
+    static int n;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    VkSampler l = vk_sampler(d), r = l;
+    pthread_mutex_lock(&lock);
+    int i = 0;
+    while (i < n && tab[i].linear != l) i++;
+    if (i < n) r = tab[i].nearest;
+    else if (n < 1024) r = tab[n].nearest = make_sampler(d, true), tab[n++].linear = l;
+    pthread_mutex_unlock(&lock);
+    return r;
 }
 
 VkSampler vk_default_sampler(bool linear) {
