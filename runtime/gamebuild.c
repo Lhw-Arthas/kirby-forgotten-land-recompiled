@@ -888,6 +888,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 ok = false;
             } else {
                 ++compiled;
+                LOG("[gamebuild] compiled %s (%.1f MB of C) in %.0fs\n", u->stem, (double)u->bytes / 1e6,
+                    (double)(plat_now_ns() - run[k].t0) / 1e9);
             }
             done_bytes += u->bytes;
             run[k--] = run[--nrun];
