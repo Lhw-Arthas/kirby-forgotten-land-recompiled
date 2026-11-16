@@ -25,8 +25,9 @@ launcher and the runtime accept any version of the game by program id, but only 
 Get `ForgottenLandRecomp-<version>-Windows-x64.zip` from the
 [latest release](https://github.com/scarxity/kirby-forgotten-land-recompiled/releases/latest), unzip it, open
 `ForgottenLandLauncher.exe`, pick the folder that holds your `exefs` and `romfs`, then Build and Play. The zip holds
-tools only: the game code is built on your PC from your own copy, in about 16 minutes on a 16-thread PC, and needs
-about 6.5 GB of disk. Its `README.txt` has the details. [CHANGELOG.md](CHANGELOG.md) lists what changed.
+tools only: the game code is built on your PC from your own copy, in about 16 minutes on a 16-thread PC. The launcher
+wants about 6.5 GB of free disk: your game files are hard-linked into the folder when they are on the same drive (no
+extra space) and copied (about 6 GB) when they are not. Its `README.txt` has the details. [CHANGELOG.md](CHANGELOG.md) lists what changed.
 
 The zip also carries a `recomplauncher.json`, so [RecompLauncher](https://recomplauncher.com) can set the game up
 from the same folder, show its settings and start it.
@@ -67,15 +68,16 @@ cd launcher; npm install; npx tauri build
 .\src-tauri\target\release\kfl-recomp-launcher.exe
 ```
 
-Pick your game folder, press **Build**, then **Play**. Build writes `romfs.bin` (about 6 GB, the game's data packed
-into one file) into the game folder you picked and leaves it there.
+Picking the game folder links it as the work folder's `extracted`. Press **Build**, then **Play**. Build builds the
+runtime, checks the folder holds a RomFS and builds the game code. No copy of the game's data is made: the game reads
+the `romfs` folder as it is.
 
-Or build by hand in Git Bash, with your `exefs` and `romfs` in `../work/kfl/extracted/`:
+Or build by hand in Git Bash, with your `exefs` and `romfs` in `../work/kfl/extracted/` (the game reads the `romfs`
+folder as it is, so there is no data image to build):
 
 ```bash
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
 make -j16 ../work/kfl/build/lasrecomp.exe   # the runtime
-(cd ../work/kfl && ./build/lasrecomp.exe extracted --build-romfs)   # the data image, extracted/romfs.bin: about 6 GB, about a minute
 make gen                                    # translate the game code to C
 make -j16                                   # compile it (about 10 minutes on 16 threads)
 cd ../work/kfl && LARECOMP_GAME_LIB=build/lasgame.dll ./build/lasrecomp.exe extracted --play
