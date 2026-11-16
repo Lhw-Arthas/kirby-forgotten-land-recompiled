@@ -678,7 +678,7 @@ fn run_step(app: &App, phase: Phase, mut cmd: Command, log: &mut fs::File) -> Re
 fn run_setup(app: &App, mut cmd: Command, log: &mut fs::File) -> Result<(), String> {
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let _ = writeln!(log, "== {cmd:?}");
-        let out = spawn_step(app, Phase::Files, cmd.stdout(Stdio::piped()).stderr(err))?.ok_or("no setup output")?;
+    let out = spawn_step(app, Phase::Files, cmd.stdout(Stdio::piped()).stderr(err))?.ok_or("no setup output")?;
     let mut end = None;
     for line in BufReader::new(out).lines().map_while(Result::ok) {
         match parse_setup_line(&line) {
