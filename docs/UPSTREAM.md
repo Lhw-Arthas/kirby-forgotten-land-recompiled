@@ -39,7 +39,9 @@ carries one of this repo's fixes; the engine stays as LAS has it otherwise.
   `game.log` (`game.h` GAME_LOG).
 - `runtime/nvn/objects.c`: a packaged 3D texture's layout word gives its block depth too (bits 4-7).
 - `runtime/nvn/maxwell/translate.c`: VOTE.VTG is a no-op, EXIT honours its flow test (EXIT.FCSM_TR goes on), LEA's
-  lo forms.
+  lo forms; none of the patches that matched LA's shaders (light-culling tiles, the ambient occlusion's pixel grid
+  and blur taps and its Off pass, the shadow map's tap offset), nor the `rscale[65]` slots and `uses_ao_taps` that fed
+  them (`shader.h`, `vulkan/exec.c`, `renderer.m`, `metal.m`, `vulkan/textures.c`).
 - `tools/game_addresses.py`: an empty address table is allowed. `tools/gen.py`: an ADR whose register a BR uses soon
   after is a jump table, not a function start.
 - `runtime/hle/input.c`: no controller light (it showed Link's health), d-pad items, mirror mode, warps or test hooks
