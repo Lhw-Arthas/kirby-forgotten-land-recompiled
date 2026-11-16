@@ -16,7 +16,12 @@ static int64_t byte_diff(const uint8_t *a, const uint8_t *b) {  // (a and b diff
     return (int64_t)*a - (int64_t)*b;
 }
 
-void hle_memcpy(Cpu *c) { memmove(P(0), P(1), c->x[2]); }  // (memmove: an overlapping copy behaves as the SDK's)
+extern volatile int g_stage_jump;  // hle/stage_jump.c
+void stage_jump_memcpy(Cpu *c);
+void hle_memcpy(Cpu *c) {
+    if (__builtin_expect(g_stage_jump, 0)) stage_jump_memcpy(c);
+    memmove(P(0), P(1), c->x[2]);  // (memmove: an overlapping copy behaves as the SDK's)
+}
 void hle_memmove(Cpu *c) { memmove(P(0), P(1), c->x[2]); }
 void hle_memset(Cpu *c) { memset(P(0), (int)(uint8_t)c->x[1], c->x[2]); }
 void hle_memcmp(Cpu *c) { c->x[0] = (uint64_t)(memcmp(P(0), P(1), c->x[2]) ? byte_diff(CP(0), CP(1)) : 0); }

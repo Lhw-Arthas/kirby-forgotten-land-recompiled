@@ -517,6 +517,14 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
     return (ssize_t)done;
 }
 
+// Whether some RomFS file's path starts with `prefix` (hle/stage_jump.c: is this a map step's folder).
+bool romfs_has_prefix(const char *prefix) {
+    size_t n = strlen(prefix);
+    for (int i = 0; i < rom_nfiles; i++)
+        if (!strncmp(rom_files[i].path, prefix, n)) return true;
+    return false;
+}
+
 // Path of the RomFS file containing image offset `off` (NULL if none).
 const char *romfs_file_at(uint64_t off) {
     int lo = 0, hi = rom_nfiles - 1;
