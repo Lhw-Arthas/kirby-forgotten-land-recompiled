@@ -123,7 +123,8 @@ typedef struct TexBackend {
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
-    bool ao;             // (scalable) the game's ambient occlusion: at its own scale (textures.c tex_ao)
+    bool storage;        // made with storage usage (an NVN image: vk_storage_view)
+    bool ao;            // (scalable) the game's ambient occlusion: at its own scale (textures.c tex_ao)
     bool shadow;         // (scalable) the game's shadow map: at its own scale (textures.c tex_shadow)
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
@@ -157,6 +158,8 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect);
 VkImageView vk_dummy_view(int textype);
+// Storage view of t for compute stores (SUST); NULL when t has no storage usage or another dimension.
+VkImageView vk_storage_view(NvnTexture *t, const NvnTextureView *v, bool has_view, int want_textype);
 VkImageView vk_dummy_depth_view(int textype);  // shadow (depth compare) slots: 1x1 depth, cleared to 1.0
 bool vk_format_depth_compare(VkFormat f);  // SAMPLED_IMAGE_DEPTH_COMPARISON
 bool vk_tex_depth_compare(NvnTexture *t);  // t's image can be sampled with a depth compare
