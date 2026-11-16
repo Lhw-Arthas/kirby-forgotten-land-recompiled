@@ -99,14 +99,17 @@ typedef struct NvnSync {
 } NvnSync;
 
 // ---- command recording (stored in guest command memory)
+typedef struct CmdSpill CmdSpill;  // (cmdbuf.c) host memory a list goes on in once the game's chunk is full
 typedef struct {
-    uint64_t mem;    // current command memory chunk (guest address)
+    uint64_t mem;    // current command memory chunk (guest address, or a spill's)
     uint64_t size;   // chunk size
     uint64_t used;   // bytes used in chunk
     uint64_t start;  // first record of the list being recorded
     uint64_t callback, callback_data;
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
+    uint64_t chunk;  // the guest chunk added last
+    CmdSpill *spills;
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.

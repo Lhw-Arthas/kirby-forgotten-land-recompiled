@@ -16,7 +16,14 @@ NVN(nvnCommandBufferInitialize) {
     SET_HOST(A(0), cb);
     RET(1);
 }
-NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }
+struct CmdSpill { CmdSpill *next; uint64_t owner, size; bool busy; _Alignas(16) uint8_t mem[]; };  // owner: the guest chunk it continues
+
+NVN(nvnCommandBufferFinalize) {
+    NvnCmdBuf *cb = cb_of(A(0));
+    for (CmdSpill *s = cb->spills, *n; s; s = n) n = s->next, free(s);
+    free(cb);
+    SET_HOST(A(0), 0);
+}
 NVN(nvnCommandBufferSetDebugLabel) { (void)c; }
 
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
@@ -27,9 +34,7 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     return r;
 }
 
-NVN(nvnCommandBufferAddCommandMemory) {
-    NvnCmdBuf *cb = cb_of(A(0));
-    uint64_t mem = HOST(NvnPool, A(1))->storage + A(2), size = A(3);
+static void use_memory(NvnCmdBuf *cb, uint64_t mem, uint64_t size) {
     if (cb->recording && cb->mem) {
         // chain the list being recorded into the new chunk
         CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
@@ -38,6 +43,15 @@ NVN(nvnCommandBufferAddCommandMemory) {
     cb->mem = mem;
     cb->size = size;
     cb->used = 0;
+}
+
+NVN(nvnCommandBufferAddCommandMemory) {
+    NvnCmdBuf *cb = cb_of(A(0));
+    uint64_t mem = HOST(NvnPool, A(1))->storage + A(2);
+    for (CmdSpill *s = cb->spills; s; s = s->next)  // (the game reuses the chunk: it is done with the lists in it)
+        if (s->owner == mem) s->busy = false;
+    cb->chunk = mem;
+    use_memory(cb, mem, A(3));
 }
 NVN(nvnCommandBufferAddControlMemory) { (void)c; }
 NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
@@ -55,12 +69,30 @@ NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); 
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
 NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 
+// The game sizes its command memory for NVN's encoding, and a CmdRec is bigger than most NVN commands: a list can outgrow
+// a chunk the game never expected to fill (the credits: 512 KB, and its callback adds nothing). The list goes on in host
+// memory kept with the guest chunk it continues, and reused once the game adds that chunk again.
+static void spill(NvnCmdBuf *cb, uint64_t need) {
+    CmdSpill *s = cb->spills;
+    while (s && (s->busy || s->size < need)) s = s->next;
+    if (!s) {
+        uint64_t size = need > 0x40000 ? need : 0x40000;
+        LOG("[nvn] command buffer %llx: a list outgrew its command memory, %llu KB more in host memory\n",
+            (unsigned long long)cb->guest, (unsigned long long)(size >> 10));
+        s = malloc(sizeof *s + size);
+        s->size = size;
+        s->next = cb->spills;
+        cb->spills = s;
+    }
+    s->owner = cb->chunk, s->busy = true;
+    use_memory(cb, (uint64_t)(uintptr_t)s->mem, s->size);
+}
+
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
-    for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
-        if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
+    if ((!cb->mem || cb->used + size + JUMP_RESERVE > cb->size) && cb->callback) {
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = cb->guest;
@@ -70,6 +102,7 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
         guest_call(c, cb->callback);
         memcpy(c->x, saved, sizeof saved);
     }
+    if (!cb->mem || cb->used + size + JUMP_RESERVE > cb->size) spill(cb, size + JUMP_RESERVE);
     CmdRec *r = raw_rec(cb->mem + cb->used, op, size);
     cb->used += size;
     return r;
