@@ -3,7 +3,7 @@
 //
 // Extractor slots: 4 GetTrackCount(int*), 5 GetTrackConfiguration(int, MediaData*), 6 SelectTrack(int),
 //   9 GetSampleTrackIndex(size_t*), 10 Read(Buffer*), 11 Advance(), 12 GetSampleTime(int64*),
-//   15 SetDataSource(DataSource*, const char* path).
+//   15 SetDataSource(DataSource*, const char* path), 2 SetDataSource(const char* path).
 // Decoder slots: 2 Configure(MediaData*), 3 RegisterClientEvents(EventType*[4]), 4 GetOutputFormat(MediaData*),
 //   6 Start, 9 AcquireInputBufferIndex(int*, int*), 10 GetInputBuffer(int, Buffer*),
 //   11 SendInputBufferForDecode(int, int off, int size, int64 time, uint32 flags),
@@ -75,6 +75,14 @@ HLE_FUNC("_ZNK5movie9MediaData9FindInt32EPKcPi", md_find_int32) {
     const char *k = (const char *)(uintptr_t)c->x[1];
     for (int i = 0; i < m->n; i++)
         if (!m->e[i].is_str && !strcmp(m->e[i].key, k)) { *(int32_t *)(uintptr_t)c->x[2] = (int32_t)m->e[i].ival; c->x[0] = 1; return; }
+    c->x[0] = 0;
+}
+// (Kirby reads the track's durationUs: without this the SDK's own FindInt64 ran on the host's table and crashed)
+HLE_FUNC("_ZNK5movie9MediaData9FindInt64EPKcPl", md_find_int64) {
+    MediaData *m = md(c->x[0]);
+    const char *k = (const char *)(uintptr_t)c->x[1];
+    for (int i = 0; i < m->n; i++)
+        if (!m->e[i].is_str && !strcmp(m->e[i].key, k)) { *(int64_t *)(uintptr_t)c->x[2] = m->e[i].ival; c->x[0] = 1; return; }
     c->x[0] = 0;
 }
 HLE_FUNC("_ZNK5movie9MediaData10FindStringEPKcPS2_", md_find_string) {
@@ -393,11 +401,13 @@ EX_LOCKED(ex_advance)
 EX_LOCKED(ex_get_sample_time)
 EX_LOCKED(ex_cached_duration)
 EX_LOCKED(ex_set_data_source)
+// slot 2: SetDataSource(const char* path) - Kirby's; slot 15 takes the path after a stream reader
+static void ex_set_data_source_path(Cpu *c) { c->x[2] = c->x[1]; ex_set_data_source_l(c); }
 
 HLE_FUNC("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extractor_ctor) {
     uint64_t vt = g_ex_vt;
     if (!vt) {
-        HostFn f[16] = {ex_dtor_l, ex_dtor_l, movie_log_slot, movie_log_slot, ex_get_track_count_l,
+        HostFn f[16] = {ex_dtor_l, ex_dtor_l, ex_set_data_source_path, movie_log_slot, ex_get_track_count_l,
                         ex_get_track_config_l, ex_select_track_l, movie_log_slot, ex_seek_l, ex_get_sample_track_l,
                         ex_read_l, ex_advance_l, ex_get_sample_time_l, movie_log_slot, ex_cached_duration_l,
                         ex_set_data_source_l};
