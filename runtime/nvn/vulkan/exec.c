@@ -1119,10 +1119,11 @@ static void skip_note(int why, bool compute) {
     }
     skip_top[j].n++;
 }
-static uint64_t cum_build_skips;  // draws skipped for a program or pipeline still being built, never reset (vk_build_hold)
-#define SKIP(why) do { int w_ = (why); stat_skipped++; cum_build_skips += w_ == SK_PROG_BUILDING || w_ == SK_PIPE_BUILDING; \
+static uint64_t cum_build_skips, cum_skips;  // skipped for a build still running / for any reason, never reset (vk_build_hold)
+static uint64_t stat_skipped_held;  // of stat_skipped, those in frames vk_build_hold kept off the screen
+#define SKIP(why) do { int w_ = (why); stat_skipped++, cum_skips++; cum_build_skips += w_ == SK_PROG_BUILDING || w_ == SK_PIPE_BUILDING; \
                        if (log_skips) skip_note(w_, false); } while (0)
-#define SKIP_CS(why) do { stat_skipped++; if (log_skips) skip_note(why, true); } while (0)
+#define SKIP_CS(why) do { stat_skipped++, cum_skips++; if (log_skips) skip_note(why, true); } while (0)
 static void skip_log(void) {
     if (log_skips <= 0) return;
     uint64_t total = 0;
@@ -1194,7 +1195,7 @@ static void builds_check(void) {
 // first time) are not held for: those draws pop in as before. begin(): a run of held frames starts. notice(done,
 // total): from a second into the run, 4 times a second, the builds finished since it started of those plus the rest.
 bool vk_build_hold(void (*begin)(void), void (*notice)(int done, int total)) {
-    static uint64_t l_draws, l_skips, since;  // since: the run's first held frame (0: the last frame was shown)
+    static uint64_t l_draws, l_skips, l_all, since;  // since: the run's first held frame (0: the last frame was shown)
     static int done0;
     uint64_t drawn = cum_draws - l_draws, skipped = cum_build_skips - l_skips;
     int jobs = atomic_load(&jobs_pending);
@@ -1218,8 +1219,9 @@ bool vk_build_hold(void (*begin)(void), void (*notice)(int done, int total)) {
         if (nlog++ < 200)
             LOG("[vk] frame held %.0f ms for %d shader / pipeline builds (%llu draws waiting, %llu drawn)\n",
                 (SDL_GetTicksNS() - t0) / 1e6, jobs, (unsigned long long)skipped, (unsigned long long)drawn);
+        stat_skipped_held += cum_skips - l_all;
     } else since = 0;
-    l_draws = cum_draws, l_skips = cum_build_skips;
+    l_draws = cum_draws, l_skips = cum_build_skips, l_all = cum_skips;
     return hold;
 }
 
@@ -1235,9 +1237,10 @@ const char *renderer_stats(void) {
     int compiles = atomic_exchange(&stat_compiles, 0);
     hud_compiles += (uint64_t)compiles;
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, "
-             "deferred %llu, snap %lluKB/%llu",
-             (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
+             "%llu draws, %llu skipped (%llu in held frames), %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, "
+             "fbcopy %llu, upload %.1fMB, deferred %llu, snap %lluKB/%llu",
+             (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_skipped_held,
+             (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              compiles, (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)__atomic_exchange_n(&stat_deferred, 0, __ATOMIC_RELAXED), (unsigned long long)(stat_snap_bytes >> 10),
@@ -1357,7 +1360,7 @@ const char *renderer_stats(void) {
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
     hud_draws += stat_draws, hud_passes += stat_passes, hud_dispatches += stat_dispatches;  // (renderer_hud's totals)
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    stat_draws = stat_skipped = stat_skipped_held = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
     return stats_text;
 }
 

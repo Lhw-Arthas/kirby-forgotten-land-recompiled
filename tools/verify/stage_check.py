@@ -4,8 +4,8 @@
   stage_check.py report <tour.jsonl>                                        -> a Markdown table; exit 1 if any stage failed
 
 A stage passes when its step's files were read (LARECOMP_STAGE took it there), nothing fatal (FATAL or a crash), no missing function, no shader
-that failed to translate, no hang dump, no skipped draw once <hold frames> have passed since the step loaded (the shaders had
-time to build), the final window image is not black, and the game made sound in the last seconds. Unimplemented services and
+that failed to translate, no hang dump, no skipped draw in a frame shown once <hold frames> have passed since the step loaded (the
+shaders had time to build), the final window image is not black, and the game made sound in the last seconds. Unimplemented services and
 stubbed commands are listed, not failed: some are expected offline.
 """
 import json
@@ -14,7 +14,7 @@ import struct
 import sys
 import zlib
 
-VK = re.compile(r'\[vk\] t=[\d.]+ frame (\d+) .*?\((\d+) draws, (\d+) skipped')
+VK = re.compile(r'\[vk\] t=[\d.]+ frame (\d+) .*?\((\d+) draws, (\d+) skipped(?: \((\d+) in held frames\))?')
 STEP_READ = '[fs] read ubin/Step/Map/'
 NOTED = ('[hle] UNIMPLEMENTED', '[ipc] STUB', '(unhandled')
 
@@ -88,7 +88,7 @@ def check(stage, log_path, shot, wav, hold):
                     rec['load_frame'] = stats[-1][0] if stats else 0
             m = VK.search(line)
             if m:
-                stats.append((int(m.group(1)), int(m.group(3))))
+                stats.append((int(m.group(1)), max(0, int(m.group(3)) - int(m.group(4) or 0))))
                 rec['last_frame'] = int(m.group(1))
             if (line.startswith('FATAL') or line.startswith('*** exception')) and not rec['fatal']:
                 rec['fatal'] = line.strip()[:200]
