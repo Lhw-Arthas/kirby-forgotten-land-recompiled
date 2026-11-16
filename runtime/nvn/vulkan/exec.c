@@ -2195,6 +2195,7 @@ static void translate_program(void *arg) {
         LOG("[shader] geometry stage program: vs %llx gs %llx fs %llx (gs %u instructions, heap %s)\n", (unsigned long long)p->code[0],
             (unsigned long long)p->code[2], (unsigned long long)p->code[1], p->gi->num_insts, p->gi->uses_gmem_store ? "stores" : "no");
     }
+    if (p->vs_only) LOG("[shader] vertex-only program: vs %llx (heap %s)\n", (unsigned long long)p->code[0], p->vi->uses_gmem_store ? "stores" : "no");
     run_job(compile_program, p);
 }
 
