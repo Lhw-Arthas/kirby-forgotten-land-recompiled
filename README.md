@@ -35,10 +35,12 @@ from the same folder, show its settings and start it.
 
 | Path | What it is |
 |---|---|
-| `tools/` | The generator: lifts the game's NSO modules to C (`gen.py`, `lifter.py`) |
-| `runtime/` | The runtime: kernel, services, NVN graphics on Vulkan, audio, input |
+| `game/` | What names this game: `game.h` (program id, folders, modules) and `game.mk` (exe name, version) |
+| `runtime/` | The runtime, from LAS Recomp: kernel, services, NVN graphics on Vulkan, audio, input |
+| `tools/` | The generator that lifts the game's NSO modules to C (`gen.py`, `lifter.py`), the packaging and the tests |
 | `launcher/` | The launcher (Tauri 2): pick the game folder, build the game code, play |
 | `third_party/` | Bundled libraries, each under its own license |
+| `docs/` | Status, the upstream record, what the launcher expects from the runtime |
 
 Nothing derived from the game lives in this repository. The extracted game files, the generated C and the build
 output all go to a **work folder** outside it (`../work/kfl` by default, `WORK=` to change).
@@ -81,9 +83,11 @@ cd ../work/kfl && LARECOMP_GAME_LIB=build/lasgame.dll ./build/lasrecomp.exe extr
 
 ## Credits
 
-- [letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp) by raulzrrs, the runtime and generator this port starts from
-- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai (MIT), the Switch recompiler and runtime that letsgo-recomp is built on.
-  This port also follows its later work directly for fixes and design
+- [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai (MIT), the Switch recompiler this project is built on:
+  the runtime (kernel, services, graphics, audio, input) and the game code generator are LAS Recomp's, copied at the
+  commit named in [docs/UPSTREAM.md](docs/UPSTREAM.md) with its own copyright notices kept
+- [letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp) by raulzrrs (MIT), where this port started: the first
+  Kirby port was made from it, and its services for this game are carried over
 - The launcher's layout follows [Recompia](https://github.com/Dittobyte/Recompia)'s; its code and art are original
 
 ## License
