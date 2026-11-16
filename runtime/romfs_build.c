@@ -3,6 +3,7 @@
 // entries. The image itself is never written: runtime/services/fs.c serves it from this layout and the files. Entries are found by hash (the game's RomFS code walks the tables itself), so the order inside them only
 // has to be consistent: directories and files are sorted by name, children before siblings' children.
 #include "romfs_build.h"
+#include "game.h"
 
 #include "platform.h"  // (Windows: POSIX mkdir)
 
@@ -128,14 +129,26 @@ static bool is_dir(const char *path) {
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+bool romfs_is_game(const char *dir) {
+    static const char *const markers[] = {GAME_ROMFS_MARKERS};
+    char p[2200];
+    for (size_t i = 0; i < sizeof markers / sizeof *markers; i++) {
+        snprintf(p, sizeof p, "%s/%s", dir, markers[i]);
+        if (!is_dir(p)) return false;
+    }
+    return true;
+}
+
 static void find_game(const char *dir, int depth, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size,
                       bool *unusable) {
     if (depth > 4 || (*exefs && *romfs)) return;
     char p[2200], q[2200];
     snprintf(p, sizeof p, "%s/main", dir), snprintf(q, sizeof q, "%s/main.npdm", dir);
     if (!*exefs && exists(p) && exists(q)) snprintf(exefs, exefs_size, "%s", dir);
-    snprintf(p, sizeof p, "%s/region_common", dir);
-    if (!*romfs && is_dir(p)) snprintf(romfs, romfs_size, "%s", dir);
+    if (romfs_is_game(dir)) {  // (its folders are the game's data: nothing else to find in them)
+        if (!*romfs) snprintf(romfs, romfs_size, "%s", dir);
+        return;
+    }
     DIR *d = opendir(dir);
     if (!d) return;
     char **sub = NULL;
@@ -150,7 +163,7 @@ static void find_game(const char *dir, int depth, char *exefs, size_t exefs_size
         for (size_t i = 0; i < sizeof packages / sizeof *packages; i++)
             if (strcasecmp(ext, packages[i]) == 0 && unusable) *unusable = true;
         snprintf(p, sizeof p, "%s/%s", dir, name);
-        if (strcmp(name, "region_common") != 0 && is_dir(p)) {
+        if (is_dir(p)) {
             if (n == cap) sub = realloc(sub, sizeof *sub * (cap = cap ? cap * 2 : 16));
             sub[n++] = strdup(p);
         }

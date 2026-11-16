@@ -6,6 +6,7 @@
 
 #include "hle.h"
 #include "kernel.h"
+#include "game.h"
 #ifdef _WIN32
 #include "platform/windows_threads.h"
 #endif
@@ -843,7 +844,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
         case 16: case 17: v = 0; break;
-        case 18: v = 0x01006BB00C6F0000ull; break;
+        case 18: v = GAME_PROGRAM_ID; break;
         case 20: v = 0; break;
         default: r = R_INVALID_ENUM; LOG("[kernel] GetInfo unknown id %u/%llu\n", id0, x[3]);
         }

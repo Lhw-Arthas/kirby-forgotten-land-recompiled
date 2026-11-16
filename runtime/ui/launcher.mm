@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 
+#include "game.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // (SetKeyOwner)
 #include "i18n.h"
@@ -115,8 +116,8 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 // test build (a pre-release for a few players to try a fix) is test-<name>: the start screen says "Test build <name>",
 // and it previews LARECOMP_TEST_OF - the update check offers that release (or a later one) as soon as it's out, so its
 // players move to it.
-#define LARECOMP_VERSION "v0.6.0"
-#define LARECOMP_TEST_OF "v0.6.0"
+#define LARECOMP_VERSION "v" GAME_VERSION  // (game/game.mk)
+#define LARECOMP_TEST_OF LARECOMP_VERSION
 // Experimental builds (.github/workflows/experimental.yml sets these): the build's time (YYYYMMDDHHMM, UTC; 0: not an
 // experimental build). They only look for a newer experimental build of their own platform, never a normal release.
 #define LARECOMP_EXPERIMENTAL_STAMP 0LL
@@ -149,8 +150,8 @@ extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (
 // v0.<n>.<m> the same as beta_<n>.<m>; other tags (the alpha_* ones) are ignored. (Beta 5 and earlier only know
 // beta_<n>: they never offer a hotfix; builds before Beta 5.3 don't know v0.<n>.<m> either.) Offline / no curl /
 // anything unexpected: nothing is shown.
-#define RELEASES_URL "https://api.github.com/repos/peiikai/LASRecomp/releases?per_page=100"
-#define RELEASE_PAGE "https://github.com/peiikai/LASRecomp/releases/tag/"
+#define RELEASES_URL "https://api.github.com/repos/" GAME_REPO "/releases?per_page=100"
+#define RELEASE_PAGE "https://github.com/" GAME_REPO "/releases/tag/"
 
 #include "update_tags.h"  // tag_rank, tag_label
 
@@ -249,7 +250,8 @@ static bool file_exists(const std::string &p) {
 // With check (base: where the path inside romfs starts), the files that aren't the game's are named in the log, the
 // first ROMFS_ODD_LOGGED of them (check->odd counts them all), and copies of the game code at the romfs root
 // (game_romfs_exefs_copy, game: the game folder) are left out of the count and the bytes (check->copies).
-enum { ROMFS_FILES = 3836, ROMFS_ODD_LOGGED = 20 };
+// (0: this repo holds no count read from the game, so the incomplete-copy checks are off)
+enum { ROMFS_FILES = 0, ROMFS_ODD_LOGGED = 20 };
 struct RomfsCheckWalk { GameRomfsCheck *check; size_t base; int odd; const char *game; int copies; };
 static int count_files(const std::string &dir, int depth = 0, uint64_t *bytes = NULL, RomfsCheckWalk *check = NULL) {
     DIR *d = depth < 12 ? opendir(dir.c_str()) : NULL;
@@ -354,7 +356,7 @@ static std::string check_copied_files(const std::string &root) {
         refused_main(root + "/exefs");  // (the log line)
         return LN("Wrong version of the game");
     }
-    if (!file_exists(root + "/romfs/region_common")) return incomplete(0);
+    if (!romfs_is_game((root + "/romfs").c_str())) return incomplete(0);
     if (g_romfs_count < 0) {
         g_romfs_bytes = 0;
         const GameVersion *v = game_version_of(root.c_str());
@@ -491,7 +493,7 @@ static void set_failure(int k, int have = -1, const char *reason = NULL) {
     set_job(head[k], true, reason ? std::string(reason) + " " + hint[k] : hint[k]);
 }
 
-// exefs: the folder with main and main.npdm; romfs: the folder with region_common (runtime/romfs_build.h: the
+// exefs: the folder with main and main.npdm; romfs: the game's RomFS folder (runtime/romfs_build.h: the
 // picked folder or a few levels below it)
 static void find_game(const std::string &dir, std::string &exefs, std::string &romfs, bool &unusable) {
     char e[2200], r[2200];
@@ -2730,8 +2732,8 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
                 };
                 // (the descriptions put together here in the menus' language: the row finds no English for them)
-                std::string src_d = L("Pick the folder with your extracted exefs and romfs from The Legend of Zelda: Link's "
-                                      "Awakening for Switch. LAS Recomp doesn't include the game.");
+                std::string src_d = L("Pick the folder with your extracted exefs and romfs from " GAME_TITLE " for Switch. "
+                                      GAME_NAME " doesn't include the game.");
                 if (!src.empty()) src_d += std::string("\n\n") + L("Chosen:") + " " + folder_shown(src.c_str());
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;
