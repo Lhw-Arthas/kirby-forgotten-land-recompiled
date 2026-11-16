@@ -753,6 +753,8 @@ void input_frame(uint64_t frame) {
     atomic_store(&rumble_frame_ms, SDL_GetTicks());
     g_last_frame = frame;
     pthread_once(&g_anchor_once, anchors_parse);
+    extern void rt_ticks_present(void);
+    rt_ticks_present();
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,

@@ -78,12 +78,48 @@ void kernel_signal(KObject *o) {
 
 // ------------------------------------------------------------------ time
 
-uint64_t rt_ticks(void) {
-    // 19.2 MHz system tick
-    uint64_t ns = plat_now_ns();
+// LARECOMP_LOCKSTEP=1 (scripted runs): the clock gets at most one 30 fps frame (33.3 ms) ahead of the last present.
+// The game times its frames by this clock, so on a slow or busy host a frame still advances the world one step, not
+// two or three, and an input script lands Kirby in the same place whatever the frame rate. After 1 s without a
+// present (a load) it runs freely again. With LARECOMP_TICK_SCALE > 1 the game runs as fast as the host allows.
+static pthread_mutex_t lockstep_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t lockstep_virt, lockstep_real;  // the clock and the scaled host time at the last present
+static int lockstep_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOCKSTEP") && atoi(getenv("LARECOMP_LOCKSTEP"));
+    return on;
+}
+static uint64_t scaled_now_ns(void) {
     static double scale = -1;
     if (scale < 0) scale = getenv("LARECOMP_TICK_SCALE") ? atof(getenv("LARECOMP_TICK_SCALE")) : 1.0;
-    if (scale != 1.0) ns = (uint64_t)(ns * scale);
+    uint64_t ns = plat_now_ns();
+    return scale != 1.0 ? (uint64_t)(ns * scale) : ns;
+}
+static uint64_t clock_ns(uint64_t ns) {
+    if (!lockstep_real) return ns;
+    const uint64_t frame = 33333333, free_after = 1000000000;
+    uint64_t d = ns - lockstep_real;
+    return lockstep_virt + (d < frame ? d : frame) + (d > free_after ? d - free_after : 0);
+}
+void rt_ticks_present(void) {  // (hle/input.c input_frame: once per presented frame)
+    if (!lockstep_on()) return;
+    pthread_mutex_lock(&lockstep_mu);
+    uint64_t ns = scaled_now_ns();
+    lockstep_virt = clock_ns(ns);
+    lockstep_real = ns;
+    pthread_mutex_unlock(&lockstep_mu);
+}
+
+uint64_t rt_ticks(void) {
+    // 19.2 MHz system tick
+    uint64_t ns;
+    if (lockstep_on()) {
+        pthread_mutex_lock(&lockstep_mu);
+        ns = clock_ns(scaled_now_ns());
+        pthread_mutex_unlock(&lockstep_mu);
+    } else {
+        ns = scaled_now_ns();
+    }
     return (uint64_t)((__uint128_t)ns * 192 / 10000);
 }
 
