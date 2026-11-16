@@ -219,12 +219,15 @@ def check(args):
             for fmt, w, h, d, a, mips, dim in r['tex']:
                 fmts[fmt] += 1
                 per_fmt_files[fmt].add(r['rel'])
-                dims[(dim, 'array' if a > 1 else 'single', '3D' if d > 1 else '2D')] += 1
+                dims[(BNTX.get(fmt, (hex(fmt),))[0], 'array' if a > 1 else 'single', '3D' if d > 1 else '2D')] += 1
                 biggest = max(biggest, (w * h, w, h))
             if 'bfstm' in r:
                 bfstm[r['bfstm']] += 1
     mapped = nvn_codes_mapped(args.textures_c) if os.path.isfile(args.textures_c) else None
     tex_rows = []
+    for (name, layers, depth), n in sorted(dims.items()):
+        if name.startswith('ASTC') and (layers, depth) != ('single', '2D'):
+            warn.append(f'{n} {name} textures are {layers}/{depth}: the CPU ASTC decoder (astc.c) handles 2D layers only, used where the GPU has no ASTC')
     for fmt, n in sorted(fmts.items(), key=lambda kv: -kv[1]):
         name, nvn = BNTX.get(fmt, (None, None))
         if name is None:
@@ -260,7 +263,7 @@ def check(args):
         warn.append(f'{len(movies)} movies and {len(opuses)} opus files not decoded (no --av-check)')
     lines = [f'files {len(files)}, {nbytes / 1e9:.2f} GB read; by type {dict(ext.most_common())}',
              f'compressed files by codec {dict(kinds)}',
-             f'textures: {sum(fmts.values())} in {len(set().union(*per_fmt_files.values())) if per_fmt_files else 0} files; largest {biggest[1]}x{biggest[2]}; (dim, array, depth) {dict(dims)}']
+             f'textures: {sum(fmts.values())} in {len(set().union(*per_fmt_files.values())) if per_fmt_files else 0} files; largest {biggest[1]}x{biggest[2]}; (format, array, depth) with more than one layer or slice: {dict((k, n) for k, n in dims.items() if k[1:] != ('single', '2D'))}']
     lines += tex_rows + bf_rows
     lines.append(f'movies {len(movies)}, {sum(1 for p in movies if av.get(p, (False,))[0])} decoded; opus {len(opuses)}, '
                  f'{sum(1 for p in opuses if av.get(p, (False,))[0])} decoded')
