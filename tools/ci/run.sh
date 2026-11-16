@@ -59,7 +59,7 @@ suite_engine() {
     t vulkan_sync_errors 'python tools/test_vulkan_sync_errors.py'
     t thread_stack 'clang -std=gnu11 -O1 tools/test_windows_thread_stack.c -lpsapi -o build/test-thread-stack.exe && build/test-thread-stack.exe'
     t lazy_commit 'clang -std=gnu11 -O1 -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -DWIN32_LEAN_AND_MEAN -DNOMINMAX tools/test_windows_lazy_commit.c -lwinmm -lole32 -lshell32 -o build/test-lazy-commit.exe && build/test-lazy-commit.exe'
-    xfail windows_logs "its stub source has no GAME_LOG (game/game.h), which runtime/platform/windows.c uses" 'python tools/test_windows_logs.py'
+    t windows_logs 'python tools/test_windows_logs.py'
     t simd_rounding 'clang -std=gnu11 -O1 -mfma -pthread tools/test_simd_rounding.c -o build/test-simd-rounding.exe && build/test-simd-rounding.exe'
     t settings 'python tools/test_settings.py'
     t pace 'python tools/test_pace.py'
