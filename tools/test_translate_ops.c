@@ -57,6 +57,27 @@ static uint64_t lds(int d, int a, uint32_t off, int size) {
 }
 static uint64_t sts(int d, int a, uint32_t off, int size) { return lds(d, a, off, size) | 1ull << 52; }
 
+// VMAD Rd, Ra.<asel>, Rb.<bsel> (b < 0: immediate imm), Rc / VSETP.<cmp>.AND Pd, PT, Ra.<asel>, Rb.<bsel>, PT. A
+// selector: 0..3 bytes (width byte), 4..5 halves, 6 the word; bit 3 of it: signed
+static uint64_t vsel(int sel, int sel_lo, int width_lo) {  // (selector and width share their middle bit)
+    int s = sel & 7, width = s < 4 ? (s >> 1) : s < 6 ? 2 : 3, k = s < 4 ? (s & 3) : s - 4;
+    return (uint64_t)(k & 1) << sel_lo | (uint64_t)width << width_lo;
+}
+static uint64_t video(uint64_t op, int a, int asel, int b, int bsel, uint32_t imm) {
+    uint64_t w = op | PT_GUARD | (uint64_t)a << 8 | vsel(asel, 36, 37) | (uint64_t)(asel >> 3) << 48;
+    if (b >= 0) w |= 1ull << 50 | (uint64_t)b << 20 | vsel(bsel, 28, 29) | (uint64_t)(bsel >> 3) << 49;
+    else w |= (uint64_t)(imm & 0xFFFF) << 20 | (uint64_t)(bsel >> 3) << 49;
+    return w;
+}
+static uint64_t vmad(int d, int a, int asel, int b, int bsel, uint32_t imm, int c) {
+    return video(0x5f00000000000000ull, a, asel, b, bsel, imm) | (uint64_t)d | (uint64_t)c << 39;
+}
+static uint64_t vsetp(int p, int q, int cmp, int a, int asel, int b, int bsel, uint32_t imm) {
+    return video(0x50f0000000000000ull, a, asel, b, bsel, imm) | (uint64_t)q | (uint64_t)p << 3 | 7ull << 39 |
+           (uint64_t)(cmp & 3) << 43 | (uint64_t)(cmp >> 2) << 47;
+}
+static uint64_t isberd(int d, int a) { return 0xefd0000000000000ull | PT_GUARD | (uint64_t)d | (uint64_t)a << 8; }
+
 typedef struct {
     const char *name;
     uint64_t insn[6];  // 0-terminated
@@ -118,6 +139,16 @@ static const Case *cases(int *n) {
     CASE_CS("STS.U8 into a stored word", "r0", 0xAABB11DDu, mov32i(1, 0xAABBCCDDu), sts(1, 255, 8, 4), mov32i(3, 0x11), sts(3, 255, 9, 0), lds(0, 255, 8, 4));
     CASE_CS("LDS.S16 sign-extends the high half", "r0", 0xFFFF8000u, mov32i(1, 0x8000FFFFu), sts(1, 255, 0, 4), lds(0, 255, 2, 3));
     CASE_CS("STS.64 / LDS.64 (high)", "r1", 2u, mov32i(4, 1), mov32i(5, 2), sts(4, 255, 0x40, 5), lds(0, 255, 0x40, 5));
+    // VMAD / VSETP: the geometry stages' vertex numbers from the invocation info word (vertices in byte 2)
+    CASE("VMAD R0 = R1.B0 * R1.B2 + R2", "r0", 16u, mov32i(1, 0x00030005u), mov32i(2, 1), vmad(0, 1, 0, 1, 2, 0, 2));
+    CASE("VMAD R0 = R1.H1 * 6 + RZ", "r0", 42u, mov32i(1, 0x00070000u), vmad(0, 1, 5, -1, 0, 6, 255));
+    CASE("VMAD R0 = R1.S8 (byte 3) * -2 (signed imm)", "r0", 2u, mov32i(1, 0xFF000000u), vmad(0, 1, 8 | 3, -1, 8, 0xFFFE, 255));
+    CASE("VMAD R0 = R1 (word) * R2.B1 + R3", "r0", 0x10000017u, mov32i(1, 0x08000000u), mov32i(2, 0x0200u), mov32i(3, 0x17u),
+         vmad(0, 1, 6, 2, 1, 0, 3));
+    CASE("VSETP.LE R1.B2, 2 (3 vertices)", "p0", 0, mov32i(1, 0x00030000u), vsetp(0, 7, 3, 1, 2, -1, 0, 2));
+    CASE("VSETP.LE R1.B2, 3", "p0", 1, mov32i(1, 0x00030000u), vsetp(0, 7, 3, 1, 2, -1, 0, 3));
+    CASE("VSETP.GT R1.B0, R2.B2 (second)", "p1", 1, mov32i(1, 1), mov32i(2, 0x00050000u), vsetp(0, 1, 4, 1, 0, 2, 2, 0));
+    CASE("ISBERD passes the vertex through", "r0", 2u, mov32i(1, 2), isberd(0, 1));
 #undef CASE_CS
 #undef CASE
     *n = k;
@@ -139,6 +170,8 @@ static const char prelude[] =
     "static float2 hx(uint v, uint swz) { if (swz == 1u) { float f = as_type<float>(v); return {f, f}; }"
     " float2 h = {h2f(v & 0xFFFFu), h2f(v >> 16)}; return swz == 2u ? float2{h.x, h.x} : swz == 3u ? float2{h.y, h.y} : h; }\n"
     "static float2 operator-(float2 a) { return {-a.x, -a.y}; }\n"
+    "static uint bfe_u(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; return (v >> pos) & (len >= 32u ? ~0u : (1u << len) - 1u); }\n"
+    "static uint bfe_s(uint v, uint ctl) { uint len = (ctl >> 8) & 0xFFu, x = bfe_u(v, ctl); return len < 32u && (x >> (len - 1u)) & 1u ? x | ~((1u << len) - 1u) : x; }\n"
     "struct cbuf { uint at(uint off) const { return 0x1000u + (off >> 2); } };\n"
     "static const cbuf cb3 = {};\n"
     "static uint cbr(const cbuf &cb, uint off) { return cb.at(off); }\n"
@@ -249,6 +282,49 @@ static int write_glsl(const char *dir) {
         maxwell_free(s);
         s = maxwell_translate((const uint8_t *)prog, (size_t)program(&no, prog) * 8, STAGE_COMPUTE, &key);
         if (s->msl || !strstr(s->error, "image handle")) { printf("FAIL %s: %s\n", no.name, s->msl ? "translated" : s->error); bad++; }
+        maxwell_free(s);
+    }
+    {   // (geometry, GLSL) a pass-through triangle as the game's geometry stages start: the vertex number from the
+        // invocation info (VMAD), ISBERD, ALD of position and attribute 0 at that vertex, AST, OUT emit then cut
+        uint64_t ald = 0xefd8000000000000ull | PT_GUARD | 255ull << 8 | 1ull << 39, ast = 0xeff0000000000000ull | PT_GUARD | 255ull << 8;
+        uint64_t out = 0xfbe0000000000000ull | PT_GUARD | 255ull << 20;
+        const uint64_t insn[] = {0xf0c8000000000000ull | PT_GUARD | 0x1dull << 20, vmad(1, 0, 0, 0, 2, 0, 255), isberd(1, 1),
+                                 ald | 3ull << 47 | 0x70ull << 20 | 4, ald | 0x80ull << 20 | 8, ast | 3ull << 47 | 0x70ull << 20 | 4,
+                                 ast | 0x80ull << 20 | 8, out | 1ull << 39, out | 2ull << 39, EXIT};
+        uint8_t buf[0x80 + 8 * 32] = {0};
+        uint32_t sph[5] = {1u | 4u << 10, 0, 1u << 24, 7u << 24, 3};  // (geometry; 1 invocation, triangle strip, 3 vertices)
+        memcpy(buf + 0x30, sph, sizeof sph);
+        int m = 0;
+        uint64_t prog[32];
+        for (size_t i = 0; i < sizeof insn / sizeof insn[0]; i++) {
+            if (m % 4 == 0) prog[m++] = 0;
+            prog[m++] = insn[i];
+        }
+        while (m % 4) prog[m++] = NOP;
+        memcpy(buf + 0x80, prog, (size_t)m * 8);
+        ShaderKey key = {0};
+        key.glsl = 1, key.flip_y = 1, key.vs_out_mask = 1;
+        ShaderInfo *s = maxwell_translate(buf, 0x80 + (size_t)m * 8, STAGE_GEOMETRY, &key);
+        const char *want[] = {"layout(triangles) in;", "layout(triangle_strip, max_vertices = 3) out;", "in vec4 gin0[];",
+                              "out vec4 v0;", "gl_in[min(r1, 2u)].gl_Position[3]", "gin0[min(r1, 2u)][0]",
+                              "gl_Position.y = -gl_Position.y;\n    EmitVertex();", "EndPrimitive();"};
+        const char *miss = NULL;
+        for (size_t i = 0; s->msl && !miss && i < sizeof want / sizeof want[0]; i++) if (!strstr(s->msl, want[i])) miss = want[i];
+        fprintf(names, "%02d_geom geometry pass-through\n", n + 2);
+        if (!s->msl || miss || s->attr_mask != 1 || s->out_mask != 1) {
+            printf("FAIL geometry pass-through: %s%s\n", s->msl ? "no " : s->error, s->msl ? (miss ? miss : "attr / out masks") : "");
+            bad++;
+        } else {
+            snprintf(path, sizeof path, "%s/%02d_geom.geom", dir, n + 2);
+            FILE *f = fopen(path, "w");
+            if (!f) { perror(path); return 2; }
+            fputs(s->msl, f);
+            fclose(f);
+        }
+        maxwell_free(s);
+        key.vs_out_mask = 0;  // (attribute 0 not from the vertex shader: a constant, no input)
+        s = maxwell_translate(buf, 0x80 + (size_t)m * 8, STAGE_GEOMETRY, &key);
+        if (!s->msl || s->attr_mask || strstr(s->msl, "gin0")) { printf("FAIL geometry input the vertex shader lacks: %s\n", s->msl ? "declared" : s->error); bad++; }
         maxwell_free(s);
     }
     fclose(names);

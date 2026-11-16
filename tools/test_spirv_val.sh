@@ -18,7 +18,7 @@ TFAIL=0
 set +e
 total=0
 failed=""
-for src in "$OUT"/glsl/*.vert "$OUT"/glsl/*.frag "$OUT"/glsl/*.comp; do
+for src in "$OUT"/glsl/*.vert "$OUT"/glsl/*.frag "$OUT"/glsl/*.comp "$OUT"/glsl/*.geom; do
   [ -f "$src" ] || continue
   total=$((total + 1))
   base=$(basename "$src")

@@ -145,6 +145,8 @@ typedef struct {
     int nbrx;
     bool uses_brx_t;       // the structured program's brx_t<k> (a BRX's computed target), k < brx_vars
     int brx_vars;
+    const char *gs_out;    // (geometry, from the program header) output primitive, its vertices at most, invocations
+    int gs_max_vertices, gs_invocations;
 } Ctx;
 typedef struct BrxTab BrxTab;
 
@@ -294,6 +296,14 @@ static void fcmp_expr(char *out, int op, const char *a, const char *b) {
 
 static const char *bool_op(int op) { return op == 0 ? "&&" : op == 1 ? "||" : "!="; }
 
+// (VMAD / VSETP) byte sel of v (width 0 or 1), half sel (2) or the whole word (3); selector and width share a bit
+static const char *video_operand(const char *v, int sel, int width, bool sgn, char *buf) {
+    int n = width == 2 ? 16 : 8;
+    if (width == 3) return v;
+    sprintf(buf, "%s(%s, 0x%xu)", sgn ? "bfe_s" : "bfe_u", v, n << 8 | sel * n);
+    return buf;
+}
+
 static void icmp_expr(char *out, int op, const char *a, const char *b, bool is_signed) {
     static const char *const ops[] = {"false", "<", "==", "<=", ">", "!=", ">=", "true"};
     if (op == 0) strcpy(out, "false");
@@ -305,10 +315,19 @@ static void icmp_expr(char *out, int op, const char *a, const char *b, bool is_s
 // ------------------------------------------------------------------ attributes
 // Maxwell attribute space: 0x70 position, 0x80 + 16*i generic attribute i, 0x2F8 instance id,
 // 0x2FC vertex id, 0x3FC front facing, 0x6C point size.
-static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
+// vtx (geometry): the input vertex, an expression. The code marks a vertex past the primitive's last with 0x80000000
+// (VSETP against the vertex count): clamped, as GLSL leaves an index out of range undefined.
+static void attr_load(Ctx *c, int dst, uint32_t addr, const char *vtx) {
     char e[256];
-    if (idx) { fail(c, "indexed attribute load"); return; }
-    if (c->stage == STAGE_VERTEX) {
+    if (c->stage == STAGE_GEOMETRY) {
+        int a = (addr - 0x80) >> 4, comp = (addr >> 2) & 3;
+        char v[64];
+        snprintf(v, sizeof v, "min(%s, %du)", vtx, GS_IN_VERTICES - 1);
+        if (addr >= 0x70 && addr < 0x80) sprintf(e, "as_type<uint>(gl_in[%s].gl_Position[%d])", v, comp);
+        else if (addr >= 0x80 && addr < 0x280 && !(c->key->vs_out_mask & (1u << a))) strcpy(e, comp == 3 ? "0x3f800000u" : "0u");
+        else if (addr >= 0x80 && addr < 0x280) { c->in_attr_mask |= 1u << a; sprintf(e, "as_type<uint>(gin%d[%s][%d])", a, v, comp); }
+        else { fail(c, "geometry input attribute %#x", addr); return; }
+    } else if (c->stage == STAGE_VERTEX) {
         if (addr >= 0x80 && addr < 0x280) {
             int a = (addr - 0x80) >> 4, comp = (addr >> 2) & 3;
             c->in_attr_mask |= 1u << a;
@@ -361,7 +380,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
 static void attr_store(Ctx *c, int src, uint32_t addr) {
     char b[16];
     const char *v = reg(c, src, b);
-    if (c->glsl && c->stage != STAGE_VERTEX) {  // no vertex outputs in this stage (MSL: undeclared `out`)
+    if (c->glsl && c->stage != STAGE_VERTEX && c->stage != STAGE_GEOMETRY) {  // no vertex outputs in this stage (MSL: undeclared `out`)
         if (addr >= 0x80 && addr < 0x280) c->out_attr_mask |= 1u << ((addr - 0x80) >> 4);
         if (addr == 0x6C) c->info->writes_point_size = true;
         sp(&c->body, "    /* store attr %#x */\n", addr);
@@ -1073,13 +1092,59 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0xefd8000000000000ull, 0xfff8000000000000ull)) {  // LD attribute
         int n = 1 + (int)bits(w, 47, 2);
         uint32_t addr = (uint32_t)bits(w, 20, 10);
-        int ia = (int)bits(w, 8, 8);
+        int ia = (int)bits(w, 8, 8), vr = (int)bits(w, 39, 8);  // (geometry: the input vertex in vr)
         if (ia != RZ) { fail(c, "indexed ld a[]"); }
-        for (int i = 0; i < n; i++) attr_load(c, d + i, addr + 4 * i, NULL);
+        if (c->stage == STAGE_GEOMETRY && bits(w, 31, 2)) fail(c, "geometry ld a[] of a patch or an output");
+        for (int i = 0; i < n; i++) attr_load(c, d + i, addr + 4 * i, c->stage == STAGE_GEOMETRY ? R(vr) : NULL);
     } else if (OPM(0xeff0000000000000ull, 0xfff8000000000000ull)) {  // ST attribute
         int n = 1 + (int)bits(w, 47, 2);
         uint32_t addr = (uint32_t)bits(w, 20, 10);
         for (int i = 0; i < n; i++) attr_store(c, d + i, addr + 4 * i);
+    } else if (OPM(0xefd0000000000000ull, 0xfff8000000000000ull)) {  // ISBERD
+        // (geometry) an input vertex's stage buffer entry: the vertex number passes through to ALD, as Ryujinx and yuzu
+        // read it. Skew, output, other modes and shifts are refused.
+        if (bits(w, 31, 4) || bits(w, 47, 2)) fail(c, "ISBERD form %016llx", (unsigned long long)w);
+        set_reg(c, d, R(a));
+    } else if (OPM(0xfbe0000000000000ull, 0xfff8000000000000ull) || OPM(0xf6e0000000000000ull, 0xfff8000000000000ull)) {  // OUT
+        // (geometry) emit the vertex whose outputs were stored (bit 39) and / or end the strip (bit 40). Stream 0 only.
+        // Rd gets the next output vertex's handle, which AST names and GLSL doesn't need.
+        bool imm = OPM(0xf6e0000000000000ull, 0xfff8000000000000ull);
+        if (c->stage != STAGE_GEOMETRY || !c->glsl) { fail(c, "OUT outside a Vulkan geometry shader"); return; }
+        if (imm ? bits(w, 20, 19) != 0 : bits(w, 20, 8) != RZ) { fail(c, "OUT to a stream other than 0"); return; }
+        if (bits(w, 39, 1)) {  // (the vertex shader's clip space epilogue, ShaderKey, at each vertex)
+            if (c->key->flip_y) sp(&c->body, "    out.pos.y = -out.pos.y;\n");
+            if (c->key->flip_x) sp(&c->body, "    out.pos.x = -out.pos.x;\n");
+            if (c->key->depth_minus_one) sp(&c->body, "    out.pos.z = (out.pos.z + out.pos.w) * 0.5f;\n");
+            sp(&c->body, "    EmitVertex();\n");
+        }
+        if (bits(w, 40, 1)) sp(&c->body, "    EndPrimitive();\n");
+        set_reg(c, d, "0u");
+    } else if (OPM(0x5f00000000000000ull, 0xff80000000000000ull) || OPM(0x50f0000000000000ull, 0xfff8000000000000ull)) {
+        // VMAD (d = a * b + c) / VSETP (compare a with b): video operands, a byte, half or the word of a register (B: or
+        // a 16-bit immediate), zero or sign extended. VMAD's CC, scale, negations and saturation are refused.
+        bool vmad = OPM(0x5f00000000000000ull, 0xff80000000000000ull), sa = bits(w, 48, 1), sb = bits(w, 49, 1);
+        if (vmad && (bits(w, 47, 1) || bits(w, 51, 5))) { fail(c, "VMAD form %016llx", (unsigned long long)w); return; }
+        char ab[96], bb[96];
+        const char *va = video_operand(R(a), (int)bits(w, 36, 2), (int)bits(w, 37, 2), sa, ab), *vb;
+        if (bits(w, 50, 1)) vb = video_operand(R((int)bits(w, 20, 8)), (int)bits(w, 28, 2), (int)bits(w, 29, 2), sb, bb);
+        else {
+            uint32_t v = (uint32_t)bits(w, 20, 16);
+            sprintf(bb, "0x%08xu", sb && (v & 0x8000u) ? v | 0xFFFF0000u : v);
+            vb = bb;
+        }
+        if (vmad) {
+            sprintf(t, "(%s * %s + %s)", va, vb, R((int)bits(w, 39, 8)));
+            set_reg(c, d, t);
+        } else {  // (compare bits 43-44 and 47; the predicates as FSETP's)
+            char cmp[512];
+            icmp_expr(cmp, (int)(bits(w, 43, 2) | bits(w, 47, 1) << 2), va, vb, sa || sb);
+            int p = (int)bits(w, 3, 3), q = (int)bits(w, 0, 3), bo = (int)bits(w, 45, 2);
+            const char *pc_ = P((int)bits(w, 39, 3), bits(w, 42, 1));
+            sp(&c->body, "    { bool cmp = %s; bool pp = %s;\n", cmp, pc_);
+            if (p != PT) { c->pred_used[p] = 1; sp(&c->body, "      p%d = cmp %s pp;\n", p, bool_op(bo)); }
+            if (q != PT) { c->pred_used[q] = 1; sp(&c->body, "      p%d = !cmp %s pp;\n", q, bool_op(bo)); }
+            sp(&c->body, "    }\n");
+        }
     } else if (OPM(0xef90000000000000ull, 0xfff8000000000000ull)) {  // LD c[idx][reg + imm]
         int idx = (int)bits(w, 36, 5);
         int64_t off = (int64_t)bits(w, 20, 16);  // unsigned (Ryujinx InstLdc.CbufOffset)
@@ -1541,6 +1606,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int sr = (int)bits(w, 20, 8);
         switch (sr) {
         case 0x12: set_reg(c, d, "0xbf800000u"); break;  // y_direction: -1 (lower-left)
+        case 0x11: set_reg(c, d, c->stage == STAGE_GEOMETRY ? "uint(gl_InvocationID)" : "0u /* sr 0x11 */"); break;  // invocation id
+        case 0x1d:  // invocation info (geometry: the input primitive's vertex count in bits 16-23; the low byte, a
+                    // primitive index within the batch, 0 as Ryujinx / yuzu give it - the vertex numbers VMAD makes from it)
+            if (c->stage == STAGE_GEOMETRY) { sprintf(t, "0x%08xu", GS_IN_VERTICES << 16); set_reg(c, d, t); }
+            else set_reg(c, d, "0u /* sr 0x1d */");
+            break;
         case 0x21: set_reg(c, d, "tid.x"); break;
         case 0x22: set_reg(c, d, "tid.y"); break;
         case 0x23: set_reg(c, d, "tid.z"); break;
@@ -2197,7 +2268,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     for (int i = 0; i < info->ntex; i++)
         if (info->tex[i].shadow && info->tex[i].type == TEXTYPE_3D) fail(c, "3d shadow texture");
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
-    int set = stage == STAGE_FRAGMENT ? 1 : 0;
+    int set = stage == STAGE_FRAGMENT ? 1 : stage == STAGE_GEOMETRY ? 3 : 0;
     Str s = {0};
     sp(&s, "#version 460\n");  // (the prelude's first line; an extension directive has to follow it)
     if (info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy) sp(&s, "#extension GL_EXT_buffer_reference : require\n");
@@ -2380,6 +2451,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
         if (c->omap_depth) info->writes_depth = true;
         if (glsl_early_tests(c)) sp(&s, "layout(early_fragment_tests) in;\n");
+    } else if (stage == STAGE_GEOMETRY) {
+        sp(&s, "layout(triangles) in;\n");
+        if (c->gs_invocations > 1) sp(&s, "layout(invocations = %d) in;\n", c->gs_invocations);
+        sp(&s, "layout(%s, max_vertices = %d) out;\n", c->gs_out, c->gs_max_vertices);
+        for (int i = 0; i < 32; i++)
+            if (c->in_attr_mask & (1u << i)) sp(&s, "layout(location = %d) in vec4 gin%d[];\n", i, i);
+        sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");  // (as the vertex shader's)
+        for (int i = 0; i < 32; i++)
+            if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
     } else {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
         if (c->uses_shared) sp(&s, "shared uint smem[%d];\n", c->smem_words);
@@ -3202,6 +3282,17 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
+    }
+    if (stage == STAGE_GEOMETRY) {  // (program header words 2-4: threads per input primitive, output topology, its vertices)
+        uint32_t w2, w3, w4;
+        memcpy(&w2, sph + 8, 4), memcpy(&w3, sph + 12, 4), memcpy(&w4, sph + 16, 4);
+        int topo = (int)(w3 >> 24) & 0xF;
+        c->gs_out = topo == 1 ? "points" : topo == 6 ? "line_strip" : topo == 7 ? "triangle_strip" : NULL;
+        c->gs_max_vertices = (int)(w4 & 0xFFF);
+        c->gs_invocations = (int)(w2 >> 24);
+        if (!c->glsl) fail(c, "geometry shader (Metal)");
+        else if (!c->gs_out) fail(c, "geometry output topology %d", topo);
+        else if (!c->gs_max_vertices) fail(c, "geometry shader with no output vertices");
     }
     // find the end: the last EXIT followed by self-branch padding, or max_size
     size_t n = (max_size - (code - blob)) / 8;

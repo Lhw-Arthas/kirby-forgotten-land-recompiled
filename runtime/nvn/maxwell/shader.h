@@ -2,7 +2,7 @@
 // SPIR-V at runtime with shaderc). ShaderKey.glsl selects the dialect; the MSL output does not depend on it.
 //
 // GLSL contract (what the Vulkan renderer binds):
-//  - `#version 460`, entry point `main`. Descriptor set: vertex 0, fragment 1, compute 0.
+//  - `#version 460`, entry point `main`. Descriptor set: vertex 0, fragment 1, geometry 3, compute 0.
 //  - hardware cbuf k -> binding k: `layout(std140, set=S, binding=k) uniform CB<k> { uvec4 cb<k>[N]; };`
 //    (anonymous block). N = max(cbuf_size[k] / 16, highest constant-index vec4 + 1), and at least 4096 when
 //    cbuf_dynamic has bit k (the renderer binds up to 64 KB). Register-indexed reads are clamped to N - 1.
@@ -21,6 +21,11 @@
 //  - clip space exactly as the MSL output (key->flip_y / depth_minus_one epilogue unchanged): the renderer uses
 //    a negative-height viewport so Vulkan matches Metal's y-up NDC, clip z in [0, 1].
 //  - compute: `layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;` (spec constants 0..2).
+//  - geometry (GLSL only): `layout(triangles) in;` (GS_IN_VERTICES: the renderer draws these programs with triangles
+//    only), the output primitive, max_vertices and invocations from the program header. Inputs `in vec4 gin<i>[];`
+//    at location i (key->vs_out_mask: the vertex shader's outputs; others read as (0, 0, 0, 1)) and gl_in[].gl_Position;
+//    outputs as a vertex shader's. The key's clip space epilogue runs before each EmitVertex: the vertex shader
+//    before it is translated without one (flip_x, flip_y, depth_minus_one false).
 //  - extensions: GL_EXT_shader_explicit_arithmetic_types_int64 (64-bit carry / address math -> shaderInt64),
 //    GL_KHR_shader_subgroup_basic/_shuffle/_shuffle_relative (SHFL, FSWZADD lane: fragment/compute subgroup
 //    support), GL_EXT_texture_shadow_lod (explicit-LOD array / cube shadow lookups).
@@ -32,6 +37,8 @@
 
 enum { STAGE_VERTEX = 0, STAGE_FRAGMENT = 1, STAGE_GEOMETRY = 2, STAGE_TESS_CTRL = 3, STAGE_TESS_EVAL = 4,
        STAGE_COMPUTE = 5 };
+
+#define GS_IN_VERTICES 3  // (geometry) vertices of the input primitive: triangles
 
 enum { TEXTYPE_1D, TEXTYPE_2D, TEXTYPE_3D, TEXTYPE_CUBE, TEXTYPE_2D_ARRAY, TEXTYPE_CUBE_ARRAY, TEXTYPE_1D_ARRAY,
        TEXTYPE_BUFFER, TEXTYPE_2D_MS };
