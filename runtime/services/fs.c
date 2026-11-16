@@ -853,7 +853,7 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         plat_os_write(b->addr, (uint64_t)size);
         ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
         if (n < 0) resp->result = errno_result();
-        if (n > 0 && !f->scratch && strstr(f->path, "savedata")) {
+        if (n > 0 && !f->scratch) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;
@@ -863,8 +863,7 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
     case 1: {  // Write(option, offset, size) <- A
         int64_t off = IN(int64_t, 8), size = IN(int64_t, 16);
         IpcBuf *a = in_buf(req, 0);
-        if (strstr(f->path, "savedata"))
-            LOG("[save] write %s off %lld size %lld <- guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)a->addr);
+        LOG("[save] write %s off %lld size %lld <- guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)a->addr);
         if (f->dropped) break;  // (reported when it was opened; the game is never told, see save_failed)
         int error = 0;
         for (int64_t done = 0; done < size;) {  // (a short write goes on from where it stopped)
