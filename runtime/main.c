@@ -14,6 +14,7 @@
 #include "gamelib.h"
 #include "paths.h"
 #include "settings.h"
+#include "setup_cli.h"
 #include "hle.h"
 #include "kernel.h"
 
@@ -311,6 +312,7 @@ int main(int argc, char **argv) {
 #ifdef __APPLE__
     metal_hud_relaunch();
 #endif
+    bool headless = setup_cli_parse(argc, argv);  // (the launchers' commands: runtime/setup_cli.h)
 #if LARECOMP_IOSEXPORT
     for (int i = 1; i < argc; i++)  // (a command-line run: its lines to the terminal as well as the log)
         if (!strcmp(argv[i], "--build-ios")) { plat_cli_begin(); break; }
@@ -351,6 +353,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    if (headless) return setup_cli_run();
     if (getenv("LARECOMP_MENU_SFX_TEST")) {  // (test: the menu sounds loaded now, each logged)
         extern void menu_sfx_set_game_dir(const char *dir);
         extern void menu_sfx_load_now(void);
