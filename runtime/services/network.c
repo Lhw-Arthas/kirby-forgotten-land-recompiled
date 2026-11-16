@@ -68,7 +68,7 @@ static void ssl_context(Service *s, IpcReq *req, IpcResp *resp) {
 SERVICE("ssl", ssl) {
     (void)s;
     if (req->cmd == 0) ipc_return_object(resp, service_new("ISslContext", ssl_context, NULL));  // CreateContext
-    else LOG("[ssl] cmd %u (ok)\n", req->cmd);
+    else if (req->cmd != 5) LOG("[ssl] cmd %u (ok)\n", req->cmd);  // (5 SetInterfaceVersion: no output)
 }
 
 // ------------------------------------------------------------------ bsd:u (sockets)
@@ -76,6 +76,8 @@ SERVICE("ssl", ssl) {
 SERVICE("bsd:u", bsd_u) {
     (void)s;
     switch (req->cmd) {
+    case 0: OUT(int32_t, 0) = 0; resp_size(resp, 4); break;  // RegisterClient: done
+    case 1: break;                                           // StartMonitoring
     case 2:  // Socket
     case 3:  // SocketExempt
         OUT(int32_t, 0) = -1;

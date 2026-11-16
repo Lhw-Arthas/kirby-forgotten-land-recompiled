@@ -22,6 +22,7 @@ static void pctl_service(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 1031: case 1035: case 1018: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // restrictions off
     case 1032: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;
+    case 1: break;  // Initialize
     default: LOG("[pctl] IParentalControlService cmd %u (ok)\n", req->cmd); resp_size(resp, 0x10);
     }
 }
@@ -46,4 +47,24 @@ SERVICE("aoc:u", aoc_u) {
     case 8: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
     default: ok_logger(s, req, resp);
     }
+}
+
+// ------------------------------------------------------------------ prepo:u (play reports: kept, never sent)
+SERVICE("prepo:u", prepo_u) {
+    (void)s; (void)resp;
+    if (req->cmd < 10100 || req->cmd > 10107) LOG("[svc] prepo:u cmd %u (ok)\n", req->cmd);  // (SaveReport*: no output)
+}
+
+// ------------------------------------------------------------------ bcat:u (no deliveries offline)
+SERVICE("bcat:u", bcat_u) {
+    (void)s;
+    if (req->cmd == 0) ipc_return_object(resp, service_new("IBcatService", ok_logger, NULL));  // CreateBcatService
+    else ok_logger(s, req, resp);
+}
+
+// ------------------------------------------------------------------ ectx:aw (error context, 11.0.0+)
+SERVICE("ectx:aw", ectx_aw) {
+    (void)s;
+    if (req->cmd == 0) ipc_return_object(resp, service_new("IContextRegistrar", ok_logger, NULL));  // CreateContextRegistrar
+    else ok_logger(s, req, resp);
 }
