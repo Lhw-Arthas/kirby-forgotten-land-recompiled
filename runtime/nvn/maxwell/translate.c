@@ -42,6 +42,7 @@ const uint8_t *maxwell_dbg_vs;
 
 #define RZ 255
 #define LMEM_WORDS 256  // local memory per invocation (1 KB)
+#define SMEM_WORDS 8192  // shared memory of a workgroup indexing it with a register: 32 KB (its own size is not in the code)
 #define PT 7
 
 typedef struct {
@@ -113,7 +114,7 @@ typedef struct {
     uint8_t pred_used[8];
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
-    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
+    bool uses_branches, uses_cc, uses_local, uses_shared, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
@@ -139,6 +140,7 @@ typedef struct {
     bool shadow_tap[2];    // the shadow map's texel size (x, y) is read: shadow_taps
     bool ao_pass;          // the AO pass: white while rscale[65].z > 0 (ao_grid_fix)
     int lmem_words;        // the local memory array's size in words (lmem_size; MSL: always LMEM_WORDS)
+    int smem_words;        // the shared memory array's size in words (lmem_size)
     // GLSL: each BRX whose jump table was read (brx_table_labels): its targets, so that static_stacks_resolve can walk
     // through it and the structured program can branch on its value (struct_blocks)
     struct BrxTab { size_t at; int n; uint32_t t[256]; bool ahead; } *brx;  // (ahead: struct_blocks' dispatch form)
@@ -1790,12 +1792,17 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         icmp_expr(cmp, (int)bits(w, 49, 3), cv, "0u", bits(w, 48, 1));
         sprintf(t, "(%s ? %s : %s)", cmp, R(a), bv);
         set_reg(c, d, t);
-    } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) || OPM(0xef50000000000000ull, 0xfff8000000000000ull)) {  // LDL / STL
-        // thread-private local memory, modelled as a word array (byte/short accesses within a word)
-        bool store = bits(w, 52, 1);
+    } else if (OPM(0xef40000000000000ull, 0xffe0000000000000ull)) {  // LDL / LDS / STL / STS (bit 51: shared)
+        // thread-private local memory / the workgroup's shared memory, modelled as word arrays (byte/short accesses
+        // within a word)
+        bool store = bits(w, 52, 1), shared = bits(w, 51, 1);
         int size = (int)bits(w, 48, 3);
         int32_t off = (int32_t)sbits(w, 20, 24);
-        c->uses_local = true;
+        if (shared && c->stage != STAGE_COMPUTE) { fail(c, "shared memory outside a compute shader"); return; }
+        const char *mem = shared ? "smem" : "lmem";
+        int words = shared ? c->smem_words : c->lmem_words;
+        if (shared) c->uses_shared = true;
+        else c->uses_local = true;
         char addr[128];
         if (a == RZ) sprintf(addr, "%du", off);
         else sprintf(addr, "(%s + %du)", R(a), (uint32_t)off);
@@ -1805,19 +1812,23 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             if (size < 4) {
                 static const char *const ext[] = {"(v >> sh) & 0xFFu", "uint(int(char((v >> sh) & 0xFFu)))", "(v >> sh) & 0xFFFFu",
                                                   "uint(int(short((v >> sh) & 0xFFFFu)))"};
-                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = lmem[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", c->lmem_words - 1, d, ext[size]); }
+                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = %s[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", mem, words - 1, d, ext[size]); }
             } else {
                 for (int k = 0; k < nw; k++)
-                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = lmem[((la >> 2) + %du) & %du];\n", d + k, k, c->lmem_words - 1); }
+                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = %s[((la >> 2) + %du) & %du];\n", d + k, mem, k, words - 1); }
             }
         } else {
             if (size < 4) {
                 uint32_t m = size < 2 ? 0xFFu : 0xFFFFu;
-                sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; lmem[i] = (lmem[i] & ~(0x%xu << sh)) | ((%s & 0x%xu) << sh);\n",
-                   c->lmem_words - 1, m, R(d), m);
+                if (shared && c->glsl)  // (atomic: other invocations may store the word's other bytes at the same time)
+                    sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; atomicAnd(smem[i], ~(0x%xu << sh)); atomicOr(smem[i], (%s & 0x%xu) << sh);\n",
+                       words - 1, m, R(d), m);
+                else
+                    sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; %s[i] = (%s[i] & ~(0x%xu << sh)) | ((%s & 0x%xu) << sh);\n",
+                       words - 1, mem, mem, m, R(d), m);
             } else {
                 for (int k = 0; k < nw; k++)
-                    sp(&c->body, "      lmem[((la >> 2) + %du) & %du] = %s;\n", k, c->lmem_words - 1, R(d == RZ ? RZ : d + k));
+                    sp(&c->body, "      %s[((la >> 2) + %du) & %du] = %s;\n", mem, k, words - 1, R(d == RZ ? RZ : d + k));
             }
         }
         sp(&c->body, "    }\n");
@@ -2378,6 +2389,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (glsl_early_tests(c)) sp(&s, "layout(early_fragment_tests) in;\n");
     } else {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
+        if (c->uses_shared) sp(&s, "shared uint smem[%d];\n", c->smem_words);
     }
     sp(&s, "void main() {\n");
     if (stage == STAGE_VERTEX) {
@@ -3149,20 +3161,23 @@ static Ast *ast_build(Ctx *c, SBlock *b, int nb) {
 // x cores (38 MB on an RK3588 for the fixed 1 KB). The size covers every immediate address (RZ + offset). A
 // register-indexed access is bounded by the SPH's local memory size (low + high: the guest compiler's own per-thread
 // need) in graphics stages; compute (no SPH here) and a size of 0 keep LMEM_WORDS, as does a negative immediate.
-static int lmem_size(const uint64_t *code, size_t end, const uint8_t *sph) {
-    uint64_t need = 0;
+// (shared: the shared memory's, from LDS / STS; else the local memory's, from LDL / STL)
+static int lmem_size(const uint64_t *code, size_t end, const uint8_t *sph, bool shared) {
+    uint64_t need = 0, op = shared ? 0xef48000000000000ull : 0xef40000000000000ull;
+    int max = shared ? SMEM_WORDS : LMEM_WORDS;
     bool indexed = false;
     for (size_t i = 0; i < end; i++) {
         if (i % 4 == 0) continue;
         uint64_t w = code[i];
-        if ((w & 0xfff8000000000000ull) != 0xef40000000000000ull && (w & 0xfff8000000000000ull) != 0xef50000000000000ull) continue;
+        if ((w & 0xffe8000000000000ull) != op) continue;  // (bit 52: the store)
         int size = (int)bits(w, 48, 3);
         int64_t off = sbits(w, 20, 24);
         if ((int)bits(w, 8, 8) != RZ) { indexed = true; continue; }
-        if (off < 0) return LMEM_WORDS;  // (wraps to a high address)
+        if (off < 0) return max;  // (wraps to a high address)
         uint64_t e = (uint64_t)off + (size == 5 ? 8 : size >= 6 ? 16 : 4);
         if (e > need) need = e;
     }
+    if (indexed && shared) return SMEM_WORDS;
     if (indexed) {
         uint32_t lo = 0, hi = 0;
         if (sph) { memcpy(&lo, sph + 4, 4); memcpy(&hi, sph + 8, 4); }
@@ -3171,7 +3186,7 @@ static int lmem_size(const uint64_t *code, size_t end, const uint8_t *sph) {
         if (declared > need) need = declared;
     }
     int words = 1;
-    while (words < LMEM_WORDS && (uint64_t)words * 4 < need) words *= 2;
+    while (words < max && (uint64_t)words * 4 < need) words *= 2;
     return words;
 }
 
@@ -3203,7 +3218,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (w == 0 && i > 4) break;
         end = i + 1;
     }
-    c->lmem_words = c->glsl ? lmem_size((const uint64_t *)code, end, stage == STAGE_COMPUTE ? NULL : sph) : LMEM_WORDS;
+    c->lmem_words = c->glsl ? lmem_size((const uint64_t *)code, end, stage == STAGE_COMPUTE ? NULL : sph, false) : LMEM_WORDS;
+    c->smem_words = lmem_size((const uint64_t *)code, end, NULL, true);
     // collect branch targets (labels)
     uint8_t *label = calloc(end + 4, 1);
     label[1] = 1;
@@ -3428,6 +3444,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
+    if (c->uses_shared) sp(&s, "  threadgroup uint smem[%d];\n", c->smem_words);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
