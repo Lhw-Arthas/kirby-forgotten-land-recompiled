@@ -17,7 +17,7 @@ const PROGRAM_ID: u64 = 0x0100_4D30_0C5A_E000;
 const UPDATE_ID: u64 = 0x0100_4D30_0C5A_E800;
 const MODULES: [&str; 3] = ["main", "sdk", "subsdk0"];
 const SETTING_KEYS: [&str; 3] = ["fullscreen", "resolution", "volume"];
-/// The release runtime, next to the launcher in the zip.
+/// The runtime (game/game.mk EXE_NAME): next to the launcher in the zip, in build/ beside a source checkout.
 const PACKAGED_EXE: &str = "ForgottenLandRecomp.exe";
 /// Packaged mode: the folder the player picked, remembered until Build reads it.
 const PICKED_FILE: &str = "game-folder.txt";
@@ -397,7 +397,7 @@ impl App {
     }
     fn exe(&self) -> PathBuf {
         match self.mode {
-            Mode::Dev(_) => self.work.join("build").join("lasrecomp.exe"),
+            Mode::Dev(_) => self.work.join("build").join(PACKAGED_EXE),
             Mode::Packaged => self.work.join(PACKAGED_EXE),
         }
     }
@@ -737,7 +737,7 @@ fn start_setup(app: St, code_only: Option<bool>) -> Result<(), String> {
         let jobs = format!("-j{}", std::thread::available_parallelism().map_or(4, |n| n.get()));
         let result = fs::File::create(app.work.join("setup.log")).map_err(|e| format!("The launcher cannot write to its folder ({e}). Move the Forgotten Land Recomp folder somewhere you can write to, such as Documents.")).and_then(|mut log| match &app.mode {
             Mode::Dev(dev) => {
-                let exe = format!("{}/build/lasrecomp.exe", dev.work_from_repo(&app.work).to_string_lossy().replace('\\', "/"));
+                let exe = format!("{}/build/{PACKAGED_EXE}", dev.work_from_repo(&app.work).to_string_lossy().replace('\\', "/"));
                 run_step(&app, Phase::Runtime, dev.make(&app.work, &[&jobs, &exe]), &mut log)?;
                 run_step(&app, Phase::Image, app.build_image(), &mut log)?;
                 run_step(&app, Phase::Translate, dev.make(&app.work, &["gen"]), &mut log)?;
