@@ -11,7 +11,7 @@ const PAGES = [
   ['about', 'About'],
 ];
 const PACKAGED_BUILD = 'Copies your game files into this folder (about 6 GB, or hard links on the same drive), then translates the game code and compiles it for this PC. The first build takes a long time.';
-const HEIGHTS = [['0', 'Match the window'], ['720', '720p'], ['1080', '1080p'], ['1440', '1440p'], ['2160', '4K']];
+const RESOLUTIONS = [['match', 'Match the display'], ['75%', '75% of the display'], ['50%', '50% of the display'], ['25%', '25% of the display'], ['1x', '1080p'], ['2x', '4K']];
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -126,7 +126,7 @@ const views = {
         <label class="field"><span>Fullscreen</span>
           <input type="checkbox" data-key="fullscreen" ${v.fullscreen === '1' ? 'checked' : ''} /></label>
         <label class="field"><span>Render resolution</span>
-          <select data-key="render_height">${HEIGHTS.map(([val, name]) => `<option value="${val}" ${(v.render_height || '0') === val ? 'selected' : ''}>${name}</option>`).join('')}</select></label>
+          <select data-key="resolution">${RESOLUTIONS.map(([val, name]) => `<option value="${val}" ${(v.resolution === 'auto' || !v.resolution ? 'match' : v.resolution) === val ? 'selected' : ''}>${name}</option>`).join('')}</select></label>
         <label class="field"><span>Volume</span>
           <input type="range" min="0" max="1" step="0.05" data-key="volume" value="${esc(v.volume || '1')}" /></label>
       </section>

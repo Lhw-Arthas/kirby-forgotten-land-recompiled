@@ -16,7 +16,7 @@ const PROGRAM_ID: u64 = 0x0100_4D30_0C5A_E000;
 /// The game's update (patch), which has the same title and a program id ending E800.
 const UPDATE_ID: u64 = 0x0100_4D30_0C5A_E800;
 const MODULES: [&str; 3] = ["main", "sdk", "subsdk0"];
-const SETTING_KEYS: [&str; 3] = ["fullscreen", "render_height", "volume"];
+const SETTING_KEYS: [&str; 3] = ["fullscreen", "resolution", "volume"];
 /// The release runtime, next to the launcher in the zip.
 const PACKAGED_EXE: &str = "ForgottenLandRecomp.exe";
 /// Packaged mode: the folder the player picked, remembered until Build reads it.
