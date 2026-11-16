@@ -83,7 +83,9 @@ an older version, the launcher offers "Rebuild game code".
   ending are not
 - Waddle Dee Town is checked by play: a scripted run cleared the first stage and walked into the Town with no error.
   Starting the world map or the Town directly with the stage tour's shortcut crashes; that shortcut skips the story
-- TODO (coordinator): the final stage tour numbers
+- Stage tour, on a build from just before the release: all 109 stages load and 101 run without error. The 3 Arena
+  menus, the two world maps and the Town crash only when jumped to directly; the 2 credits sequences hit the "out of
+  command memory" error fixed in this version
 - A first visit to an area pauses while its shaders build: about 15 to 25 s at the beach on a 2-core PC with a cold
   cache (an older measurement), less on faster PCs. Later visits pause about 1 s
 - Rarely, the game crashed after the opening movie while the PC was heavily overloaded. It did not happen in 15 runs
