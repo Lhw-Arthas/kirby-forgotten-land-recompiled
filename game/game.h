@@ -6,11 +6,13 @@
 #define GAME_NAME "Forgotten Land Recomp"         // the app: window title, message boxes
 #define GAME_TITLE "Kirby and the Forgotten Land"  // the game it runs
 #define GAME_PROGRAM_ID 0x01004D300C5AE000ull       // the game's title id (svcGetInfo 18; its add-on ids follow it)
+#define GAME_UPDATE_PROGRAM_ID (GAME_PROGRAM_ID + 0x800ull)  // the update's own program id: a dump of it is refused (setup "update")
 #define GAME_REPO "scarxity/kirby-forgotten-land-recompiled"  // GitHub: the update check
 #define GAME_LOG "game"  // the session log next to the exe: game.log, game-backup-*.log (the launcher reads game.log)
 
 // The folders at the top of the game's RomFS: a folder holding all of them is the game's RomFS.
 #define GAME_ROMFS_MARKERS "msg", "gfx"
+#define GAME_ROMFS_FILES 9373  // the files in the game's RomFS (1.0.0): fewer is a copy that stopped partway
 
 // The program's modules in exefs, main first, then in load order, each at the game code's own address (rt.h
 // GUEST_CANON: the window may move). The Makefile's gen and the setup's generator read this list.

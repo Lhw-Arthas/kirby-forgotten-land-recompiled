@@ -140,11 +140,13 @@ bool romfs_is_game(const char *dir) {
 }
 
 static void find_game(const char *dir, int depth, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size,
-                      bool *unusable) {
-    if (depth > 4 || (*exefs && *romfs)) return;
+                      char *image, size_t image_size, bool *unusable) {
+    if (depth > 4 || (*exefs && (*romfs || (image && *image)))) return;
     char p[2200], q[2200];
     snprintf(p, sizeof p, "%s/main", dir), snprintf(q, sizeof q, "%s/main.npdm", dir);
     if (!*exefs && exists(p) && exists(q)) snprintf(exefs, exefs_size, "%s", dir);
+    snprintf(p, sizeof p, "%s/romfs.bin", dir);
+    if (image && !*image && exists(p)) snprintf(image, image_size, "%s", p);
     if (romfs_is_game(dir)) {  // (its folders are the game's data: nothing else to find in them)
         if (!*romfs) snprintf(romfs, romfs_size, "%s", dir);
         return;
@@ -171,15 +173,54 @@ static void find_game(const char *dir, int depth, char *exefs, size_t exefs_size
     closedir(d);
     qsort(sub, n, sizeof *sub, by_string);
     for (int i = 0; i < n; i++) {
-        find_game(sub[i], depth + 1, exefs, exefs_size, romfs, romfs_size, unusable);
+        find_game(sub[i], depth + 1, exefs, exefs_size, romfs, romfs_size, image, image_size, unusable);
         free(sub[i]);
     }
     free(sub);
 }
 
+void romfs_find_game_image(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, char *image,
+                           size_t image_size, bool *unusable) {
+    exefs[0] = romfs[0] = image[0] = 0;
+    find_game(dir, 0, exefs, exefs_size, romfs, romfs_size, image, image_size, unusable);
+}
+
 void romfs_find_game(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, bool *unusable) {
     exefs[0] = romfs[0] = 0;
-    find_game(dir, 0, exefs, exefs_size, romfs, romfs_size, unusable);
+    find_game(dir, 0, exefs, exefs_size, romfs, romfs_size, NULL, 0, unusable);
+}
+
+bool romfs_image_ok(const char *path, char *why, size_t why_size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(why, why_size, "can't open it"); return false; }
+    uint64_t h[10] = {0};
+    size_t n = fread(h, 1, sizeof h, f);
+    fseeko(f, 0, SEEK_END);
+    uint64_t size = (uint64_t)ftello(f);
+    fclose(f);
+    if (n == sizeof h && !memcmp(h, "IVFC", 4)) { snprintf(why, why_size, "an IVFC image, not a plain RomFS"); return false; }
+    if (n != sizeof h || h[0] != 0x50) { snprintf(why, why_size, "no RomFS header (%llu bytes)", (unsigned long long)size); return false; }
+    for (int i = 1; i < 9; i += 2)  // (dir hash, dir meta, file hash, file meta: offset and size, inside the file)
+        if (!h[i + 1] || h[i + 1] > (64ull << 20) || h[i] > size || h[i + 1] > size - h[i]) {
+            snprintf(why, why_size, "its tables point past its end (%llu bytes: cut short?)", (unsigned long long)size);
+            return false;
+        }
+    if (h[9] > size) { snprintf(why, why_size, "its data starts past its end (%llu bytes)", (unsigned long long)size); return false; }
+    // Files missing: the game reads a file whose open failed, without checking. The file table's entries: parent,
+    // sibling (u32), offset, size (u64), hash, name length (u32), name.
+    uint8_t *meta = malloc(h[8]);
+    f = meta ? fopen(path, "rb") : NULL;
+    bool got = f && fseeko(f, (off_t)h[7], SEEK_SET) == 0 && fread(meta, 1, h[8], f) == h[8];
+    if (f) fclose(f);
+    int nfiles = 0;
+    for (uint64_t o = 0; got && o + 0x20 <= h[8]; nfiles++) {
+        uint32_t len;
+        memcpy(&len, meta + o + 0x1C, 4);
+        o += 0x20 + ((len + 3ull) & ~3ull);
+    }
+    free(meta);
+    if (got && nfiles < GAME_ROMFS_FILES) { snprintf(why, why_size, "only %d files: the game has %d", nfiles, GAME_ROMFS_FILES); return false; }
+    return true;
 }
 
 uint64_t romfs_dir_bytes(const char *dir) {

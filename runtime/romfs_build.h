@@ -35,6 +35,13 @@ uint64_t romfs_dir_bytes(const char *dir);
 // True when dir is the game's RomFS: it holds every folder game/game.h names (GAME_ROMFS_MARKERS).
 bool romfs_is_game(const char *dir);
 void romfs_find_game(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, bool *unusable);
+// The same, and a romfs.bin (a RomFS image as one file) found on the way, in image ("" when none): the headless setup
+// (runtime/setup_cli.c) takes either as the game's data. The search stops at the first of them.
+void romfs_find_game_image(const char *dir, char *exefs, size_t exefs_size, char *romfs, size_t romfs_size, char *image,
+                           size_t image_size, bool *unusable);
+// Whether the file is a RomFS image the game can read: a plain RomFS (not IVFC), its tables inside the file, and the
+// game's files in it (GAME_ROMFS_FILES). false: why says what is wrong with it.
+bool romfs_image_ok(const char *path, char *why, size_t why_size);
 
 // Copies the folder tree src to dst (hard links where the file system allows: no second copy of 6 GB). progress as
 // above. false = failed.
