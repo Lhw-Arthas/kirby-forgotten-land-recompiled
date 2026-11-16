@@ -803,7 +803,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     int queued[NMODS] = {0};  // chunk files of each module put in units so far
     bool tables[NMODS] = {false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
-    struct { PlatProc p; int unit; } run[64];
+    struct { PlatProc p; int unit; uint64_t t0; } run[64];
     int nrun = 0;
     int reused = 0, compiled = 0;
     unsigned long long done_bytes = 0;
@@ -871,7 +871,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             if (cached && next != 0) { done_bytes += u->bytes; ++reused; ++next; continue; }
             PlatProc p = start_compile(&t, &units.u[next]);
             if (!p) { snprintf(why, why_size, LN("the compiler didn't start")); ok = false; break; }
-            run[nrun].p = p, run[nrun].unit = next++;
+            run[nrun].p = p, run[nrun].unit = next++, run[nrun].t0 = plat_now_ns();
             nrun++;
         }
         for (int k = 0; k < nrun; k++) {
@@ -905,7 +905,21 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         double secs = (double)(plat_now_ns() - t0) / 1e9;
         if (gen_frac == 0) f = 0.05 * (secs / (secs + 20));  // (the generator's first pass: no count yet)
         if (f > shown) shown = f;
-        if (o->progress) o->progress(shown, gen_frac < 1 && !gens_done ? LN("Reading the game code...") : resuming ? LN("Resuming compilation...") : LN("Recompiling..."));
+        const char *step = gen_frac < 1 && !gens_done ? LN("Reading the game code...") : resuming ? LN("Resuming compilation...") : LN("Recompiling...");
+        // the file compiling longest, once it takes a while: a slow one shows by name instead of a still bar
+        char slow[200];
+        int oldest = -1;
+        for (int k = 0; k < nrun; k++)
+            if (oldest < 0 || run[k].t0 < run[oldest].t0) oldest = k;
+        uint64_t now = plat_now_ns();
+        if (oldest >= 0 && now - run[oldest].t0 > 60000000000ull) {
+            const char *src = units.u[run[oldest].unit].src, *name = src;
+            for (const char *c = src; *c; c++)
+                if (*c == '/' || *c == '\\') name = c + 1;
+            snprintf(slow, sizeof slow, "%s (%s, %d min)", step, name, (int)((now - run[oldest].t0) / 60000000000ull));
+            step = slow;
+        }
+        if (o->progress) o->progress(shown, step);
         sleep_ms(50);
     }
     for (int k = 0; k < nrun; k++) stop(run[k].p);  // (a failure: the rest is of no use - the failure shows at once)
