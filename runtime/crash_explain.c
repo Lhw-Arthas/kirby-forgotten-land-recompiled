@@ -1,12 +1,13 @@
 // A fatal error, explained to the player: the crash dialog (plat_fatal_notice) says what went wrong in plain words
 // and what to do about it; the technical lines (FATAL / signal, backtrace, registers) stay in the log for bug reports.
 // Known causes are recognised from what the runtime knows when it stops: the fatal line, where the crash was (the
-// game code, LAS Recomp itself, the graphics driver), and the game files.
+// game code, the runtime itself, the graphics driver), and the game files.
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 
+#include "../game/game.h"
 #include "game_addresses.h"
 #include "platform.h"
 #include "rt.h"
@@ -16,7 +17,6 @@ static uint64_t g_pc;      // a crash's host pc (0: a FATAL)
 int rt_romfs_files = -1;   // the game's own RomFS files (runtime/services/fs.c; -1: not read yet)
 uint64_t rt_romfs_bytes;   // their sizes summed (issue #391: one damaged file, every file there)
 int rt_romfs_missing;      // the game's files not found by name and size (#391: a renamed file keeps count and bytes)
-enum { ROMFS_FILES = 0 };  // (as runtime/ui/launcher.mm: no count read from the game, the incomplete-copy check is off)
 
 void rt_fatal_msg(const char *fmt, ...) {
     char b[512];
@@ -73,39 +73,33 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     static const char *const report = "Please report it as a GitHub issue and attach the log file below. "
                                       "Your progress up to your last save or autosave is safe.";
     char head[160], what[400];
-    if (rt_romfs_files >= 0 && rt_romfs_files < ROMFS_FILES) {
-        snprintf(head, sizeof head, "Your game files are incomplete");
-        snprintf(what, sizeof what, "LAS Recomp found %d of the game's %d files, and the game stopped when it needed "
-                 "one that's missing. Copy your game files again so none are missing, then set them up again on the "
-                 "start screen (System).", rt_romfs_files, (int)ROMFS_FILES);
-    } else if (has("doesn't fit its language")) {
+    if (has("doesn't fit its language")) {
         snprintf(head, sizeof head, "Your game files' text has been changed");
         snprintf(what, sizeof what, "The game's text for this language comes from another language (a translation "
-                 "patch), and the game stopped at a question it can't show that way. Set up unmodified game files on "
-                 "the start screen (System). To play in another language, pick it in Settings (Language).");
+                 "patch), and the game stopped at a question it can't show that way. Set up unmodified game files in "
+                 "the launcher. To play in another language, pick it in Settings (Language).");
     } else if (has("built for another version")) {
-        snprintf(head, sizeof head, "The game code was built for other game files or another version of LAS Recomp");
-        snprintf(what, sizeof what, "Start LAS Recomp again: the start screen rebuilds the game code for these game "
-                 "files by itself.");
+        snprintf(head, sizeof head, "The game code was built for other game files or another version of " GAME_NAME);
+        snprintf(what, sizeof what, "Open the launcher and build the game code again for these game files.");
     } else if (has("unsupported version of the game")) {
         snprintf(head, sizeof head, "Wrong version of the game");
-        snprintf(what, sizeof what, "LAS Recomp needs version 1.0.0, 1.0.1 or 1.1.0 of the game. Set up those game "
-                 "files on the start screen (System).");
+        snprintf(what, sizeof what, GAME_NAME " runs only the versions of " GAME_TITLE " its README names. Set up "
+                 "those game files in the launcher.");
     } else if (has("no font for the game's text")) {
         snprintf(head, sizeof head, "No font for the game's text");
-        snprintf(what, sizeof what, "Import the Switch fonts in Settings (Game font), or reinstall LAS Recomp - it "
+        snprintf(what, sizeof what, "Import the Switch fonts in Settings (Game font), or reinstall " GAME_NAME " - it "
                  "comes with a font of its own.");
-    } else if (rt_romfs_files >= ROMFS_FILES &&
+    } else if (rt_romfs_files >= 0 &&
                (rt_romfs_missing > 0 ||
                 (game_romfs_bytes(game_version()) && rt_romfs_bytes != game_romfs_bytes(game_version())))) {
         snprintf(head, sizeof head, "Your game files are damaged or changed");
         snprintf(what, sizeof what, "All of the game's files are there, but some don't match the game, and the game "
-                 "stopped when it needed one of them. Copy your game files again, then set them up again on the start "
-                 "screen (System).");
+                 "stopped when it needed one of them. Copy your game files again, then set them up again in the "
+                 "launcher.");
     } else if (has("get_terminate") || has("uncaught C++ exception")) {  // (the game threw: recompiled code can't
                                                                          // unwind; runtime/hle/game_state.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
-        snprintf(what, sizeof what, "This is a bug in LAS Recomp, not a problem with your game files or PC. %s", report);
+        snprintf(what, sizeof what, "This is a bug in " GAME_NAME ", not a problem with your game files or PC. %s", report);
     } else if (has("device lost") || has("failed: -4 (")) {  // (VK_ERROR_DEVICE_LOST: the Vulkan backend's fatal lines)
         snprintf(head, sizeof head, "Your graphics card stopped responding");
         snprintf(what, sizeof what, "The graphics driver reset the GPU while the game was running (device lost). Update "
@@ -122,10 +116,10 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     } else if (has("VK_") || has("Vulkan")) {
         snprintf(head, sizeof head, "Graphics driver error");
 #ifdef __ANDROID__
-        snprintf(what, sizeof what, "LAS Recomp needs a graphics driver with Vulkan 1.3. On Adreno GPUs a Turnip driver "
+        snprintf(what, sizeof what, GAME_NAME " needs a graphics driver with Vulkan 1.3. On Adreno GPUs a Turnip driver "
                  "package can give it. If it keeps happening, please report it with the log file below.");
 #else
-        snprintf(what, sizeof what, "LAS Recomp needs a graphics driver with Vulkan 1.3: install the latest driver for "
+        snprintf(what, sizeof what, GAME_NAME " needs a graphics driver with Vulkan 1.3: install the latest driver for "
                  "your GPU (NVIDIA, AMD or Intel). If it keeps happening, please report it with the log file below.");
 #endif
     } else if (has("out of memory") || has("cannot allocate") || has("alloc failed")) {
@@ -133,9 +127,9 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(what, sizeof what, "Close other programs and try again.");
     } else if (g_pc && rt_host_fn_name(g_pc, NULL)) {
         snprintf(head, sizeof head, "The game crashed");
-        snprintf(what, sizeof what, "This is a bug in LAS Recomp, not a problem with your game files or PC. %s", report);
+        snprintf(what, sizeof what, "This is a bug in " GAME_NAME ", not a problem with your game files or PC. %s", report);
     } else {
-        snprintf(head, sizeof head, "LAS Recomp stopped because of an error");
+        snprintf(head, sizeof head, GAME_NAME " stopped because of an error");
         snprintf(what, sizeof what, "%s", report);
     }
     // (the fatal line again, after the backtrace: a launcher's excerpt of the log's last lines lost it above the trace)
