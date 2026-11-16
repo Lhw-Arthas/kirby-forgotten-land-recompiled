@@ -3080,7 +3080,10 @@ static void resolve_feedback(Prog *pr) {
             bool self_write = t == st.rt.depth && st.ds[0] && st.ds[1];
             TexBackend *src = vk_tex(t, true);
             Snap *existing = NULL;
-            for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
+            // (the same texture object can be made again in another format or size: its old copy is no snapshot of it)
+            for (int k = 0; k < nsnaps; k++)
+                if (snaps[k].key == t && snaps[k].copy.image && snaps[k].copy.format == src->format &&
+                    snaps[k].copy.width == src->width && snaps[k].copy.height == src->height) existing = &snaps[k];
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
             static const VkComponentMapping id = {0};
             if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
