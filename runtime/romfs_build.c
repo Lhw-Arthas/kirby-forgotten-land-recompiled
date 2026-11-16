@@ -3,7 +3,7 @@
 // entries. The image itself is never written: runtime/services/fs.c serves it from this layout and the files. Entries are found by hash (the game's RomFS code walks the tables itself), so the order inside them only
 // has to be consistent: directories and files are sorted by name, children before siblings' children.
 #include "romfs_build.h"
-#include "game.h"
+#include "../game/game.h"
 
 #include "platform.h"  // (Windows: POSIX mkdir)
 

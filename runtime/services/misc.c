@@ -3,7 +3,7 @@
 
 #include "../hle.h"
 #include "../ipc.h"
-#include "game.h"
+#include "../../game/game.h"
 
 static void ok_logger(Service *s, IpcReq *req, IpcResp *resp) {
     LOG("[svc] %s cmd %u (ok)\n", s->name, req->cmd);

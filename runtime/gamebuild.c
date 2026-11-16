@@ -15,7 +15,7 @@
 #include <unistd.h>
 #endif
 
-#include "game.h"
+#include "../game/game.h"
 #include "game_addresses.h"
 #include "gamelib.h"
 #include "paths.h"

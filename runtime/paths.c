@@ -17,7 +17,7 @@
 #include <utime.h>
 #endif
 
-#include "game.h"
+#include "../game/game.h"
 #include "gamelib.h"
 #include "paths.h"
 #include "platform.h"

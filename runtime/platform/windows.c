@@ -11,7 +11,7 @@
 #include <wchar.h>
 
 #include "../platform.h"
-#include "game.h"
+#include "../../game/game.h"
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 

@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "game.h"
+#include "../game/game.h"
 #include "rt.h"
 
 Module g_modules[4];

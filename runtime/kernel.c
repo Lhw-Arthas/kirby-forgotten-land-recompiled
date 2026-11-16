@@ -6,7 +6,7 @@
 
 #include "hle.h"
 #include "kernel.h"
-#include "game.h"
+#include "../game/game.h"
 #ifdef _WIN32
 #include "platform/windows_threads.h"
 #endif

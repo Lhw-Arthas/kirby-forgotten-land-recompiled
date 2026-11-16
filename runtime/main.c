@@ -10,7 +10,7 @@
 #include <unistd.h>
 
 #include "game_addresses.h"
-#include "game.h"
+#include "../game/game.h"
 #include "gamelib.h"
 #include "paths.h"
 #include "settings.h"

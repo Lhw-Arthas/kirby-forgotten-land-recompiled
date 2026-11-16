@@ -23,7 +23,7 @@
 #include <algorithm>
 #include <atomic>
 
-#include "game.h"
+#include "../../game/game.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // (SetKeyOwner)
 #include "i18n.h"
