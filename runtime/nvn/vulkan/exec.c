@@ -2290,7 +2290,12 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     bool gs = np->stage_mask & 4, vs_only = (np->stage_mask & 0x3F) == 1;
     if (!(np->stage_mask & 1) || (!(np->stage_mask & 2) && !vs_only)) return NULL;
-    if (gs && !g_vk.geometry) return NULL;
+    if (gs && !g_vk.geometry) {
+        static bool said;
+        if (!said) LOG("[vk] a program with a geometry shader: its draws are skipped (the GPU has no geometryShader)\n");
+        said = true;
+        return NULL;
+    }
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < (gs ? 3 : 2); i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
     const uint8_t *vb = (const uint8_t *)vkey;

@@ -1037,6 +1037,24 @@ static void create_device(void) {
         g_shader_stats = true;
         LOG("[vk] shader statistics on (LARECOMP_VK_SHADER_STATS): one [stats] line per pipeline stage, pipelines not cached\n");
     }
+    {   // the GPU and what it has, near the top of every log (a report without a log line for its GPU can't be told apart)
+        const VkPhysicalDeviceLimits *l = &g_vk.props.limits;
+        static const char *const types[] = {"other", "integrated", "discrete", "virtual", "CPU"};
+        LOG("[vk] gpu: vendor %#x device %#x, %s, api %u.%u.%u, driver version %#x\n", g_vk.props.vendorID,
+            g_vk.props.deviceID, g_vk.props.deviceType < 5 ? types[g_vk.props.deviceType] : "?",
+            VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
+            VK_API_VERSION_PATCH(g_vk.props.apiVersion), g_vk.props.driverVersion);
+#define ON(x) ((x) ? "on" : "OFF")
+        LOG("[vk] features: BC textures %s, 64-bit integers %s, geometry shaders %s, storage image writes without format %s, "
+            "vertex/fragment stores %s, robust buffers %s, custom border colours %s, instance divisors %s, host memory "
+            "import %s, dual-source blending %s, line fill %s, anisotropy %s, mirror clamp %s, cube arrays %s; max storage "
+            "buffer %llu MB, push constants %u bytes\n", ON(b->textureCompressionBC), ON(b->shaderInt64), ON(b->geometryShader),
+            ON(b->shaderStorageImageWriteWithoutFormat), ON(g_vk.ssbo_chunks), ON(b->robustBufferAccess),
+            ON(g_vk.custom_border), ON(g_vk.divisor), ON(g_vk.host_import), ON(b->dualSrcBlend), ON(b->fillModeNonSolid),
+            ON(g_vk.aniso), ON(g_vk.mirror_clamp), ON(b->imageCubeArray), (unsigned long long)(l->maxStorageBufferRange >> 20),
+            l->maxPushConstantsSize);
+#undef ON
+    }
     VkPhysicalDeviceAddressBindingReportFeaturesEXT en_va = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT, .reportAddressBinding = VK_TRUE};
     if (g_va_report) en_va.pNext = f.pNext, f.pNext = &en_va;
