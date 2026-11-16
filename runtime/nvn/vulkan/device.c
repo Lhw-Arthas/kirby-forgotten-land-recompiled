@@ -138,6 +138,63 @@ static VkDebugUtilsMessengerEXT messenger;
 static void exit_after_shot(void);  // (UI thread section)
 
 // ================================================================== instance / device
+// What a faulting GPU address belonged to (vk_device_fault_report). The driver reports every GPU address range it binds
+// and unbinds (VK_EXT_device_address_binding_report): the large ones (the guest heap import, VMA blocks) are kept while
+// bound, the latest 4096 of any size in a ring, so a fault in memory freed a moment ago is named too.
+typedef struct { uint64_t base, size, handle; uint32_t objtype; bool unbind; } VaEvent;
+static VaEvent va_ring[4096], va_big[64];
+static uint64_t va_n;
+static int va_nbig;
+static pthread_mutex_t va_lk = PTHREAD_MUTEX_INITIALIZER;
+static bool g_va_report;
+static VKAPI_ATTR VkBool32 VKAPI_CALL va_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
+                                            const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
+    (void)sev, (void)type, (void)user;
+    const VkBaseInStructure *p = d->pNext;
+    while (p && p->sType != VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT) p = p->pNext;
+    if (!p) return VK_FALSE;
+    const VkDeviceAddressBindingCallbackDataEXT *b = (const void *)p;
+    VaEvent e = {b->baseAddress, b->size, d->objectCount ? d->pObjects[0].objectHandle : 0,
+                 d->objectCount ? (uint32_t)d->pObjects[0].objectType : 0, b->bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT};
+    pthread_mutex_lock(&va_lk);
+    va_ring[va_n++ % 4096] = e;
+    if (e.size >= (64u << 20)) {
+        int i = 0;
+        while (i < va_nbig && !(va_big[i].base == e.base && va_big[i].handle == e.handle)) i++;
+        if (e.unbind && i < va_nbig) va_big[i] = va_big[--va_nbig];
+        else if (!e.unbind && i == va_nbig && va_nbig < 64) va_big[va_nbig++] = e;
+    }
+    pthread_mutex_unlock(&va_lk);
+    return VK_FALSE;
+}
+static const char *va_kind(uint32_t t) {
+    return t == VK_OBJECT_TYPE_DEVICE_MEMORY ? "memory" : t == VK_OBJECT_TYPE_BUFFER ? "buffer" : t == VK_OBJECT_TYPE_IMAGE ? "image" : "object";
+}
+static void va_explain(uint64_t a) {
+    if (!g_va_report) return;
+    extern bool vk_is_heap_import(uint64_t handle);
+    pthread_mutex_lock(&va_lk);
+    for (int i = 0; i < va_nbig; i++) {
+        VaEvent *e = &va_big[i];
+        if (a < e->base || a >= e->base + e->size) continue;
+        uint64_t off = a - e->base;
+        if (vk_is_heap_import(e->handle))
+            LOG("[vk]   %#llx: the guest heap import, guest address %#llx\n", (unsigned long long)a, (unsigned long long)(HEAP_BASE + off));
+        else
+            LOG("[vk]   %#llx: inside a bound %s of %llu MB, +%#llx\n", (unsigned long long)a, va_kind(e->objtype),
+                (unsigned long long)(e->size >> 20), (unsigned long long)off);
+    }
+    int shown = 0;
+    for (uint64_t k = va_n; k-- > (va_n > 4096 ? va_n - 4096 : 0) && shown < 4;) {
+        VaEvent *e = &va_ring[k % 4096];
+        if (a < e->base || a >= e->base + e->size) continue;
+        LOG("[vk]   %#llx: %s %s %#llx-%#llx, %llu bindings ago\n", (unsigned long long)a, e->unbind ? "unbound" : "bound", va_kind(e->objtype),
+            (unsigned long long)e->base, (unsigned long long)(e->base + e->size), (unsigned long long)(va_n - 1 - k));
+        shown++;
+    }
+    pthread_mutex_unlock(&va_lk);
+}
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
     (void)type, (void)user;
@@ -167,7 +224,14 @@ static void create_instance(void) {
     for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
     bool strict = getenv("LARECOMP_VK_VALIDATION_STOP") != NULL;
     bool validate = strict || getenv("LARECOMP_VK_VALIDATION") != NULL;
-    if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    uint32_t nie = 0;
+    vkEnumerateInstanceExtensionProperties(NULL, &nie, NULL);
+    VkExtensionProperties *ie = calloc(nie ? nie : 1, sizeof *ie);
+    vkEnumerateInstanceExtensionProperties(NULL, &nie, ie);
+    bool utils = false;  // (the driver's: the address-binding report for vk_device_fault_report goes through it)
+    for (uint32_t i = 0; i < nie; i++) utils |= !strcmp(ie[i].extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    free(ie);
+    if (validate || utils) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
                              .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
@@ -183,7 +247,7 @@ static void create_instance(void) {
         }
         LOG("[vk] validation layer unavailable (%d); continuing without\n", r);
         ci.enabledLayerCount = 0;
-        ci.enabledExtensionCount--;
+        if (!utils) ci.enabledExtensionCount--;
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
@@ -208,6 +272,16 @@ static void create_instance(void) {
             _Exit(EXIT_FAILURE);
         }
         if (result == VK_SUCCESS) LOG("[vk] validation enabled%s\n", strict ? " (stop on error)" : "");
+    }
+    if (utils) {
+        PFN_vkCreateDebugUtilsMessengerEXT f =
+            (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
+        VkDebugUtilsMessengerCreateInfoEXT mi = {
+            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+            .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT, .pfnUserCallback = va_cb};
+        VkDebugUtilsMessengerEXT m;
+        g_va_report = f && f(g_vk.inst, &mi, NULL, &m) == VK_SUCCESS;  // (and the device has the report: create_device)
     }
 }
 
@@ -294,6 +368,9 @@ void vk_device_fault_report(void) {
     for (uint32_t i = 0; i < c.addressInfoCount; i++)
         LOG("[vk]   address %s %#llx (precision %#llx)\n", addr[i].addressType < 7 ? kind[addr[i].addressType] : "?",
             (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+    for (uint32_t i = 0; i < c.addressInfoCount; i++)
+        if (addr[i].addressType == VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT || addr[i].addressType == VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT)
+            va_explain(addr[i].reportedAddress);
     for (uint32_t i = 0; i < c.vendorInfoCount; i++)
         LOG("[vk]   vendor: %s (code %#llx data %#llx)\n", vend[i].description, (unsigned long long)vend[i].vendorFaultCode,
             (unsigned long long)vend[i].vendorFaultData);
@@ -655,6 +732,8 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+    g_va_report = g_va_report && fault && has_ext(ep, ne, VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+    if (g_va_report) ext[n_ext++] = VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME;
     bool budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);  // (real per-heap budgets: vk_log_memory)
     if (budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     // pipeline-building features: logged below (issue #92); dynamic vertex input used, the library one only measured
@@ -926,6 +1005,9 @@ static void create_device(void) {
         g_shader_stats = true;
         LOG("[vk] shader statistics on (LARECOMP_VK_SHADER_STATS): one [stats] line per pipeline stage, pipelines not cached\n");
     }
+    VkPhysicalDeviceAddressBindingReportFeaturesEXT en_va = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT, .reportAddressBinding = VK_TRUE};
+    if (g_va_report) en_va.pNext = f.pNext, f.pNext = &en_va;
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
                                   .queueCount = 1, .pQueuePriorities = &prio};

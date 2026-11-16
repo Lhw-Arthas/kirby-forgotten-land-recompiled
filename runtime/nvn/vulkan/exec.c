@@ -4018,6 +4018,10 @@ static bool gmem_import(uint64_t size) {
     LOG("[vk] guest heap imported for shader global memory: %llu MB\n", (unsigned long long)(size >> 20));
     return true;
 }
+// Whether a Vulkan handle the driver reported a GPU address range for is the guest heap import (device.c names a fault in it)
+bool vk_is_heap_import(uint64_t handle) {
+    return handle && (handle == (uint64_t)(uintptr_t)gmem_mem || handle == (uint64_t)(uintptr_t)gmem_buf);
+}
 
 // Linux, AMD (RADV): the import above is a userptr buffer, and amdgpu checks every page of a userptr buffer again on
 // each submission - 3.2 GB of heap, ~45 ms of driver time a frame on a ROG Ally X, Steam Deck, Radeon laptops (issues
