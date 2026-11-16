@@ -581,6 +581,7 @@ bool gamebuild_cfg_stopped(void) { return g_cfg_stopped; }
 typedef struct {
     char src[1100], obj[1100], tmp[1100], log[1100], stem[64], source_hash[65];
     unsigned long long bytes;
+    bool taken;  // (started, or reused: the compile loop picks the biggest file still waiting)
 } Unit;
 
 typedef struct {
@@ -594,6 +595,7 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
         us->u = (Unit *)realloc(us->u, sizeof *us->u * us->cap);
     }
     Unit *u = &us->u[us->n++];
+    u->taken = false;
     snprintf(u->src, sizeof u->src, "%s", src);
     snprintf(u->obj, sizeof u->obj, "%s" SEP "%s.o", work, stem);
     snprintf(u->tmp, sizeof u->tmp, "%s" SEP "%s.o.tmp", work, stem);
@@ -802,7 +804,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     Units units = {0};
     int queued[NMODS] = {0};  // chunk files of each module put in units so far
     bool tables[NMODS] = {false};
-    int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
+    int taken = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
     struct { PlatProc p; int unit; uint64_t t0; } run[64];
     int nrun = 0;
     int reused = 0, compiled = 0;
@@ -861,17 +863,22 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
 
         // compiles
-        while (nrun < jobs && next < units.n) {
-            Unit *u = &units.u[next];
+        // (the biggest file first: one giant function sets how long the build takes, so it starts as soon as it is written)
+        while (nrun < jobs && taken < units.n) {
+            int pick = 0;
+            for (int k = 1; k < units.n; k++)
+                if (!units.u[k].taken && (units.u[pick].taken || units.u[k].bytes > units.u[pick].bytes)) pick = k;
+            Unit *u = &units.u[pick];
+            u->taken = true, taken++;
 #ifdef __ANDROID__  // (before the cache hashes the file; unit 0 is the shipped entry file)
-            if (next > 0 && g_nhot && !mark_cold(u->src)) LOG("[gamebuild] couldn't mark cold functions in %s\n", u->src);
+            if (pick > 0 && g_nhot && !mark_cold(u->src)) LOG("[gamebuild] couldn't mark cold functions in %s\n", u->src);
 #endif
             int cached = build_cache_object(cache, u->stem, u->src, u->source_hash);
             if (cached < 0) { snprintf(why, why_size, LN("A generated source file is missing or unreadable.")); ok = false; break; }
-            if (cached && next != 0) { done_bytes += u->bytes; ++reused; ++next; continue; }
-            PlatProc p = start_compile(&t, &units.u[next]);
+            if (cached && pick != 0) { done_bytes += u->bytes; ++reused; continue; }
+            PlatProc p = start_compile(&t, u);
             if (!p) { snprintf(why, why_size, LN("the compiler didn't start")); ok = false; break; }
-            run[nrun].p = p, run[nrun].unit = next++, run[nrun].t0 = plat_now_ns();
+            run[nrun].p = p, run[nrun].unit = pick, run[nrun].t0 = plat_now_ns();
             nrun++;
         }
         for (int k = 0; k < nrun; k++) {
@@ -895,7 +902,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             run[k--] = run[--nrun];
         }
         if (!ok) break;
-        if (gens_done && next == units.n && nrun == 0) break;
+        if (gens_done && taken == units.n && nrun == 0) break;
 
         // progress: the generator's share (its functions written), the compiler's (bytes of C compiled, of an
         // estimate of all of it while the generator still writes)
