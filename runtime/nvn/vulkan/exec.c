@@ -1002,9 +1002,11 @@ static void run_job(void (*fn)(void *), void *arg) {
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
         int n = plat_cpu_count();  // (the process's affinity mask: a process held to a few cores, few workers)
         if (n <= 0) n = SDL_GetNumLogicalCPUCores();
+        int cpus = n;
         n -= 4;
         if (n < 4) n = 4;
         if (n > 16) n = 16;
+        LOG("[vk] %d shader / pipeline build threads (%d logical CPUs for this process)\n", n, cpus);
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
