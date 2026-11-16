@@ -22,7 +22,7 @@ All numbers are from the developer PC (RTX 3050 Laptop 4 GB, 16 threads) unless 
 | Into the Town | The first stage played to its end, the rescue cutscene, then Waddle Dee Town | A scripted run on 0.3.0 cleared the first stage and stayed about 4 minutes in the Town (frames 18,840 to 25,920) with no error |
 | Every stage | `LARECOMP_STAGE` starts a new game at any of the 109 stages | Stage tour (`tools/verify/stage_tour.sh`), one run per stage. TODO (coordinator): the final tour numbers |
 | Music and sound | Stage music plays through the game's Opus decoder; the reverb and delay effects run | In a v0.2.0 first-stage run the game called the decoder command `DecodeInterleaved` 6,922 to 14,254 times and got no samples back; it decodes now. `tools/test_audio_fx.c` checks the effects with the game's own parameters |
-| Launcher | Pick the game folder, build, cancel, rebuild, play | Unit tests in CI (`cargo test`, `node --test`). TODO (coordinator): Build and Play from a fresh unzip of the release |
+| Launcher | Pick the game folder, build, cancel, rebuild, play | Unit tests in CI (`cargo test`, `node --test`). From a fresh unzip of the 0.3.0 zip: Build (about 6 minutes, PC shared) and Play reach the first stage; so does RecompLauncher's `--prepare` and start command; so does "Rebuild game code" over a 0.2.0 install |
 
 Reproduce the opening and the first stage with `bash tools/run_scripted.sh <name> 170 "3400,5000"`, then look at
 `<work>/runs/<name>/fin_3400.png` and `fin_5000.png`. `tools/boot_check.sh` runs a timed boot without input.
