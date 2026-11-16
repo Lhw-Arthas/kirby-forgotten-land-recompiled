@@ -2,7 +2,7 @@
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
 
-An early, work-in-progress static recompilation of **Kirby and the Forgotten Land** (Nintendo Switch) for Windows.
+A work-in-progress static recompilation of **Kirby and the Forgotten Land** (Nintendo Switch) for Windows.
 The game's ARM64 code is translated to C and compiled for your PC, and a runtime stands in for the Switch. It is not
 an emulator.
 
@@ -14,8 +14,7 @@ an emulator.
 ## Status
 
 See [docs/STATUS.md](docs/STATUS.md) for how far the game gets and what is known to be missing. In short: the
-game boots, plays its opening and reaches the first stage with correct graphics, but it is **not tested beyond
-that and not playable yet**.
+game boots, plays its opening and reaches the first stage with correct graphics.
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`). The
 launcher and the runtime accept any version of the game by program id, but only v1.0.0 has been built and run.

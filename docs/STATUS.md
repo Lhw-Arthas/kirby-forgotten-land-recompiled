@@ -1,6 +1,6 @@
 # Status
 
-Not playable yet. This page says how far the game gets and what is known to be wrong. Every fix and the evidence
+This page says how far the game gets and what is known to be wrong. Every fix and the evidence
 for it is in [decisions.tsv](decisions.tsv).
 
 Supported dump: the base game, v1.0.0 (program id `01004D300C5AE000`, `main` build id `d9ba7db72ffafecd`).

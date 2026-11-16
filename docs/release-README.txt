@@ -5,8 +5,7 @@ A native Windows build of Kirby and the Forgotten Land (Nintendo Switch, version
 recompilation: the game's code is translated into C and compiled into a program for your PC. It is not an emulator.
 Project page and source code: https://github.com/scarxity/kirby-forgotten-land-recompiled
 
-EARLY AND NOT PLAYABLE YET. It boots, but much is missing or broken. See docs/STATUS.md in the repository for what
-works today.
+This is a work in progress. See docs/STATUS.md in the repository for what works today.
 
 NO GAME FILES ARE INCLUDED, and no game code: this zip holds only tools. You need your own copy of the game, version
 1.0.0, extracted to a folder that holds two folders, exefs and romfs (program id 01004D300C5AE000). Packed files
