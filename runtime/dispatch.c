@@ -9,8 +9,7 @@
 #include "hle.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
-static FnTable tables[GAMELIB_MAX_MODULES];
-static int ntables;
+static FnTable tables[2];
 
 // HLE stubs live at fake addresses HLE_BASE + 16*i
 #define MAX_HLE 4096
@@ -54,13 +53,14 @@ uint64_t hle_register(const char *name, HostFn fn) {
     if (hle_count == MAX_HLE) FATAL("too many HLE stubs\n");
     hle_slots[hle_count].name = strdup(name);
     hle_slots[hle_count].fn = fn;
-    {   // LARECOMP_HLE_WHO=<fake address, hex>[,...]: names the host function behind an address of a thread dump
-        const char *who = getenv("LARECOMP_HLE_WHO");
-        char want[32];
-        snprintf(want, sizeof want, "%llx", (unsigned long long)(HLE_BASE + 16ull * hle_count));
-        if (who && strstr(who, want)) LOG("[hle] %s = %s%s\n", want, name, fn ? "" : " (no host implementation)");
-    }
     return HLE_BASE + 16ull * hle_count++;
+}
+
+// (diagnostics) the host function behind an HLE stub address, NULL if pc isn't one
+const char *hle_name_at(uint64_t pc) {
+    if (pc < HLE_BASE || pc >= HLE_BASE + HLE_SIZE) return NULL;
+    int i = (int)((pc - HLE_BASE) / 16);
+    return i < hle_count ? hle_slots[i].name : NULL;
 }
 
 void hle_override(uint64_t addr, HostFn fn, const char *name) {
@@ -69,34 +69,6 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     overrides[override_count].fn = fn;
     overrides[override_count].name = name;
     override_count++;
-}
-
-// ---- recent-HLE ring (crash debugging: what the game asked the host just before dying)
-#define HHIST 128
-static __thread struct { const char *name; uint64_t x0, x1, x30; } hhist[HHIST];
-static __thread int hhist_n;
-static void hhist_push(const char *name, Cpu *c) {
-    int i = hhist_n++ & (HHIST - 1);
-    hhist[i].name = name;
-    hhist[i].x0 = c->x[0];
-    hhist[i].x1 = c->x[1];
-    hhist[i].x30 = c->x[30];
-    // LARECOMP_HLE_TRACE=<part of a name>: every call of the matching host functions, as it happens (bring-up)
-    static const char *trace;
-    static bool trace_read;
-    if (!trace_read) trace = getenv("LARECOMP_HLE_TRACE"), trace_read = true;
-    if (trace && name && strstr(name, trace))
-        LOG("[hle] %s x0=%llx x1=%llx x2=%llx x3=%llx lr=%llx\n", name, (unsigned long long)c->x[0], (unsigned long long)c->x[1],
-            (unsigned long long)c->x[2], (unsigned long long)c->x[3], (unsigned long long)c->x[30]);
-}
-static void hhist_dump(void) {
-    int n = hhist_n < HHIST ? hhist_n : HHIST, start = hhist_n - n;
-    fprintf(stderr, "last %d host calls:\n", n);
-    for (int k = 0; k < n; k++) {
-        int i = (start + k) & (HHIST - 1);
-        fprintf(stderr, "  %s x0=%llx x1=%llx lr=%llx\n", hhist[i].name ? hhist[i].name : "?",
-                (unsigned long long)hhist[i].x0, (unsigned long long)hhist[i].x1, (unsigned long long)hhist[i].x30);
-    }
 }
 
 static __thread uint64_t unimpl_pc;
@@ -125,15 +97,15 @@ uint64_t guest_sym(const char *name) {
     return a;
 }
 
-static uint64_t hle_next = HLE_HEAP;
-RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
+static uint64_t hle_used;  // (from HLE_HEAP: an offset, as the window can move - rt.h)
+RT_ON_RESET(hle_heap_reset) { hle_used = 0; }  // (guest memory, wiped by the reboot)
 
 void *hle_alloc(uint64_t size) {
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&m);
-    uint64_t a = hle_next;
-    hle_next += (size + 63) & ~63ull;
-    if (hle_next > HLE_HEAP + HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
+    uint64_t a = HLE_HEAP + hle_used;
+    hle_used += (size + 63) & ~63ull;
+    if (hle_used > HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
     pthread_mutex_unlock(&m);
     plat_commit(a, size);
     memset((void *)a, 0, size);
@@ -142,16 +114,27 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
-    ntables = 0;
-    for (uint32_t i = 0; i < g->nmods && i < GAMELIB_MAX_MODULES; i++) {
-        const GameLibModule *m = &g->mods[i];
-        uint64_t n = *m->count;
-        if (n) tables[ntables++] = (FnTable){m->addrs, m->fns, n, m->addrs[0], m->addrs[n - 1]};
+    uint64_t nm = *g->main_count, ns = *g->sdk_count;
+#ifdef LARECOMP_DYN_BASE
+    // The library lists the game's own addresses (gen.py --dyn-base): moved to where the window is (rt.h).
+    static uint64_t *moved[2];
+    const uint64_t *src[2] = {g->main_addrs, g->sdk_addrs}, cnt[2] = {nm, ns};
+    for (int t = 0; t < 2; t++) {
+        free(moved[t]);
+        moved[t] = malloc(cnt[t] * sizeof *moved[t]);
+        if (!moved[t]) FATAL("out of memory\n");
+        for (uint64_t i = 0; i < cnt[t]; i++) moved[t][i] = src[t][i] - GUEST_CANON + GUEST_LO;
     }
+    tables[0] = (FnTable){moved[0], g->main_fns, nm, moved[0][0], moved[0][nm - 1]};
+    tables[1] = (FnTable){moved[1], g->sdk_fns, ns, moved[1][0], moved[1][ns - 1]};
+#else
+    tables[0] = (FnTable){g->main_addrs, g->main_fns, nm, g->main_addrs[0], g->main_addrs[nm - 1]};
+    tables[1] = (FnTable){g->sdk_addrs, g->sdk_fns, ns, g->sdk_addrs[0], g->sdk_addrs[ns - 1]};
+#endif
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {
-    for (int t = 0; t < ntables; t++) {
+    for (int t = 0; t < 2; t++) {
         FnTable *ft = &tables[t];
         if (addr < ft->lo || addr > ft->hi) continue;
         uint64_t lo = 0, hi = ft->count;
@@ -168,14 +151,15 @@ GuestFn dispatch_lookup(uint64_t addr) {
 // Small direct-mapped cache in front of the binary search
 #define DCACHE 4096
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
+// (98% of the functions start 16-byte aligned, so pc >> 2 alone reached 2261 of the 4096 slots; the Android port's slot)
+static inline unsigned dcache_slot(uint64_t pc) { return (unsigned)((pc >> 4) ^ (pc >> 14)) & (DCACHE - 1); }
 
-static GuestFn dispatch_slow(Cpu *c) {
+__attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
-            hhist_push(hle_slots[i].name, c);
             if (hle_slots[i].fn) return hle_slots[i].fn;
             unimpl_pc = pc;
             return hle_unimplemented;
@@ -189,22 +173,23 @@ static GuestFn dispatch_slow(Cpu *c) {
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
-    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
+    unsigned h = dcache_slot(pc);
     dcache[h].addr = pc;
     dcache[h].fn = f;
     return f;
 }
 
-// A cache miss: the lookup, then the function (a tail call too). Kept out of rt_dispatch: inlined there, its register
-// saves and stack frame were set up on every indirect call, hits included (~7% of the game threads' busy time).
-static __attribute__((noinline)) void dispatch_miss(Cpu *c) {
+// A cache miss / an HLE call: looked up, then tail-called. Kept out of rt_dispatch so the cached path needs no stack
+// frame: with the lookup inlined, every guest indirect call saved and restored registers on the way through (it was
+// 17% of the game thread's samples in Mabe on an M-series Mac, with the macOS TLS call).
+__attribute__((noinline)) static void dispatch_miss(Cpu *c) {
     GuestFn f = dispatch_slow(c);
     __attribute__((musttail)) return f(c);
 }
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
-    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
+    unsigned h = dcache_slot(c->pc);
     if (__builtin_expect(dcache[h].addr == c->pc, 1)) {
         GuestFn f = dcache[h].fn;
         __attribute__((musttail)) return f(c);
@@ -230,11 +215,10 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
     static uint64_t n;
     static __thread char name[32];
     if (!byhost) {
-        uint64_t total = 0, k = 0;
-        for (int t = 0; t < ntables; t++) total += tables[t].count;
+        uint64_t total = tables[0].count + tables[1].count, k = 0;
         uint64_t (*v)[2] = malloc(total * sizeof *v);
         if (!v) return NULL;
-        for (int t = 0; t < ntables; t++)
+        for (int t = 0; t < 2; t++)
             for (uint64_t i = 0; i < tables[t].count; i++) {
                 v[k][0] = (uint64_t)(uintptr_t)tables[t].fns[i];
                 v[k++][1] = tables[t].addrs[i];
@@ -262,7 +246,6 @@ static const char *host_sym(uint64_t pc, uint64_t *offset) {
 }
 
 void rt_fatal_trace(void) {
-    hhist_dump();
     fprintf(stderr, "host backtrace (guest functions are f_<addr>):\n");
     plat_print_backtrace();
     Cpu *c = kernel_current_cpu();
@@ -293,24 +276,52 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 // Debug data watchpoint: the page is protected; accesses in [lo, hi) are attributed to the host
 // function (f_<guest addr>) doing them, then the page is reopened until the next re-arm.
 uint64_t g_watch_lo, g_watch_hi;
+uint64_t g_fault_lr;  // (the platform's handler: the faulting thread's link register, for the watch log)
 static uint64_t watch_page;
 static void *watch_thread(void *a) {
     (void)a;
     int r = plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE);
     fprintf(stderr, "[watch] page %llx protect -> %d\n", (unsigned long long)watch_page, r);
-    for (;;) { plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE); usleep(100); }
+    extern volatile int g_watch_stop;
+    while (!g_watch_stop) { plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE); usleep(100); }
+    plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);
+    fprintf(stderr, "[watch] page %llx released\n", (unsigned long long)watch_page);
     return NULL;
 }
+volatile int g_watch_stop;  // (set by the watcher's client: the watch ends, the page opens for good)
+const char *rt_host_sym(uint64_t pc, uint64_t *off) { return host_sym(pc, off); }  // (the renderer's fault log)
 void watch_arm(void) {
+    if (!g_watch_lo) {  // (debug) LARECOMP_WATCH_ADDR=<lo>,<hi> (hex): who touches [lo, hi) - one page watched
+        const char *e = getenv("LARECOMP_WATCH_ADDR");
+        if (e) { g_watch_lo = strtoull(e, (char **)&e, 16); if (*e == ',') g_watch_hi = strtoull(e + 1, NULL, 16); }
+    }
     if (!g_watch_lo || watch_page) return;
     watch_page = g_watch_lo & ~(PLAT_PAGE - 1);
     pthread_t t;
     pthread_create(&t, NULL, watch_thread, NULL);
 }
 
+// The renderer's write watch on storage buffers (the Vulkan backend's renderer_watch_fault, exec.c; the Metal one's,
+// renderer.m): registered by the backend when it arms pages, called first for every fault on any thread. A plain
+// pointer, not a weak symbol: an undefined weak function reference doesn't link on Mach-O.
+static bool (*g_watch_hook)(uint64_t fa);
+void rt_fault_watch_hook(bool (*hook)(uint64_t fa)) { g_watch_hook = hook; }
 bool rt_fault_watch(uint64_t fa, uint64_t pc) {
+    if (g_watch_hook && g_watch_hook(fa)) return true;
     if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
     if (fa >= g_watch_lo && fa < g_watch_hi) {
+        uint64_t lr = g_fault_lr;
+        static int hits;  // (LARECOMP_WATCH_ADDR) each (frame, caller) once with its offset, the first 4000
+        extern uint64_t renderer_present_count(void);
+        static uint64_t last_frame, last_pc;
+        uint64_t fr = renderer_present_count();
+        if (getenv("LARECOMP_WATCH_ADDR") && (fr != last_frame || pc != last_pc) && hits++ < 4000) {
+            last_frame = fr, last_pc = pc;
+            uint64_t lo = 0;
+            const char *ls = host_sym(lr, &lo);
+            fprintf(stderr, "[watch] frame %llu +%#llx pc %s lr %s+%llx\n", (unsigned long long)fr,
+                    (unsigned long long)(fa - g_watch_lo), host_sym(pc, NULL) ? host_sym(pc, NULL) : "?", ls ? ls : "?", (unsigned long long)lo);
+        }
         static char seen[64][48];
         static int nseen;
         const char *nm = host_sym(pc, NULL);
@@ -329,6 +340,7 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
+    rt_crash_fault(what, fa, pc);
     uint64_t po = 0, lo = 0;
     const char *ps = host_sym(pc, &po), *ls = host_sym(lr, &lo);
     fprintf(stderr, "\n*** %s accessing %#llx\n    host pc %llx (%s+%llx)\n    host lr %llx (%s)\n", what,

@@ -16,29 +16,9 @@
 static const GameLibTables *g_tables;
 static char g_error[256];
 
-const char *gamelib_cpu_level(void) {
-#if defined(__x86_64__)
-    static const char *level;
-    if (!level) {
-        __builtin_cpu_init();
-        level = __builtin_cpu_supports("x86-64-v3") ? "v3" : "v2";
-        const char *env = getenv("LARECOMP_GAME_CPU");
-        if (env && !strcmp(env, "v2")) level = "v2";
-    }
-    return level;
-#else
-    return "base";
-#endif
-}
-
-const char *gamelib_id(void) {
-    static char id[64];
-    if (!id[0]) snprintf(id, sizeof id, "%s-%s", GAMELIB_ID, gamelib_cpu_level());
-    return id;
-}
-
-// The library's id file (<library>.id, written next to it by the build): its gamelib_id(), read without loading it.
-static bool id_matches(const char *lib) {
+// The library's id file (<library>.id, written next to it by the build): its id (gamelib_full_id), read without
+// loading it.
+static bool id_matches(const char *lib, const char *want) {
     char path[1100], id[128] = {0};
     snprintf(path, sizeof path, "%s.id", lib);
     FILE *f = fopen(path, "rb");
@@ -46,7 +26,7 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, gamelib_id());
+    return !strcmp(id, want);
 }
 
 static bool exists(const char *p) {
@@ -61,22 +41,90 @@ static int candidates(const char *game_dir, char out[3][1100]) {
     const char *env = getenv("LARECOMP_GAME_LIB");
     if (env && *env) snprintf(out[n++], 1100, "%s", env);
     char exe_side[1024];
+#if PLAT_IOS
+    // the embedded framework (tools/bundle_ios.sh): the only place iOS runs code from
+    if (rt_resource("Frameworks/LASGame.framework/LASGame", NULL, exe_side, sizeof exe_side))
+        snprintf(out[n++], 1100, "%s", exe_side);
+    (void)game_dir;
+#else
     if (rt_resource(GAMELIB_NAME, NULL, exe_side, sizeof exe_side) && exists(exe_side))
         snprintf(out[n++], 1100, "%s", exe_side);
     if (game_dir) snprintf(out[n++], 1100, "%s/%s", game_dir, GAMELIB_NAME);
+#endif
     return n;
 }
 
 bool gamelib_present(const char *game_dir) {
     if (g_tables) return true;
+    char want[GAMELIB_FULL_ID_SIZE];
+    if (!game_dir || !gamelib_full_id(game_dir, want, sizeof want)) return false;
     char c[3][1100];
     int n = candidates(game_dir, c);
     for (int i = 0; i < n; i++)
-        if (exists(c[i]) && id_matches(c[i])) return true;
+        if (exists(c[i]) && id_matches(c[i], want)) return true;
     return false;
 }
 
-static const GameLibTables *open_lib(const char *path) {
+#ifdef __ANDROID__
+// Android mounts shared storage (the data folder, where the setup builds the library) noexec: dlopen refuses a library
+// there. It is loaded from a copy in the app's internal storage, made again when the built one changed (its size and
+// time, kept next to the copy).
+#include <SDL3/SDL.h>
+#include <sys/stat.h>
+static const char *loadable_copy(const char *path) {
+    static char dst[1100];
+    const char *in = SDL_GetAndroidInternalStoragePath();
+    struct stat st;
+    if (!in || stat(path, &st) != 0) return path;
+    snprintf(dst, sizeof dst, "%s/%s", in, GAMELIB_NAME);
+    if (!strcmp(dst, path)) return path;
+    char stamp[1200], want[64], have[64] = "";
+    snprintf(stamp, sizeof stamp, "%s.from", dst);
+    snprintf(want, sizeof want, "%lld:%lld", (long long)st.st_size, (long long)st.st_mtime);
+    FILE *f = fopen(stamp, "rb");
+    if (f) { size_t n = fread(have, 1, sizeof have - 1, f); have[n] = 0; fclose(f); }
+    if (strcmp(have, want) || !exists(dst)) {
+        char tmp[1200];
+        snprintf(tmp, sizeof tmp, "%s.tmp", dst);
+        FILE *a = fopen(path, "rb"), *b = fopen(tmp, "wb");
+        bool ok = a && b;
+        static char buf[1 << 20];
+        for (size_t n; ok && (n = fread(buf, 1, sizeof buf, a)) > 0;) ok = fwrite(buf, 1, n, b) == n;
+        if (a) fclose(a);
+        if (b) ok &= fclose(b) == 0;
+        if (!ok || rename(tmp, dst) != 0) { remove(tmp); LOG("[gamelib] couldn't copy %s to %s\n", path, dst); return path; }
+        if ((f = fopen(stamp, "wb"))) { fputs(want, f); fclose(f); }
+        LOG("[gamelib] copied to internal storage to load it: %s\n", dst);
+    }
+    return dst;
+}
+#endif
+
+#if PLAT_IOS
+bool gamelib_built_for(char *out, size_t size) {
+    char c[3][1100];
+    int n = candidates(NULL, c);
+    for (int i = 0; i < n; i++) {
+        char path[1100], id[128] = {0};
+        snprintf(path, sizeof path, "%s.id", c[i]);
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+        size_t k = fread(id, 1, sizeof id - 1, f);
+        fclose(f);
+        while (k && (id[k - 1] == '\n' || id[k - 1] == '\r')) id[--k] = 0;
+        char *dash = strrchr(id, '-');
+        if (!dash || (size_t)(dash - id) != strlen(GAMELIB_ID) || strncmp(id, GAMELIB_ID, dash - id)) continue;
+        snprintf(out, size, "%s", dash + 1);
+        return true;
+    }
+    return false;
+}
+#endif
+
+static const GameLibTables *open_lib(const char *path, const char *want) {
+#ifdef __ANDROID__
+    path = loadable_copy(path);
+#endif
 #ifdef _WIN32
     HMODULE h = LoadLibraryA(path);
     if (!h) { snprintf(g_error, sizeof g_error, "can't load %s (error %lu)", path, GetLastError()); return NULL; }
@@ -88,11 +136,19 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, gamelib_id())) {
-        snprintf(g_error, sizeof g_error, "%s was built for another version (library: abi %u id %s; this runtime: abi %u id %s)", path,
-                 t ? t->abi : 0, t && t->id ? t->id : "-", (unsigned)GAMELIB_ABI, gamelib_id());
+    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, want)) {
+        snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }
+#if defined(LARECOMP_DYN_BASE) && !defined(_WIN32)
+    // its addresses follow the guest window wherever it is (gen.py --dyn-base: lasgame_gb; rt.h)
+    void (*set_base)(uint64_t) = (void (*)(uint64_t))dlsym(h, "lasgame_set_guest_base");
+    if (!set_base) {
+        snprintf(g_error, sizeof g_error, "%s wasn't generated for a moving guest window (gen.py --dyn-base)", path);
+        return NULL;
+    }
+    set_base(GUEST_LO);
+#endif
     return t;
 }
 
@@ -101,28 +157,25 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
     if (!tried) {
         tried = true;
         snprintf(g_error, sizeof g_error, "the game code hasn't been built: set up the game files on the start screen");
+        char want[GAMELIB_FULL_ID_SIZE] = "";
+        if (!game_dir || !gamelib_full_id(game_dir, want, sizeof want)) {
+            snprintf(g_error, sizeof g_error, "the game files' exefs/main is missing or unreadable");
+            if (why) snprintf(why, why_size, "%s", g_error);
+            return false;
+        }
         char c[3][1100];
         int n = candidates(game_dir, c);
         const char *env = getenv("LARECOMP_GAME_LIB");
         for (int i = 0; i < n && !g_tables; i++) {
+            if (!exists(c[i])) continue;
             bool given = i == 0 && env && *env;  // LARECOMP_GAME_LIB: loaded as given, the library's own id decides
-            if (!exists(c[i])) {
-                if (given) { snprintf(g_error, sizeof g_error, "LARECOMP_GAME_LIB: no file %s", c[i]); break; }
-                continue;
-            }
-            if (!given && !id_matches(c[i])) {
+            if (!given && !id_matches(c[i], want)) {
                 snprintf(g_error, sizeof g_error, "%s was built for another version", c[i]);
                 continue;
             }
-            g_tables = open_lib(c[i]);
-            if (!g_tables) LOG("[gamelib] %s\n", g_error);
-            // (the library asked for by name doesn't load: stop there. Falling back to the next candidate ran another
-            // game's code - Eevee's build/lasgame.dll with Pikachu's files - and crashed far from the cause)
-            if (!g_tables && given) break;
-            if (g_tables)
-                for (uint32_t m = 0; m < g_tables->nmods; m++)
-                    LOG("[gamelib] %s: %s, %llu functions\n", c[i], g_tables->mods[m].name,
-                        (unsigned long long)*g_tables->mods[m].count);
+            g_tables = open_lib(c[i], want);
+            if (g_tables) LOG("[gamelib] %s (%llu + %llu functions)\n", c[i], (unsigned long long)*g_tables->main_count,
+                              (unsigned long long)*g_tables->sdk_count);
         }
     }
     if (!g_tables && why) snprintf(why, why_size, "%s", g_error);

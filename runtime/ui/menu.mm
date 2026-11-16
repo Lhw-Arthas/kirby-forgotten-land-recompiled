@@ -1,52 +1,71 @@
-// In-game overlay (Dear ImGui on the Vulkan renderer; input fed from SDL events): the "close the game?" question
-// (Esc, F1 or Minus + Plus on a controller), the F12 settings (tabs: graphics, image and sound, advanced - the same
-// pages as the start screen's, runtime/ui/settings_ui.mm), the name entry the game asks for (runtime/hle/swkbd.c), the
-// FPS counter and the controller's finger on the touch screen (runtime/hle/input.c).
-// LARECOMP_MENU_KEY=<SDL scancode name> ("F10", "Insert"...): another key for the F12 settings (Steam takes F12 for
-// screenshots by default).
+// In-game overlay menu built with Dear ImGui (Metal renderer on macOS, Vulkan elsewhere; input fed from SDL events).
 //
-// Threads: SDL events arrive on the main thread and are queued; the overlay is laid out and drawn on the render
-// thread inside backend_present, after the game image, into the same window image.
+// Threads: SDL events arrive on the main thread and are queued; the menu is laid out and drawn on the
+// render thread inside backend_present, after the game image, into the same drawable.
+#ifdef __APPLE__
+#import <Metal/Metal.h>
+#endif
 #include <SDL3/SDL.h>
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
 #include <atomic>
+#include <string>
 #include <vector>
 
 #include "imgui.h"
-#include "imgui_internal.h"
-#include "imgui_impl_vulkan.h"
+#include "i18n.h"
+#include "live_preview.h"
+#include "option_rows.h"
+#include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
-#include "settings_ui.h"
+#include "pad_nav.h"
+#include "plastic.h"
+#include "mobile/touch_ui.h"
+#ifdef __APPLE__
+#include "imgui_impl_metal.h"
+#else
+#include "imgui_impl_vulkan.h"
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+extern "C" void vk_imgui_fonts_rebuild(void);
+// runtime/nvn/vulkan/device.c: the command buffer ImGui records into (a secondary one the recorder thread executes in
+// the window image's commands, or that buffer itself after the recorder caught up), then handed back
+extern "C" void *vk_overlay_begin(void *window_cmd);
+extern "C" void vk_overlay_end(void *window_cmd, void *cmd);
+extern "C" VkImageView g_vk_scene_view;  // (runtime/nvn/vulkan/exec.c: the game image drawn this frame)
+extern "C" float g_vk_scene_uv[4];
+#endif
 
 extern "C" {
 #include "../hle.h"
-#include "../input_bind.h"
 #include "../settings.h"
+#include "../nvn/output_scale.h"
+#include "../nvn/hud_stats.h"
+#include "../menu_sfx.h"
 #include "menu.h"
-#include "../paths.h"
 void input_reset(void);
-bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
+extern "C" int game_in_play(void);  // hle/game_state.c
+extern "C" void general_draw(float scale);     // difficulty.mm
+void controls_tab_draw(float scale);  // controls_ui.mm
+void touch_tab_draw(float scale);     // controls_ui.mm (touch screens)
+bool controls_ui_took_back(void);
+#include "../input_bind.h"
+#include "../paths.h"
+#include "../platform.h"
+#if PLAT_TOUCH
+#include "mobile/touch_safe.h"
+#endif
 }
 
-// ------------------------------------------------------------------ language
-// English, Portuguese or Russian (issue #1), from the system's language (runtime/ui/settings_ui.h)
-#define M UI_T
-
 // ------------------------------------------------------------------ state shared with the main thread
-static std::atomic<bool> g_open{false};  // the "close the game?" question is up
-static std::atomic<bool> g_cfg{false};   // the F12 settings are up
-static int g_cfg_tab;                    // the F12 settings' tab: graphics, image and sound, advanced (render thread)
-// Ctrl (the controller's top face button: Y on Xbox, X on Nintendo) in the F12 settings: half the size, in the bottom
-// right corner, no darkening of the game - to tune the effects seeing most of the image. Hidden: not in the prompts.
-// (LARECOMP_MENU_SMALL=1: so from the start, for screenshots)
-static bool g_cfg_small = getenv("LARECOMP_MENU_SMALL") != NULL;
+static std::atomic<bool> g_open{false};
+static std::atomic<bool> g_text_busy{false};  // a text field / the on-screen keyboard has the keys (render thread: ui_text_busy)
+static std::atomic<bool> g_text_typed{false};  // an ImGui text field has the focus: the system keyboard follows (phones)
 static std::atomic<bool> g_want_fullscreen_apply{false};
 
 struct QEvent {
-    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, TEXT } kind;
+    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, FINGER, TEXT, RELEASE_ALL } kind;
+    SDL_Event finger;  // (FINGER: the event itself - touch_ui.h runs on the render thread)
     ImGuiKey key;
     bool down;
     float value, x, y;
@@ -56,6 +75,21 @@ struct QEvent {
 static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<QEvent> q_events;
 static float g_pixel_density = 1;
+static int g_win_px_w = 1, g_win_px_h = 1;  // (touch positions come normalized)
+static std::atomic<int> g_safe_l{0}, g_safe_t{0}, g_safe_r{0}, g_safe_b{0};  // insets, pixels (phones: notch, home bar)
+#if PLAT_TOUCH
+// (runtime/hle/hud_corners.c) the side insets as a share of the window's width
+extern "C" void menu_safe_insets(float *l, float *r) {
+    float w = ImGui::GetCurrentContext() ? ImGui::GetIO().DisplaySize.x : 0;
+    *l = w > 0 ? g_safe_l.load() / w : 0, *r = w > 0 ? g_safe_r.load() / w : 0;
+}
+static std::atomic<int> g_cushion_l{0}, g_cushion_r{0};  // (the same, on the camera cutout's side only: the menu pages)
+#endif
+static std::atomic<bool> g_ime_send{false};  // the text field being typed in: its frame, points, to give SDL (phones)
+static SDL_Rect g_ime_rect;
+// Phones: the menu a third larger than on a 1080-line monitor (a 6.5" screen held at arm's length: rows to touch);
+// a tablet's screen is a monitor's size at arm's length: the monitor's scale
+static const float kUi = PLAT_TOUCH && !plat_touch_tablet() ? 1.35f : 1.0f;
 
 static void push(const QEvent &e) {
     pthread_mutex_lock(&q_lock);
@@ -64,26 +98,73 @@ static void push(const QEvent &e) {
 }
 
 bool menu_is_open(void) { return g_open.load(); }
+static void set_open(bool open);
+// The menu in game: a bar drops down from the top over the game, its entries in a row (the one the cursor is on lit),
+// a close X at its right end; each entry opens its page in a window under it. The start screen's Settings is
+// launcher.mm's.
+enum { BAR_SETTINGS, BAR_RESET, BAR_QUIT, BAR_CLOSE, BAR_N };
+static std::atomic<int> g_page{-1};  // the entry whose page is open (-1: the bar alone)
+static int g_bar_cur;  // the bar's cursor (render thread)
+static void page_open(int page);
+extern "C" void menu_toggle(void) { set_open(!g_open.load()); }  // (the touch controls' menu button)
+static int g_tab = -1000, g_tab_request = -2;  // (-2: no request; -1 is the Prelaunch tab; -1000: the first tab)
+static int g_ask = -1;  // the bar's Reset or Quit asked (render thread): ask_popup
+static int g_shown_tab = -1000;  // the page drawn last (its id)
+extern "C" void menu_test_open(void) {
+    set_open(true);
+    // (test) LARECOMP_MENU_BAR=<entry>: the bar alone, its cursor on that entry. Otherwise a page, as before the bar:
+    // LARECOMP_MENU_TAB=9 Quit, 10 Reset, any other a Settings tab
+    if (getenv("LARECOMP_MENU_NOTICE")) menu_save_failed(getenv("LARECOMP_SAVE_DIR"));  // (test: the failed-save notice)
+    if (getenv("LARECOMP_MENU_BAR")) { g_bar_cur = atoi(getenv("LARECOMP_MENU_BAR")) % BAR_N; return; }
+    int t = getenv("LARECOMP_MENU_TAB") ? atoi(getenv("LARECOMP_MENU_TAB")) : -1;
+    int page = t == 9 ? BAR_QUIT : t == 10 ? BAR_RESET : BAR_SETTINGS;
+    page_open(page);
+    if (t >= 0 && page == BAR_SETTINGS) { extern int g_tab_request_ext; g_tab_request_ext = t; }
+    // (test) LARECOMP_PREVIEW=<row label>: that row's live preview opens straight away (its page: LARECOMP_MENU_TAB)
+    if (const char *row = getenv("LARECOMP_PREVIEW")) {
+        if (t >= 0) g_tab = g_shown_tab = t;
+        preview_open(row, -1);
+    }
+}
+
+void menu_tabs_focus(bool first_tab);
+#if PLAT_TOUCH
+extern "C" void touch_reset(void);  // mobile/touch_controls.mm (on-screen controls)
+extern "C" bool touch_visible(void);
+extern "C" bool touch_title_box(void);
+extern "C" void touch_draw(ImDrawList *dl, float w, float h, ImFont *font, ImFont *menu_font);
+extern "C" void touch_preview_play(bool on);
+extern "C" bool touch_preview_event(const SDL_Event *e);
+#else
+static void touch_preview_play(bool) {}
+static void touch_reset(void) {}
+static bool touch_visible(void) { return false; }
+static bool touch_title_box(void) { return false; }
+static void touch_draw(ImDrawList *, float, float, ImFont *, ImFont *) {}
+#endif
 static void set_open(bool open) {
     if (open == g_open.load()) return;
+    g_page = -1;  // (the bar alone first)
     g_open.store(open);
-    input_reset();  // nothing held while the question had focus leaks into the game
-    if (!open) settings_save();
+    menu_sfx_play(open ? MENU_SFX_OPEN : MENU_SFX_CLOSE);
+    input_reset();  // nothing held while the menu had focus leaks into the game
+    touch_reset();  // (nor touches: the menu takes them, their lifts included)
+    bind_capture_cancel();
+    // nor the other way round: the releases of what was held when it closed never reach the menu (it isn't capturing
+    // then), so it starts with nothing held - else the cursor kept scrolling, or a press went missing, on the next open
+    { QEvent q = {}; q.kind = QEvent::RELEASE_ALL; push(q); }
+    if (!open) { settings_save(); osk_cancel(); g_text_busy = false; preview_reset(); }
 }
-static void set_cfg(bool open) {
-    if (open == g_cfg.load()) return;
-    if (open) set_open(false);
-    g_cfg.store(open);
-    input_reset();
-    if (!open) settings_save();
-}
-// (LARECOMP_MENU_AT: runtime/nvn/vulkan/device.c; LARECOMP_MENU_PAGE=cfg / adv / <tab number>: the F12 settings on that
-// tab instead - cfg the first, adv the advanced one)
-extern "C" void menu_test_open(void) {
-    const char *pg = getenv("LARECOMP_MENU_PAGE");
-    if (!pg) { set_open(true); return; }
-    g_cfg_tab = !strcmp(pg, "adv") ? 2 : atoi(pg);
-    set_cfg(true);
+
+static void page_open(int page) {
+    g_bar_cur = page;
+    if (page == BAR_SETTINGS) {
+        static bool opened;  // the controller's cursor: the first tab (Controls) the first time this session, later the
+        menu_tabs_focus(!opened);  // selected one
+        opened = true;
+    } else menu_tabs_focus(false);  // (a page alone: the first Down goes to its first row)
+    if (page == BAR_RESET || page == BAR_QUIT) { g_ask = page; return; }  // (a question over the bar: ask_popup)
+    g_page = page;
 }
 
 static ImGuiKey key_from_scancode(SDL_Scancode sc) {
@@ -100,88 +181,86 @@ static ImGuiKey key_from_scancode(SDL_Scancode sc) {
     case SDL_SCANCODE_DELETE: return ImGuiKey_Delete;
     case SDL_SCANCODE_HOME: return ImGuiKey_Home;
     case SDL_SCANCODE_END: return ImGuiKey_End;
+    case SDL_SCANCODE_PAGEUP: return ImGuiKey_PageUp;
+    case SDL_SCANCODE_PAGEDOWN: return ImGuiKey_PageDown;
     case SDL_SCANCODE_LSHIFT: return ImGuiKey_LeftShift;
     case SDL_SCANCODE_RSHIFT: return ImGuiKey_RightShift;
     case SDL_SCANCODE_LCTRL: return ImGuiKey_LeftCtrl;
     case SDL_SCANCODE_RCTRL: return ImGuiKey_RightCtrl;
+    case SDL_SCANCODE_LGUI: return ImGuiKey_LeftSuper;
+    case SDL_SCANCODE_RGUI: return ImGuiKey_RightSuper;
     case SDL_SCANCODE_A: return ImGuiKey_A;
     case SDL_SCANCODE_C: return ImGuiKey_C;
     case SDL_SCANCODE_V: return ImGuiKey_V;
     case SDL_SCANCODE_X: return ImGuiKey_X;
     case SDL_SCANCODE_Z: return ImGuiKey_Z;
+    case SDL_SCANCODE_Q: return ImGuiKey_Q;  // previous tab
+    case SDL_SCANCODE_E: return ImGuiKey_E;  // next tab
     default: return ImGuiKey_None;
     }
 }
 
-// A confirms, B goes back, as in the game: by the controller layout (runtime/hle/bindings.c) - Nintendo: A the right
-// face button, B the bottom one; Xbox: A the bottom one, B the right one.
-static ImGuiKey key_from_pad(Uint8 b) {
-    bool xbox = bind_layout() == BIND_LAYOUT_XBOX;
-    switch (b) {
-    case SDL_GAMEPAD_BUTTON_EAST: return xbox ? ImGuiKey_GamepadFaceRight : ImGuiKey_GamepadFaceDown;   // activate (Nintendo)
-    case SDL_GAMEPAD_BUTTON_SOUTH: return xbox ? ImGuiKey_GamepadFaceDown : ImGuiKey_GamepadFaceRight;  // cancel / back (Nintendo)
-    case SDL_GAMEPAD_BUTTON_NORTH: return ImGuiKey_GamepadFaceUp;
-    case SDL_GAMEPAD_BUTTON_WEST: return ImGuiKey_GamepadFaceLeft;
-    case SDL_GAMEPAD_BUTTON_DPAD_UP: return ImGuiKey_GamepadDpadUp;
-    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ImGuiKey_GamepadDpadDown;
-    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ImGuiKey_GamepadDpadLeft;
-    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ImGuiKey_GamepadDpadRight;
-    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return ImGuiKey_GamepadL1;
-    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return ImGuiKey_GamepadR1;
-    case SDL_GAMEPAD_BUTTON_START: return ImGuiKey_GamepadStart;
-    case SDL_GAMEPAD_BUTTON_BACK: return ImGuiKey_GamepadBack;
-    default: return ImGuiKey_None;
-    }
-}
 
-// ---- software keyboard (runtime/hle/swkbd.c: the game's name entry) ------------------------------------------
+// ---- software keyboard (runtime/hle/swkbd.c: the game's name entry etc.) --------------------------------------
 // The game thread waits in menu_keyboard_run (re-presenting the last frame); this dialog takes the text: typed
-// directly when the player last used a keyboard, an on-screen keyboard (d-pad + A, B deletes, Start / + OK) when
+// directly when the player last used a keyboard, an on-screen keyboard (d-pad + confirm, back deletes, Start / + OK; buttons as in pad_nav.h) when
 // they last used a controller.
 static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[96];
 static int g_kbd_max = 8;
-static bool capturing() { return g_open.load() || g_cfg.load() || g_kbd.load() == 1; }
-// The game gets no input while this is true (runtime/hle/input.c): the question, the settings or the name entry is up.
+static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+// The game's name limit counts characters as the console's keyboard does, in UTF-16 units (a character past U+FFFF
+// takes two); the text is UTF-8. Cuts s after max_units of them, only between characters (a character left incomplete
+// - a cut inside it, or bytes that are no character - goes too, with the rest), and returns how many units are left.
+static int kbd_cut(char *s, int max_units) {
+    int units = 0;
+    for (unsigned char *p = (unsigned char *)s; *p;) {
+        int n = *p < 0x80 ? 1 : *p >= 0xc2 && *p <= 0xdf ? 2 : *p >= 0xe0 && *p <= 0xef ? 3 : *p >= 0xf0 && *p <= 0xf4 ? 4 : 0;
+        int i = 1;
+        while (i < n && (p[i] & 0xc0) == 0x80) i++;
+        if (i == n && n > 2 && ((*p == 0xe0 && p[1] < 0xa0) || (*p == 0xed && p[1] > 0x9f) || (*p == 0xf0 && p[1] < 0x90) ||
+                                (*p == 0xf4 && p[1] > 0x8f)))
+            n = 0;  // (overlong, a surrogate or past U+10FFFF: the game's UTF-8 conversion refuses those too)
+        int u = n == 4 ? 2 : 1;
+        if (!n || i < n || units + u > max_units) { *p = 0; break; }
+        units += u, p += n;
+    }
+    return units;
+}
+// The game gets no input while this is true (runtime/hle/input.c): menu or name entry up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
 
-static SDL_Scancode cfg_key(void) {
-    static SDL_Scancode k = SDL_SCANCODE_UNKNOWN;
-    if (k == SDL_SCANCODE_UNKNOWN) {
-        const char *e = getenv("LARECOMP_MENU_KEY");
-        k = e && *e ? SDL_GetScancodeFromName(e) : SDL_SCANCODE_UNKNOWN;
-        if (k == SDL_SCANCODE_UNKNOWN) k = SDL_SCANCODE_F12;
-    }
-    return k;
-}
-
 bool menu_handle_event(const SDL_Event *e) {
-    static bool back_down, start_down;
+    static uint32_t pad_held;  // (controller buttons down, by bit: the menu's two-button shortcuts)
+    if (g_open.load() && bind_capture_event(e)) return true;  // Controls tab waiting for a new binding: it takes the press
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
-    bool typing = g_kbd.load() == 1;  // (the name entry: keys are text, not shortcuts)
-    if (typing && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {  // Enter confirms, Esc cancels
+    if (PLAT_TOUCH) {  // (osk.mm: a finger or a controller types - the device used last)
+        if (e->type == SDL_EVENT_FINGER_DOWN) g_last_pad = false, ui_typing_pad(false);
+        if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) ui_typing_pad(true);
+        if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 12000) g_last_pad = true, ui_typing_pad(true);
+    }
+    if (g_kbd.load() == 1 && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {  // Enter confirms, Esc cancels
         if (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER) { g_kbd = 2; return true; }
         if (e->key.scancode == SDL_SCANCODE_ESCAPE) { g_kbd = 3; return true; }
     }
-    if (typing && e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->gbutton.button == SDL_GAMEPAD_BUTTON_START) {
+    if (g_kbd.load() == 1 && e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->gbutton.button == SDL_GAMEPAD_BUTTON_START) {
         g_kbd = 2;
         return true;
     }
+    // typing (a text field, the on-screen keyboard, the name entry): keys are text, not menu shortcuts
+    bool typing = g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
-        if (!e->key.repeat && !typing && (e->key.scancode == cfg_key() || (e->key.scancode == SDL_SCANCODE_ESCAPE && g_cfg.load()))) {
-            set_cfg(e->key.scancode == SDL_SCANCODE_ESCAPE ? false : !g_cfg.load());  // (Esc closes the settings)
-            return true;
-        }
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
                                (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
-            if (!typing) { set_cfg(false); set_open(!g_open.load()); }  // (Esc with the question up goes to it below: "Não")
+            if (!typing) set_open(!g_open.load());  // (Esc with the menu open goes to ImGui below: it cancels a field)
             return true;
         }
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F11 ||
-                               (e->key.scancode == SDL_SCANCODE_RETURN && (e->key.mod & (SDL_KMOD_ALT | SDL_KMOD_GUI))))) {
+                               (e->key.scancode == SDL_SCANCODE_RETURN && (e->key.mod & (SDL_KMOD_ALT | SDL_KMOD_GUI))) ||
+                               (e->key.scancode == SDL_SCANCODE_F && (e->key.mod & SDL_KMOD_GUI) && (e->key.mod & SDL_KMOD_CTRL)))) {
             g_settings.fullscreen = !g_settings.fullscreen;
             g_want_fullscreen_apply.store(true);
             settings_save();
@@ -191,7 +270,7 @@ bool menu_handle_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_UP: {
         if (!capturing()) return false;
         bool down = e->type == SDL_EVENT_KEY_DOWN;
-        if (down && e->key.scancode == SDL_SCANCODE_ESCAPE) {
+        if (down && e->key.scancode == SDL_SCANCODE_ESCAPE) {  // Esc: back out of popups, else close
             QEvent q = {};
             q.kind = QEvent::KEY; q.key = ImGuiKey_Escape; q.down = true; push(q);
             q.down = false; push(q);
@@ -207,15 +286,15 @@ bool menu_handle_event(const SDL_Event *e) {
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
         bool down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
-        if (e->gbutton.button == SDL_GAMEPAD_BUTTON_BACK) back_down = down;
-        if (e->gbutton.button == SDL_GAMEPAD_BUTTON_START) start_down = down;
-        if (down && !typing && ((back_down && start_down) || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE)) {
-            set_cfg(false);
+        if (e->gbutton.button < 32) pad_held = down ? pad_held | 1u << e->gbutton.button : pad_held & ~(1u << e->gbutton.button);
+        // the player's shortcuts (Controls > Configure inputs > Open menu; Home and Back + Start by default). A Home
+        // that isn't one goes on below, not taken (#591: it opens Steam's and other launchers' overlays).
+        if (down && !typing && bind_menu_pressed(e->gbutton.button, pad_held)) {
             set_open(!g_open.load());
             return true;
         }
         if (!capturing()) return false;
-        ImGuiKey k = key_from_pad(e->gbutton.button);
+        ImGuiKey k = ui_pad_key(e->gbutton.which, e->gbutton.button, down);  // (confirm / back: pad_nav.h)
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
         return true;
     }
@@ -233,16 +312,24 @@ bool menu_handle_event(const SDL_Event *e) {
             q.key = ImGuiKey_GamepadLStickUp; q.value = v < -0.3f ? -v : 0; push(q);
             q.key = ImGuiKey_GamepadLStickDown; q.value = v > 0.3f ? v : 0; push(q);
             break;
+        case SDL_GAMEPAD_AXIS_RIGHTY:  // (scrolls a right column of plain text: option_rows.mm)
+            q.key = ImGuiKey_GamepadRStickUp; q.value = v < 0 ? -v : 0; push(q);
+            q.key = ImGuiKey_GamepadRStickDown; q.value = v > 0 ? v : 0; push(q);
+            break;
+        case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: q.key = ImGuiKey_GamepadL2; q.value = v; push(q); break;
+        case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: q.key = ImGuiKey_GamepadR2; q.value = v; push(q); break;
         default: break;
         }
         return true;
     }
     case SDL_EVENT_MOUSE_MOTION:
         if (!capturing()) return false;
+        if (PLAT_TOUCH && e->motion.which == SDL_TOUCH_MOUSEID) return true;  // (the finger itself: FINGER below)
         { QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = e->motion.x * g_pixel_density; q.y = e->motion.y * g_pixel_density; push(q); }
         return true;
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
         if (!capturing()) return false;
+        if (PLAT_TOUCH && e->button.which == SDL_TOUCH_MOUSEID) return true;
         {
             QEvent q = {};
             q.kind = QEvent::MOUSE_BUTTON;
@@ -253,96 +340,776 @@ bool menu_handle_event(const SDL_Event *e) {
         return true;
     case SDL_EVENT_MOUSE_WHEEL:
         if (!capturing()) return false;
+        if (PLAT_TOUCH && e->wheel.which == SDL_TOUCH_MOUSEID) return true;
         { QEvent q = {}; q.kind = QEvent::WHEEL; q.x = e->wheel.x; q.y = e->wheel.y; push(q); }
         return true;
+#if PLAT_TOUCH
+    case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_CANCELED:
+        if (!capturing()) return false;
+        if (touch_preview_event(e)) return true;  // (the Touch tab's preview: its stick / D-pad takes the thumb)
+        {   // touch screens (touch_ui.h, on the render thread: drain_events)
+            QEvent q = {};
+            q.kind = QEvent::FINGER, q.finger = *e;
+            push(q);
+        }
+        return true;
+#endif
     default:
         return false;
     }
 }
 
+// Remember window size (Video tab): the window opens at the size it had when LAS Recomp last quit. The size is taken
+// at exit (every quit ends in exit()), not in fullscreen or maximized - those keep the last plain window's size.
+static SDL_Window *g_remember_win;
+static void remember_at_exit(void) {
+    if (!g_settings.remember_window || !g_remember_win) return;
+    SDL_WindowFlags fl = SDL_GetWindowFlags(g_remember_win);
+    int w, h;
+    if ((fl & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) || !SDL_GetWindowSize(g_remember_win, &w, &h))
+        return;
+    if (w == g_settings.window_w && h == g_settings.window_h) return;
+    g_settings.window_w = w, g_settings.window_h = h;
+    settings_save();
+}
+extern "C" void rt_window_size(int *w, int *h) {  // before the window is made: the remembered size, if it's on
+    if (g_settings.remember_window && g_settings.window_w >= 320 && g_settings.window_h >= 180)
+        *w = g_settings.window_w, *h = g_settings.window_h;
+}
+extern "C" void rt_window_remember(void *w) {
+    if (!g_remember_win) atexit(remember_at_exit);
+    g_remember_win = (SDL_Window *)w;
+}
+
+extern "C" uint32_t g_window_resize_request;  // (test scripts: runtime/hle/input.c "resize")
+extern "C" uint64_t g_window_move_request;    // ("move")
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
-    static bool text_input;
+    SDL_GetWindowSizeInPixels(w, &g_win_px_w, &g_win_px_h);
+#if PLAT_TOUCH
+    // phones: text input shows the system keyboard - only while an ImGui text field has the focus (not the on-screen
+    // keys or the system prompt), not the whole time the menu is open
+    bool want_text = capturing() && g_text_typed.load();
+    if (g_ime_send.exchange(false)) SDL_SetTextInputArea(w, &g_ime_rect, 0);  // (SDL slides the view up off the keyboard)
+    {   // the safe area (points -> pixels): the menu keeps out of the notch and the home indicator. Held while the
+        // system keyboard is up: SDL slides the view up to keep the text field (ImGui's IME rect) above the keyboard,
+        // which takes the view's bottom off the home indicator - a new safe area, which would move the field, and SDL
+        // would slide again: the screen shook back and forth between the two.
+        SDL_Rect sa;
+        int ww, wh;
+        bool kbd = want_text || SDL_TextInputActive(w) || SDL_ScreenKeyboardShown(w);
+        if (!kbd && SDL_GetWindowSafeArea(w, &sa) && SDL_GetWindowSize(w, &ww, &wh) && ww > 0 && wh > 0) {
+            g_safe_l = (int)(sa.x * g_pixel_density), g_safe_t = (int)(sa.y * g_pixel_density);
+            g_safe_r = (int)((ww - sa.x - sa.w) * g_pixel_density), g_safe_b = (int)((wh - sa.y - sa.h) * g_pixel_density);
+            float cl = g_safe_l, cr = g_safe_r;
+            touch_cushion(&cl, &cr, w);
+            g_cushion_l = (int)cl, g_cushion_r = (int)cr;
+        }
+    }
+#else
     bool want_text = capturing();
+#endif
+    static bool text_input;
     if (want_text != text_input) {
         if (want_text) SDL_StartTextInput(w);
         else SDL_StopTextInput(w);
         text_input = want_text;
     }
-    // F11 / Alt+Enter only: the setting itself is applied where the window is made (ui_window_init) and handed to the game
-    // (runtime/ui/launcher_lg.mm window_as_game) - applied here on the first call too, the start screen (which calls this
-    // each frame) went back to full screen right after taking its own size
-    if (g_want_fullscreen_apply.exchange(false)) SDL_SetWindowFullscreen(w, g_settings.fullscreen);
+    static bool first = true;
+    if (first || g_want_fullscreen_apply.exchange(false)) {
+        first = false;
+#ifdef __ANDROID__
+        SDL_SetWindowFullscreen(w, true);  // (always: there is no window to go back to)
+#else
+        SDL_SetWindowFullscreen(w, g_settings.fullscreen);
+#endif
+    }
+    if (uint32_t r = __atomic_exchange_n(&g_window_resize_request, 0u, __ATOMIC_RELAXED))
+        SDL_SetWindowSize(w, (int)(r >> 16), (int)(r & 0xffff));
+    if (uint64_t m = __atomic_exchange_n(&g_window_move_request, 0ull, __ATOMIC_RELAXED))
+        SDL_SetWindowPosition(w, (int)((m >> 16) & 0xffff) - 32768, (int)(m & 0xffff) - 32768);
 }
 
 // ------------------------------------------------------------------ render thread
 static bool g_inited;
-static ImGuiContext *g_ctx;  // ours: the start screen has its own context
-static ImFont *g_font, *g_font_big;  // the FPS counter and the name entry
-static ImFont *g_menu_font;          // the "close the game?" question (Baloo 2, as on the start screen)
+#ifdef __APPLE__
+static id<MTLTexture> g_scene;  // (menu_set_scene: this frame's game image, for the glare guard)
+static float g_scene_uv[4];
+void menu_set_scene(id<MTLTexture> tex, const float uv[4]) {
+    g_scene = tex;
+    memcpy(g_scene_uv, uv, sizeof g_scene_uv);
+}
+#endif
+static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
+static ImFont *g_font, *g_font_big;
+static ImFont *g_menu_font, *g_menu_font_big;  // the menu window (Baloo 2); everything else keeps g_font
+static int g_focus_tab = -99;  // put the nav cursor on this tab next frame (-100: the selected one; -99: none)
+static int g_focus_frames;
 
+// The start screen's Settings opening: the controller's cursor starts on the first tab the first time in a session,
+// later on the tab that's selected
+static bool g_page_fresh_seen;  // (focus_check: the menu opened)
+static bool g_page_fresh;  // the page shown hasn't been entered yet: the first Down goes to its first enabled row
+static bool g_page_focus_next;  // (that page has no option rows: its first control takes the cursor next frame)
+void menu_tabs_focus(bool first_tab) {
+    g_focus_tab = first_tab ? -1 : -100, g_focus_frames = 0, g_page_fresh = g_page_fresh_seen = true;
+}
+int g_tab_request_ext = -1;
+
+static void style_init(void) {
+    ImGuiStyle &s = ImGui::GetStyle();
+    ImGui::StyleColorsDark();
+    s.WindowRounding = 14; s.FrameRounding = 8; s.GrabRounding = 8; s.TabRounding = 8; s.ChildRounding = 10;
+    s.WindowPadding = ImVec2(28, 24); s.FramePadding = ImVec2(14, 8); s.ItemSpacing = ImVec2(14, 12);
+    s.WindowBorderSize = 0; s.ScrollbarSize = 18;
+    ImVec4 *c = s.Colors;
+    ImVec4 gold(0.93f, 0.76f, 0.33f, 1), gold_dim(0.62f, 0.49f, 0.20f, 1), green(0.15f, 0.36f, 0.25f, 1);
+    c[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.09f, 0.08f, 0.94f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.09f, 0.13f, 0.11f, 0.85f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.07f, 0.10f, 0.09f, 0.98f);
+    c[ImGuiCol_Text] = ImVec4(0.96f, 0.94f, 0.88f, 1);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.64f, 0.58f, 1);
+    c[ImGuiCol_FrameBg] = ImVec4(0.13f, 0.19f, 0.16f, 1);
+    c[ImGuiCol_FrameBgHovered] = green;
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.19f, 0.45f, 0.31f, 1);
+    c[ImGuiCol_Button] = ImVec4(0.14f, 0.22f, 0.18f, 1);
+    c[ImGuiCol_ButtonHovered] = green;
+    c[ImGuiCol_ButtonActive] = ImVec4(0.21f, 0.50f, 0.34f, 1);
+    c[ImGuiCol_Header] = green;
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.19f, 0.45f, 0.31f, 1);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.21f, 0.50f, 0.34f, 1);
+    c[ImGuiCol_Tab] = ImVec4(0.12f, 0.18f, 0.15f, 1);
+    c[ImGuiCol_TabHovered] = green;
+    c[ImGuiCol_TabSelected] = ImVec4(0.21f, 0.44f, 0.31f, 1);
+    c[ImGuiCol_TabSelectedOverline] = gold;
+    c[ImGuiCol_CheckMark] = gold;
+    c[ImGuiCol_SliderGrab] = gold_dim;
+    c[ImGuiCol_SliderGrabActive] = gold;
+    c[ImGuiCol_NavCursor] = gold;
+    c[ImGuiCol_Separator] = ImVec4(0.30f, 0.36f, 0.30f, 1);
+    c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_WindowBg];
+}
+
+// The menus' parchment colours (plastic.h) over that, only while a menu is drawn: the overlays over the game (FPS
+// counter, run timer, trackers, cards) keep the look above. The pieces are the backgrounds - ImGui's own fills go clear
+// or take the theme's colours (frames, buttons and windows are pieces too while plastic_widgets is on: their colours
+// here only tell them apart).
+static void style_parchment(ImGuiStyle &s) {
+    ImVec4 *c = s.Colors;
+    const PlasticTheme &t = plastic_theme();
+    ImVec4 clear(0, 0, 0, 0), text = plastic_col(t.text);
+    c[ImGuiCol_WindowBg] = c[ImGuiCol_ChildBg] = clear;
+    c[ImGuiCol_PopupBg] = ImVec4(t.panel.x, t.panel.y, t.panel.z, 1);
+    c[ImGuiCol_Text] = text;
+    c[ImGuiCol_TextDisabled] = plastic_col(t.text_dim);
+    c[ImGuiCol_Border] = t.frame;
+    c[ImGuiCol_Button] = t.row;
+    c[ImGuiCol_ButtonHovered] = t.row_hot;
+    c[ImGuiCol_ButtonActive] = ImVec4(t.row_hot.x * 0.95f, t.row_hot.y * 0.95f, t.row_hot.z * 0.95f, 1);
+    c[ImGuiCol_Header] = ImVec4(t.tab.x, t.tab.y, t.tab.z, 1);
+    c[ImGuiCol_HeaderHovered] = ImVec4(t.row_hot.x, t.row_hot.y * 0.98f, t.row_hot.z, 1);
+    c[ImGuiCol_HeaderActive] = ImVec4(t.row_hot.x * 0.93f, t.row_hot.y * 0.93f, t.row_hot.z * 0.93f, 1);
+    c[ImGuiCol_FrameBg] = ImVec4(t.inset.x, t.inset.y, t.inset.z, 1);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(t.inset.x, t.inset.y * 0.99f, t.inset.z * 0.98f, 1);
+    c[ImGuiCol_FrameBgActive] = ImVec4(t.inset.x * 0.99f, t.inset.y * 0.98f, t.inset.z * 0.97f, 1);
+    c[ImGuiCol_CheckMark] = t.row_sel;
+    c[ImGuiCol_SliderGrab] = t.ring;
+    c[ImGuiCol_SliderGrabActive] = t.row_sel;
+    c[ImGuiCol_PlotHistogram] = c[ImGuiCol_PlotHistogramHovered] = t.row_sel;
+    c[ImGuiCol_NavCursor] = clear;  // (the pieces show the cursor themselves)
+    c[ImGuiCol_Separator] = ImVec4(t.ring.x, t.ring.y, t.ring.z, 0.40f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0.22f);  // (a dark groove; the grab in the rims' khaki gold)
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(t.ring.x, t.ring.y, t.ring.z, 0.85f);
+    c[ImGuiCol_ScrollbarGrabHovered] = c[ImGuiCol_ScrollbarGrabActive] = t.row_sel;
+    c[ImGuiCol_TextSelectedBg] = ImVec4(t.row_sel.x, t.row_sel.y, t.row_sel.z, 0.35f);
+    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.10f, 0.06f, 0.02f, 0.40f);
+    c[ImGuiCol_Tab] = c[ImGuiCol_TabHovered] = c[ImGuiCol_TabSelected] = clear;
+    s.ScrollbarRounding = 9;
+}
+
+
+// The fonts, with the glyphs of the menus' language (i18n.h): again when it changes
+static void load_fonts(void) {
+    ImGuiIO &io = ImGui::GetIO();
+    io.Fonts->Clear();
+    g_font = g_font_big = g_menu_font = g_menu_font_big = NULL;
+    i18n_fonts_stale(io.Fonts);
+    ImFontConfig cfg;
+    cfg.OversampleH = 2;
+    char dejavu[1024];  // none of the system's: the bundled DejaVu Sans (third_party/fonts/DejaVu, in every release)
+    const char *bundled = rt_resource("DejaVuSans.ttf", "third_party/fonts/DejaVu/DejaVuSans.ttf", dejavu, sizeof dejavu) ? dejavu : NULL;
+    const char *paths[] = {"/System/Library/Fonts/Avenir Next.ttc", "/System/Library/Fonts/Helvetica.ttc",
+                           "C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                           "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", bundled};
+    for (const char *p : paths) {
+        if (!p) continue;
+        if (FILE *f = fopen(p, "rb")) fclose(f);  // a missing file is an assertion in ImGui, not a NULL return
+        else continue;
+        if (!g_font) g_font = io.Fonts->AddFontFromFileTTF(p, 34, &cfg, i18n_glyph_ranges()), i18n_merge_fonts(io.Fonts, 34);
+        if (g_font && !g_font_big) {
+            ImFontConfig b = cfg;
+            b.FontNo = 0;
+            g_font_big = io.Fonts->AddFontFromFileTTF(p, 56, &b, i18n_glyph_ranges());
+            i18n_merge_fonts(io.Fonts, 56);
+        }
+    }
+    // the menu window itself: Baloo 2 SemiBold, as on the start screen (shipped, OFL), at its Settings window's sizes; the
+    // FPS counter, overlays and on-screen keyboard keep the fonts above
+    char baloo[1024];
+    if (const char *f = getenv("LARECOMP_MENU_FONT")) strlcpy(baloo, f, sizeof baloo);  // (test) another weight / face
+    if (getenv("LARECOMP_MENU_FONT") || rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo)) {
+        g_menu_font = io.Fonts->AddFontFromFileTTF(baloo, 39, &cfg, i18n_glyph_ranges());
+        i18n_merge_fonts(io.Fonts, 39, 0.8f);
+        g_menu_font_big = io.Fonts->AddFontFromFileTTF(baloo, 72, &cfg, i18n_glyph_ranges());
+        i18n_merge_fonts(io.Fonts, 72, 0.8f);
+    }
+    if (!g_font) g_font = io.Fonts->AddFontDefault(), i18n_merge_fonts(io.Fonts, 13);
+    if (!g_font_big) g_font_big = g_font;
+    if (!g_menu_font || !g_menu_font_big) g_menu_font = g_font, g_menu_font_big = g_font_big;
+}
+
+#ifdef __APPLE__
+static id<MTLDevice> g_dev;  // (the font texture again: load_fonts)
+static void init(id<MTLDevice> dev) {
+    g_dev = dev;
+#else
 static void init(void) {
+#endif
     IMGUI_CHECKVERSION();
-    ui_pick_language();
     g_ctx = ImGui::CreateContext();
     ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     io.IniFilename = NULL;
-    UiFonts f = ui_load_fonts();
-    g_font = f.body, g_font_big = f.big, g_menu_font = f.title;
-    ui_style();
-    g_ui_tips_in_box = true;  // (the settings show the descriptions in their box)
+    load_fonts();
+    style_init();
+#ifdef __APPLE__
+    ImGui_ImplMetal_Init(dev);
+#else
     vk_imgui_backend_init();
+#endif
     g_inited = true;
 }
 
+static TouchUi g_touch;  // (render thread)
 static void drain_events(ImGuiIO &io) {
     pthread_mutex_lock(&q_lock);
     std::vector<QEvent> ev;
     ev.swap(q_events);
     pthread_mutex_unlock(&q_lock);
+    // a rebind (Controls tab) takes every release while it waits: the confirm press that started it, a stick let go
+    static bool capture_was;
+    if (bind_capture_active(NULL, NULL, NULL) != capture_was) capture_was = !capture_was, ui_pad_release_all(io);
     for (const QEvent &q : ev) {
         switch (q.kind) {
         case QEvent::KEY: io.AddKeyEvent(q.key, q.down); break;
-        case QEvent::ANALOG: io.AddKeyAnalogEvent(q.key, q.value > 0.1f, q.value); break;
+        case QEvent::ANALOG: {
+            // the left stick only steps the cursor (pressed or not): ImGui also scrolls the window under the cursor by
+            // its analog value, so a tilt moved the column and the selection at once (user 2026-11-13). The right
+            // stick scrolls (option_rows.mm stick_scroll).
+            bool lstick = q.key == ImGuiKey_GamepadLStickUp || q.key == ImGuiKey_GamepadLStickDown ||
+                          q.key == ImGuiKey_GamepadLStickLeft || q.key == ImGuiKey_GamepadLStickRight;
+            io.AddKeyAnalogEvent(q.key, q.value > 0.1f, lstick ? 0.0f : q.value);
+            break;
+        }
         case QEvent::MOUSE_POS: io.AddMousePosEvent(q.x, q.y); break;
         case QEvent::MOUSE_BUTTON: io.AddMouseButtonEvent(q.button, q.down); break;
         case QEvent::WHEEL: io.AddMouseWheelEvent(q.x, q.y); break;
+        case QEvent::FINGER:
+            io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+            g_touch.event(&q.finger, (float)g_win_px_w, (float)g_win_px_h, [&](float x, float y) { io.AddMousePosEvent(x, y); },
+                          [&](bool down) { io.AddMouseButtonEvent(0, down); });
+            break;
         case QEvent::TEXT: io.AddInputCharactersUTF8(q.text); break;
+        case QEvent::RELEASE_ALL: ui_pad_release_all(io); break;
         }
     }
 }
 
-// Reboot (runtime/main.c): the game is gone - the question and the name entry close; the ImGui context stays.
+extern "C" void renderer_get_scale(float *sx, float *sy);
+extern "C" int input_pad_family(void);  // runtime/hle/input.c
+extern "C" double output_scale_dynamic_factor(void);
+#ifdef __APPLE__
+extern "C" double ui_interp_fps(void);  // runtime/nvn/metal.m (-1: frame interpolation off)
+#endif
+
+#ifdef __APPLE__
+// Metal HUD turned on while its library isn't loaded (the game started with the setting off): it shows only after a
+// restart (runtime/main.c metal_hud_relaunch). LARECOMP_MENU_HUD_RESTART=1 (test): the note opens with the Video tab.
+static void metal_hud_restart_popup(float scale) {
+    static bool test = getenv("LARECOMP_MENU_HUD_RESTART") != NULL;
+    if (test) test = false, ImGui::OpenPopup("##hudrestart");
+    if (!ImGui::BeginPopupModal("##hudrestart", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    ImGui::PushFont(g_font_big);
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", L("Restart required"));
+    ImGui::PopFont();
+    ImGui::Spacing();
+    ImGui::TextUnformatted(L("The Metal HUD shows after you restart the game."));
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImGui::SetItemDefaultFocus();
+    if (ImGui::Button(L("OK"), ImVec2(220 * scale, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+#endif
+
+static void tab_display(void) {
+    float scale = ImGui::GetFontSize() / 34;
+    opt_begin("##video", scale);
+    opt_section("Display");
+    const char *aspects[] = {LN("Unlocked"), LN("Original 16:9")};
+    preview_text(LN("Configure the shape of the picture. Unlocked fills the window, Original keeps 16:9."), NULL);
+    opt_preview("Aspect ratio", &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
+               "Unlocked fills the window and shows more of the island on wide screens, up to ultrawide. Original keeps "
+               "the game's 16:9 view with bars.");
+    bool fs = g_settings.fullscreen;
+    if (!PLAT_TOUCH && opt_toggle("Fullscreen", &fs, false, "Fills the screen. You can also press F11, Alt+Enter or Cmd+Ctrl+F.")) {
+        g_settings.fullscreen = fs;
+        g_want_fullscreen_apply.store(true);
+    }
+    {   // on / off, and its corner under it (user 2026-11-12): show_fps is the corner shown (or off), fps_corner the one
+        // it comes back to
+        static const char *corners[] = {LN("Top left"), LN("Top right"), LN("Bottom left"), LN("Bottom right")};
+        bool on = g_settings.show_fps != FPS_OFF;
+        if (g_settings.fps_corner <= FPS_OFF || g_settings.fps_corner >= N_FPS_CORNERS) g_settings.fps_corner = FPS_TOP_LEFT;
+        if (opt_toggle("Show FPS", &on, false, "Shows the frame rate in a corner of the screen."))
+            g_settings.show_fps = on ? g_settings.fps_corner : FPS_OFF;
+        opt_child_begin(on);
+        if (!on) opt_disable_next(), opt_needs_next("Show FPS");
+        int ci = g_settings.fps_corner - FPS_TOP_LEFT;
+        if (opt_choice("Position", &ci, corners, 4, 0, "Which corner the frame rate sits in.")) {
+            g_settings.fps_corner = FPS_TOP_LEFT + ci;
+            if (on) g_settings.show_fps = g_settings.fps_corner;
+        }
+        if (!on) opt_disable_next(), opt_needs_next("Show FPS");
+        opt_toggle("Show advanced information", &g_settings.fps_advanced, false,
+                   "Adds a frame time graph, CPU and GPU load, memory, the renderer's work, shader builds and the "
+                   "current level. Mostly for testing and bug reports.");
+        opt_child_end();
+    }
+#ifdef __APPLE__
+    if (opt_toggle("Metal HUD", &g_settings.metal_hud, false,
+                   "Shows Apple's performance overlay with frame rate, GPU time and memory. Turning it on may need a "
+                   "restart.") &&
+        g_settings.metal_hud && !getenv("MTL_HUD_ENABLED"))
+        ImGui::OpenPopup("##hudrestart");
+    metal_hud_restart_popup(scale);
+#endif
+    if (!PLAT_TOUCH)  // (a phone's window is the screen)
+        opt_toggle("Remember window size", &g_settings.remember_window, false,
+                   "The window opens at the size it was when you quit.");
+
+    opt_section("Rendering");
+    // (user 2026-11-12) Resolution first, then Dynamic resolution - its own toggle, Resolution set aside while it's
+    // on - with the FPS target it holds and its floor; the Upscaler further down, above Anti-aliasing
+    bool dyn = g_settings.dyn_res;
+    // display order -> RES_* (the ini / enum order predates the menu order)
+    // (up to 4x: 7680 x 4320, 8K - more only ran out of GPU memory, and sat next to 75% in the list)
+    // (Match display in the middle: left from it 75% / 50% / 25%, right 1x-4x; user 2026-10-11)
+    static const char *res[] = {LN("25%"), LN("50%"), LN("75%"), LN("Match display"), LN("1x"), LN("2x"), LN("3x"), LN("4x")};
+    static const int res_mode[] = {RES_Q25, RES_Q50, RES_Q75, RES_MATCH, 1, 2, 3, 4};
+    enum { RES_MATCH_AT = 3 };
+    enum { NRES = sizeof res_mode / sizeof res_mode[0] };
+    {
+        int ri = RES_MATCH_AT, rdef = RES_MATCH_AT;  // (rdef: the GPU's default)
+        for (int i = 0; i < NRES; i++) {
+            if (res_mode[i] == g_settings.res_mode) ri = i;
+            if (res_mode[i] == g_default_res_mode) rdef = i;
+        }
+        float sx, sy;
+        renderer_get_scale(&sx, &sy);
+        char d[1024];  // (in the menus' language already: the row leaves it as it is)
+        snprintf(d, sizeof d,
+                 g_gpu_integrated
+                     ? L("How sharp the 3D image is. Match display uses your screen's resolution. 1x to 4x multiply the "
+                         "Switch's 1080p, and 1x is 720p on this GPU. 75%%, 50%% and 25%% are for slower machines.\n\n"
+                         "Rendering at %.0f x %.0f.")
+                     : L("How sharp the 3D image is. Match display uses your screen's resolution. 1x to 4x multiply the "
+                         "Switch's 1080p. 75%%, 50%% and 25%% are for slower machines.\n\nRendering at %.0f x %.0f."),
+                 1920.0 * sx, 1080.0 * sy);
+        char note[32];  // (the preview's value: "50% (800×450)", its text the user's - 2026-11-03)
+        snprintf(note, sizeof note, "%.0f×%.0f", 1920.0 * sx, 1080.0 * sy);
+        preview_text(LN("Configure the resolution used for rendering the game. Higher values are more demanding on "
+                        "your graphics hardware."), note);
+        if (dyn) opt_disable_next(), opt_needs_next("Dynamic resolution", "Off");
+        if (opt_preview("Resolution", &ri, res, NRES, rdef, d, false))
+            g_settings.res_mode = res_mode[ri], g_settings.res_auto = false;
+    }
+    {
+        char now[160] = "", d[640];  // (in the menus' language already: the row leaves it as it is)
+        if (dyn)
+            snprintf(now, sizeof now, L("Dynamic is at %.0f%% of the display right now."), output_scale_dynamic_factor() * 100);
+        snprintf(d, sizeof d, "%s%s%s",
+                 L("Raises and lowers the resolution as needed to hold your FPS target, up to your screen's resolution. "
+                   "The Resolution setting is set aside while it's on."),
+                 now[0] ? "\n\n" : "", now);
+        if (opt_toggle("Dynamic resolution", &g_settings.dyn_res, false, d)) dyn = g_settings.dyn_res;
+    }
+    // FPS target and Minimum resolution on Dynamic's line (user 2026-11-12): what it holds and how low it goes, both
+    // Dynamic's own - greyed out while it's off (with a resolution of the player's, the frame pacer decides)
+    opt_child_begin(dyn);
+    {   // the game's own two frame rates (pace.c pace_target_30), under Dynamic resolution: what it holds (user 2026-11-12;
+        // was "Internal FPS target"); display order -> FPS_TARGET_*
+        static const char *fps[] = {LN("30"), LN("30 outdoors, 60 indoors"), LN("60")};
+        static const int fps_target[] = {FPS_TARGET_30, FPS_TARGET_MIXED, FPS_TARGET_60};
+        int fi = 2;
+        for (int i = 0; i < 3; i++) if (fps_target[i] == g_settings.fps_target) fi = i;
+        if (!dyn) opt_disable_next(), opt_needs_next("Dynamic resolution");
+        if (opt_choice("FPS target", &fi, fps, 3, 2,
+                       "The frame rate Dynamic resolution aims for. 60FPS will prioritize smoothness, 30FPS will "
+                       "prioritize visual quality."))
+            g_settings.fps_target = fps_target[fi];
+    }
+    {  // Dynamic's floor (output_scale.c dyn_set_floor)
+        static const char *mins[] = {LN("360p"), LN("540p"), LN("720p")};
+        static const int min_lines[] = {360, 540, 720};
+        int mi = 1;
+        for (int i = 0; i < 3; i++) if (min_lines[i] == g_settings.dyn_min) mi = i;
+        if (!dyn) opt_disable_next(), opt_needs_next("Dynamic resolution");
+        if (opt_choice("Minimum resolution", &mi, mins, 3, 1,
+                       "How low Dynamic can go. Lower keeps the frame rate up in busy scenes but looks softer."))
+            g_settings.dyn_min = min_lines[mi];
+    }
+    opt_child_end();
+    // the upscaler, above Anti-aliasing (user 2026-11-12): does something only while the game renders below the window - a share of it (25-75%), 1x-4x short
+    // of the window's height (1x is 720 lines on an integrated GPU), or Dynamic
+    int rm = g_settings.res_mode, lines = rm >= 1 && rm <= 8 ? (rm == 1 && g_gpu_integrated ? 720 : 1080 * rm) : 0;
+    int win_h = g_win_px_h > 1 ? g_win_px_h : (int)ImGui::GetIO().DisplaySize.y;
+    bool below = rm == RES_Q25 || rm == RES_Q50 || rm == RES_Q75 || (lines > 0 && lines < win_h);
+    bool scaled = dyn || below;  // (no line to Resolution: Dynamic turns it on too - user 2026-11-12)
+    {   // each OS's own upscaler next to bilinear (UPSCALE_SHARP: MetalFX on macOS, AMD FSR 1 on Windows)
+#ifdef __APPLE__
+        static const char *ups[] = {LN("Bilinear"), LN("MetalFX")};
+        const char *ud = LN("How the picture is scaled up when it renders below your window's resolution. MetalFX is "
+                            "Apple's upscaler and looks sharper, Bilinear is plain and soft.");
+#else
+        static const char *ups[] = {LN("Bilinear"), LN("AMD FSR 1")};
+        const char *ud = LN("How the picture is scaled up when it renders below your window's resolution. AMD FSR 1 "
+                            "sharpens edges as it scales, Bilinear is plain and soft.");
+#endif
+        int ui = g_settings.upscaler == UPSCALE_BILINEAR ? 0 : 1;
+        char udm[1024];
+        if (!scaled) {  // (renders at the window's size or above: nothing to scale up)
+            snprintf(udm, sizeof udm, "%s\n\n%s", L(ud),
+                     L("Does nothing unless the game renders below your screen's resolution: a lower Resolution, or "
+                       "Dynamic resolution."));
+            ud = udm;
+            opt_disable_next();  // (its note says why, in place of a "Needs" line: no one value turns it on)
+        }
+        preview_text(LN("Configure how the game is scaled up to fit your window."), NULL);
+        if (opt_preview("Upscaler", &ui, ups, 2, g_default_upscaler == UPSCALE_BILINEAR ? 0 : 1, ud))
+            g_settings.upscaler = ui ? UPSCALE_SHARP : UPSCALE_BILINEAR, g_settings.upscaler_auto = false;
+    }
+    static const char *aa[] = {LN("Off"), LN("SMAA")};
+    preview_text(LN("Configure the smoothing of jagged edges. SMAA keeps textures sharp."), NULL);
+    opt_preview("Anti-aliasing", &g_settings.antialias, aa, 2, AA_OFF,
+               "Smooths jagged edges. SMAA keeps textures sharp and helps most at a lower internal resolution.");
+    static const char *ao[] = {LN("Default"), LN("High"), LN("Off")};
+    preview_text(LN("Configure the soft shadows where objects meet the ground and walls."), NULL);
+    opt_preview("Ambient occlusion", &g_settings.ao_quality, ao, 3, AO_SWITCH,
+               "The soft shadows in corners and around objects. High draws them at up to twice the Switch's resolution, "
+               "so their edges are sharper. Off removes them.");
+    static const char *shadows[] = {LN("Off"), LN("0.5x"), LN("Default"), LN("2x"), LN("3x"), LN("4x")};
+    preview_text(LN("Configure the shadows that objects and characters cast."), NULL);
+    opt_preview("Shadows", &g_settings.shadow_quality, shadows, 6, SHADOW_DEFAULT,
+               "The shadows that objects and characters cast. 2x to 4x draw them at that many times the Switch's "
+               "resolution, so their edges are sharper. Higher uses more graphics memory. 0.5x is faster with blockier "
+               "edges. Off removes them.");
+
+    opt_section("Experimental");  // (user 2026-11-12)
+    opt_toggle("Frame Generation", &g_settings.frame_interp, false,
+               "Draws extra images between the game's frames for smoother motion, up to your display's refresh rate. On "
+               "a 120 Hz display the game shows 120 fps. Some visual glitches are possible.");
+    opt_end();
+}
+
+// Touch screens, a page alone: called right after opt_begin, as the Randomizer's right pane
+// (rando_tab.mm pane_heading): the page's own X at the top right of the rows' panel with the page's name on its line
+// (a title for the whole page, as the Randomizer's column headings: the sections scroll under it), then the rows in a
+// list that scrolls on its own (the panel itself doesn't, so the X stays). The X in the screen's corner was under the
+// panel. True when the head was drawn: the caller closes the list (opt_list_end) before opt_end.
+static bool g_page_x, g_page_x_pressed;
+static float g_page_x_scale;  // (the menu's scale: every page's X and heading the same size, whatever the page's own)
+extern "C" bool menu_page_head(const char *title, float scale) {
+#if PLAT_TOUCH
+    if (!g_page_x) return false;
+    scale = g_page_x_scale;
+    float top = 10 * scale, bx = 44 * 1.35f * scale;  // (plastic_close_pane's place and size)
+    if (plastic_close_pane(44 * scale, scale)) g_page_x_pressed = true;
+    ImGui::SetCursorPosY(top + (bx - ImGui::GetTextLineHeight()) / 2);
+    ImGui::TextColored(plastic_col(plastic_theme().section), "%s", i18n_upper(L(title)).c_str());
+    ImGui::SetCursorPosY(top + bx + 4 * scale);
+    opt_list_begin();
+    return true;
+#else
+    (void)title, (void)scale;
+    return false;
+#endif
+}
+
+static void tab_audio(void) {
+    opt_begin("##audio", ImGui::GetFontSize() / 34);
+    opt_section("Volume");
+    float pct = roundf(g_settings.volume * 100);
+    if (opt_slider("Volume", &pct, 0, 200, 5, 100, "%g%%",
+                   "The game's volume. 100% is normal, higher is louder."))
+        g_settings.volume = pct / 100.0f;
+    opt_choice("Output", &g_settings.audio_out, g_audio_outs, N_AUDIO_OUTS, AUDIO_OUT_STEREO,
+               "Stereo for speakers and headphones. 5.1 sends the game's surround mix to a 5.1 system.");
+    opt_toggle("Movie audio", &g_settings.movie_audio, true,
+               "Sound in the opening and ending movies. Changes the next time a movie plays.");
+    opt_section("Effects");
+    opt_toggle("Enable reverb", &g_settings.reverb, true,
+               "The game's echo in caves, dungeons and big rooms.");
+    opt_end();
+}
+
+extern "C" void rt_request_reboot(int kind);  // runtime/main.c (rt.h's RT_REBOOT_GAME / RT_REBOOT_TITLE)
+
+// Reset and Quit (the bar's entries): a question over the bar, as Reset to vanilla's (user 2026-11-03). Reset: the game
+// boots again (the intro movie). Quit: back to the start screen ("Return to Launcher") or out to the desktop. B / Esc
+// is Cancel, where the cursor starts.
+static void ask_popup(float scale) {
+    if (g_ask >= 0 && !ImGui::IsPopupOpen("##ask")) ImGui::OpenPopup("##ask");
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("##ask", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar |
+                                                   ImGuiWindowFlags_NoMove))
+        return;
+    bool quit = g_ask == BAR_QUIT;
+    // LARECOMP_MENU_ASK=cancel / launcher / reset (test): presses that button a few frames after the question opens
+    static const char *test = getenv("LARECOMP_MENU_ASK");
+    static int frames;
+    frames++;
+    bool test_cancel = test && frames == 30 && !strcmp(test, "cancel");
+    bool test_launcher = test && frames == 30 && !strcmp(test, "launcher");
+    bool test_reset = test && frames == 30 && !strcmp(test, "reset");
+    ImGui::PushFont(g_menu_font_big);
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", quit ? L("Quit") : L("Reset Game"));
+    ImGui::PopFont();
+    ImGui::Spacing();
+    ImGui::TextUnformatted(L("Progress since your last save is lost."));
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImVec2 bs(260 * scale, 0);  // (all one width: the longest label's, "Return to Launcher" ran past its button)
+    for (const char *s : {L("Cancel"), L("Reset"), L("Return to Launcher"), L("Quit")})
+        bs.x = fmaxf(bs.x, ImGui::CalcTextSize(s).x + 2 * ImGui::GetStyle().FramePadding.x + 16 * scale);
+    bool done = false;
+    if (ImGui::Button(L("Cancel"), bs) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false) || test_cancel) {
+        menu_sfx_play(MENU_SFX_CANCEL);
+        done = true;
+    }
+    ImGui::SetItemDefaultFocus();
+    if (!quit) {
+        ImGui::SameLine();
+        if (ImGui::Button(L("Reset"), bs) || test_reset) {
+            LOG("[menu] reset: the game boots again\n");
+            settings_save();
+            rt_request_reboot(RT_REBOOT_GAME);
+            done = true;
+            set_open(false);
+        }
+    } else {
+        ImGui::SameLine();
+        if (ImGui::Button(L("Return to Launcher"), bs) || test_launcher) {
+            LOG("[menu] quit: back to the start screen\n");
+            settings_save();
+            rt_request_reboot(RT_REBOOT_TITLE);
+            done = true;
+            set_open(false);
+        }
+#if !PLAT_TOUCH  // (phone apps don't quit themselves)
+        ImGui::SameLine();
+        if (ImGui::Button(L("Quit"), bs)) {
+            LOG("[menu] quit: to the desktop\n");
+            settings_save();
+            SDL_Event q = {};
+            q.type = SDL_EVENT_QUIT;
+            SDL_PushEvent(&q);
+            done = true;
+        }
+#endif
+    }
+    if (done) g_ask = -1, frames = 0, ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+// A save that failed (runtime/services/fs.c, any thread): the menu opens with it over the bar, in the menus' look, and
+// OK closes it again if it opened for it. It was a system alert, on Mac and Windows only (user 2026-11-11).
+static pthread_mutex_t g_notice_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::string g_notice_pending;  // the save folder (g_notice_lock)
+static std::string g_notice;          // shown (render thread)
+static bool g_notice_closes;          // the menu was closed: OK closes it again
+extern "C" void menu_save_failed(const char *folder) {
+    pthread_mutex_lock(&g_notice_lock);
+    g_notice_pending = folder && folder[0] ? folder : "?";
+    pthread_mutex_unlock(&g_notice_lock);
+}
+static void notice_take(void) {
+    pthread_mutex_lock(&g_notice_lock);
+    std::string n;
+    n.swap(g_notice_pending);
+    pthread_mutex_unlock(&g_notice_lock);
+    if (n.empty() || !g_notice.empty()) return;
+    g_notice = n;
+    if (!g_open.load()) set_open(true), g_notice_closes = true;
+    g_page = -1;  // (over the bar)
+}
+static void notice_popup(float scale) {
+    if (g_notice.empty()) return;
+    if (!ImGui::IsPopupOpen("##notice")) ImGui::OpenPopup("##notice");
+    if (!ImGui::BeginPopupModal("##notice", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    ImGui::PushFont(g_menu_font_big);
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", L("Couldn't save"));
+    ImGui::PopFont();
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 820 * scale);
+    ImGui::TextUnformatted(L("The game may say it saved, but it didn't. Your previous save is unchanged."));
+    ImGui::Spacing();
+    ImGui::TextUnformatted(L("Make sure this folder can be written to and the disk has free space:"));
+    ImGui::TextColored(plastic_col(plastic_theme().text_dim), "%s", g_notice.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImGui::SetItemDefaultFocus();
+    if (ImGui::Button(L("OK"), ImVec2(260 * scale, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        ImGui::CloseCurrentPopup();
+        g_notice.clear();
+        if (g_notice_closes) set_open(false);
+        g_notice_closes = false;
+    }
+    ImGui::EndPopup();
+}
+
+// Reset to vanilla (the round arrow beside the close X): the game as Nintendo made it - 16:9; Video / Audio otherwise
+// and the controls stay.
+static void reset_to_vanilla(bool in_game) {
+    Settings &s = g_settings;
+    s.aspect = ASPECT_ORIGINAL;
+    LOG("[menu] reset to vanilla%s\n", !in_game ? " (start screen)" : "");
+    settings_save();
+}
+
+// seed: a seed would be left (the one being played, or on the start screen the one PLAY would start). True when Reset
+// was pressed.
+static bool vanilla_popup(float scale, bool seed, bool in_game) {
+    // LARECOMP_MENU_VANILLA=ask / reset / cancel (test): the question opens with the menu; reset / cancel press that
+    // button a few frames later
+    static const char *test = getenv("LARECOMP_MENU_VANILLA");
+    static int test_frames;
+    if (test && !test_frames++) ImGui::OpenPopup("##vanilla");
+    bool test_reset = test && test_frames == 30 && !strcmp(test, "reset");
+    bool test_cancel = test && test_frames == 30 && !strcmp(test, "cancel");
+    if (!ImGui::BeginPopupModal("##vanilla", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return false;
+    ImGui::PushFont(g_font_big);
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", L("Reset to vanilla?"));
+    ImGui::PopFont();
+    ImGui::Spacing();
+    ImGui::TextUnformatted(L("This resets your settings to the vanilla game experience.\nYour controls stay as they are."));
+    if (seed) {
+        ImGui::Spacing();
+        ImGui::TextUnformatted(L("This also ends the current randomizer seed.\nIts save files are kept."));
+    }
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImVec2 bs(220 * scale, 0);
+    for (const char *s : {L("Reset"), L("Cancel")})
+        bs.x = fmaxf(bs.x, ImGui::CalcTextSize(s).x + 2 * ImGui::GetStyle().FramePadding.x + 16 * scale);
+    bool reset = false;
+    if (ImGui::Button(L("Reset"), bs) || test_reset) {
+        ImGui::CloseCurrentPopup();
+        reset_to_vanilla(in_game);
+        reset = true;
+    }
+    ImGui::SameLine();
+    ImGui::SetItemDefaultFocus();
+    if (ImGui::Button(L("Cancel"), bs) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false) || test_cancel) {
+        LOG("[menu] reset to vanilla cancelled\n");
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+    return reset;
+}
+
+
+// ---- reusing the overlay's last drawing (LARECOMP_OVERLAY_CACHE=0: off, a new ImGui frame every present as before)
+// While only the FPS counter and / or the run timer are up (no menu, no input, nothing interactive or animated), the
+// overlay draws the same thing frame after frame: ImGui's NewFrame + layout + Render then run for nothing on the
+// render thread. Their drawing is described by a key (the text shown, the window size); while it stays the same, the
+// last frame's draw data (ImGui keeps it until the next NewFrame) is drawn again. Only after three frames in a row
+// built with that key: an auto-sized window (the FPS counter) settles over the frames after its text changes.
+// The FPS counter then shows the same average as ImGui's io.Framerate (the last 60 frame times), sampled twice a
+// second instead of every frame.
+static int g_ov_cache = -1;
+static char g_ov_key[288];
+static int g_ov_same;  // frames built in a row with g_ov_key
+static float g_fps_dt[60];
+static int g_fps_n, g_fps_i;
+static double g_fps_sum, g_fps_shown, g_fps_at;
+static void fps_note(double now, float dt) {
+    if (g_fps_n == 60) g_fps_sum -= g_fps_dt[g_fps_i];
+    else g_fps_n++;
+    g_fps_dt[g_fps_i] = dt;
+    g_fps_sum += dt;
+    g_fps_i = (g_fps_i + 1) % 60;
+    if (now - g_fps_at >= 0.5 || now < g_fps_at) {
+        g_fps_at = now;
+        g_fps_shown = g_fps_sum > 0 ? g_fps_n / g_fps_sum : 0;
+#ifdef __APPLE__
+        double f = ui_interp_fps();  // (frame interpolation on: different images, not the overlay's vsync rate)
+        if (f >= 0) g_fps_shown = f;
+#endif
+    }
+}
+
+// Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
 RT_ON_RESET(menu_reset) {
     set_open(false);
-    set_cfg(false);
     g_kbd = 0;
     osk_cancel();
+#if PLAT_TOUCH
+    plat_touch_prompt_cancel();
+#endif
     pthread_mutex_lock(&q_lock);
     q_events.clear();
     pthread_mutex_unlock(&q_lock);
 }
 
 static void keyboard_draw(ImGuiIO &io, float scale) {
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
-    float w = fminf(io.DisplaySize.x * 0.9f, 1100 * scale);
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, 0);
-    ImGui::Begin("##kbd", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                    ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::PopStyleColor();
-    ui_window_backdrop();
-    ImGui::PushFont(g_font_big);
-    ImGui::TextColored(UI_TEXT, "%s", M("Enter a name", "Digite o nome", "Введите имя"));
-    ImGui::PopFont();
     static bool was_open, was_pad;
     bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
     was_open = true, was_pad = pad;
+#if PLAT_TOUCH
+    if (!pad) {
+        // a phone without a controller: the system's text prompt (its keyboard, paste), as the menu's own fields;
+        // nothing of ours under it
+        if (appearing) plat_touch_prompt(L("Enter your name"), "", g_kbd_text, 0, L("OK"), L("Cancel"));
+        int r = plat_touch_prompt_poll(g_kbd_text, sizeof g_kbd_text);
+        if (r) g_kbd = r > 0 ? 2 : 3;
+        if (g_kbd.load() != 1) was_open = false;
+        return;
+    }
+#endif
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize,
+                                                  IM_COL32(0, 0, 0, (int)(plastic_theme().dim * 255)));
+    float w = fminf(io.DisplaySize.x * 0.9f, 1100 * scale);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
+    ImGui::Begin("##kbd", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                    ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PushFont(g_font_big);
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", L("Enter your name"));
+    ImGui::PopFont();
     if (!pad) {  // keyboard: type straight into the field
         if (appearing) ImGui::SetKeyboardFocusHere();
         ImGui::SetNextItemWidth(-1);
@@ -351,12 +1118,13 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
                          ImGuiInputTextFlags_CallbackCharFilter,
                          [](ImGuiInputTextCallbackData *d) -> int { return d->EventChar < 0x20 ? 1 : 0; });
         ImGui::PopFont();
-        if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
-        ImGui::TextDisabled("%s      (%d / %d)", M("Enter  confirms      Esc  cancels", "Enter  confirma      Esc  cancela",
-                                                   "Enter  готово      Esc  отмена"),
-                            (int)strlen(g_kbd_text), g_kbd_max);
-    } else {  // controller: on-screen keyboard (osk.mm)
-        int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
+        int units = kbd_cut(g_kbd_text, g_kbd_max);
+        ImGui::TextDisabled(L("Enter  confirm      Esc  cancel      (%d / %d)"), units, g_kbd_max);
+    } else {  // controller: on-screen keyboard (osk.mm, shared with our menus' text fields; a phone's keys for fingers too)
+#if PLAT_TOUCH
+        if (appearing) plat_touch_prompt_cancel();  // (a controller picked up mid-entry: the prompt goes)
+#endif
+        int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big, true, PLAT_TOUCH && !plat_touch_tablet());
         if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
     }
     ImGui::End();
@@ -379,6 +1147,7 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
         uint64_t dt = SDL_GetTicks() - t0;
         if (dt < 16) SDL_Delay((uint32_t)(16 - dt));
     }
+    kbd_cut(g_kbd_text, g_kbd_max);  // (whatever entered it: typed, on-screen keys, the test hook)
     bool ok = g_kbd.load() == 2 && g_kbd_text[0];
     if (ok) snprintf(out, cap, "%s", g_kbd_text);
     g_kbd = 0;
@@ -386,242 +1155,996 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     return ok;
 }
 
-// "Close the game?" - Não has the focus first (Enter / A by reflex keeps playing); B / Esc answer Não.
-static void quit_draw(ImGuiIO &io, float scale) {
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, 0);
-    ImGui::Begin("##quit", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                     ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::PopStyleColor();
-    ui_window_backdrop();
-    ui_title(g_menu_font, M("Close the game?", "Deseja fechar o jogo?", "Закрыть игру?"));
-    const char *lost = M("Progress since the last save will be lost.", "O progresso desde o último save será perdido.",
-                         "Прогресс после последнего сохранения будет потерян.");
-    ImGui::TextDisabled("%s", lost);
-    ImGui::Spacing();
-    // the two answers side by side, Settings under them: together as wide as the text (at least 2 x 240 px)
-    float sp = ImGui::GetStyle().ItemSpacing.x, w = fmaxf(ImGui::CalcTextSize(lost).x, 480 * scale + sp), bw = (w - sp) / 2;
-    static bool focus_no;
-    if (!focus_no) { ImGui::SetKeyboardFocusHere(1); focus_no = true; }
-    if (ImGui::Button(M("Yes", "Sim", "Да"), ImVec2(bw, 0))) {
-        settings_save();
-        SDL_Event q = {};
-        q.type = SDL_EVENT_QUIT;
-        SDL_PushEvent(&q);
+// LARECOMP_MENU_FOCUS_LOG=1 (test; tools/menu_focus_sweep.sh): every Down / Up on a page of option rows is checked a
+// few frames later against the rows' order and logged "[menu] focus check ... OK / FAIL": the first Down after a tab
+// switch (however it came) or the menu opening, and Down from the tab bar, land on the page's first enabled row; Down
+// goes to the next row (the last one stays), Up to the row before, and Up from the top row onto the selected tab.
+static void focus_check(bool down, bool up, bool any_down, int focused_tab, int tab, const char *tab_name) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_MENU_FOCUS_LOG") != NULL;
+    if (!on) return;
+    static int shown = -1000, due_in, want, from, prev_focus = -1;  // (want: a row index, -1: the selected tab)
+    static bool first_down_due;
+    static const char *what;
+    if (tab != shown || g_page_fresh_seen) shown = tab, first_down_due = true, g_page_fresh_seen = false, prev_focus = -1;
+    int n = opt_row_count(), first = opt_first_row(), focus = opt_focused_row();
+    if (any_down && !down) first_down_due = false;  // (a held Down's repeat: the first Down was checked or skipped)
+    if ((down || up) && !due_in && n > 0) {
+        from = prev_focus, due_in = 4;
+        if (down && (first_down_due || from < 0)) want = first, what = first_down_due ? "first Down" : "Down from the tab bar";
+        else if (down) want = from + 1 < n ? from + 1 : from, what = "Down";
+        else if (from > 0) want = from - 1, what = "Up";
+        else if (from == 0) want = -1, what = "Up from the top row";
+        else due_in = 0;  // (Up on the tab bar: not a page move)
+        if (down) first_down_due = false;
+    } else if (down && n == 0 && first_down_due) {
+        first_down_due = false;
+        LOG("[menu] focus check: first Down on %s SKIP (no option rows)\n", tab_name);
     }
-    ImGui::SameLine();
-    bool no = ImGui::Button(M("No", "Não", "Нет"), ImVec2(bw, 0));
-    if (ImGui::Button(M("Settings (F12)", "Configurações (F12)", "Настройки (F12)"), ImVec2(w, 0))) {
-        focus_no = false;
-        set_cfg(true);  // (closes the question: the way in from a controller)
-    } else if (no || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-        set_open(false);
-        focus_no = false;
-    }
-    ImGui::End();
+    prev_focus = focus;
+    if (!due_in || --due_in) return;
+    bool ok = want >= 0 ? focus == want : focused_tab == tab;
+    char got[160];
+    if (focus >= 0) snprintf(got, sizeof got, "\"%s\"", opt_row_label(focus));
+    else snprintf(got, sizeof got, "tab %d", focused_tab);
+    char exp[160];
+    if (want >= 0) snprintf(exp, sizeof exp, "\"%s\"", opt_row_label(want));
+    else snprintf(exp, sizeof exp, "tab %d", tab);
+    LOG("[menu] focus check: %s on %s from %s -> %s (want %s) %s\n", what, tab_name,
+        from >= 0 ? opt_row_label(from) : "the tab bar", got, exp, ok ? "OK" : "FAIL");
 }
 
-// A button prompt as in the game's bottom strip: the button (a coloured circle with its letter, or a key's name on a
-// pill) then what it does, from x on the line centred at y. Returns its width; draw = false only measures it.
-static float prompt(ImDrawList *dl, float x, float y, const char *key, ImU32 col, const char *text, bool draw) {
-    float h = ImGui::GetFrameHeight() * 0.78f, gap = h * 0.25f;
-    ImVec2 ks = ImGui::CalcTextSize(key), ts = ImGui::CalcTextSize(text);
-    float kw = strlen(key) == 1 ? h : ks.x + h * 0.7f;
-    if (draw) {
-        ImVec2 a(x, y - h * 0.5f), b(x + kw, y + h * 0.5f);
-        dl->AddRectFilled(a, b, col, h * 0.5f);
-        dl->AddRect(a, b, IM_COL32(255, 255, 255, 255), h * 0.5f, 0, h * 0.07f);
-        dl->AddText(ImVec2(x + (kw - ks.x) * 0.5f, y - ks.y * 0.5f), IM_COL32(255, 255, 255, 255), key);
-        dl->AddText(ImVec2(x + kw + gap, y - ts.y * 0.5f), ImGui::GetColorU32(ImGuiCol_Text), text);
-    }
-    return kw + gap + ts.x;
+// The tab bar and its pages, into the current window: the in-game menu, and the start screen's Settings (in_game
+// The live preview (live_preview.h) of a row on the page shown: instead of the tabs, until it closes. The pages with
+// opt_preview rows: Video.
+static float g_preview_scale = 1;
+static void preview_page(void) {
+    if (g_shown_tab == 0) tab_display();
+#if PLAT_TOUCH
+    else if (g_tab == 10) touch_tab_draw(g_preview_scale);
+#endif
+}
+bool menu_preview_frame(float scale, ImFont *font, ImFont *font_big) {
+    g_preview_scale = scale;
+    // (the on-screen controls are mostly along the bottom; the game's X / Y items are along the top)
+    preview_place_top(PLAT_TOUCH && g_tab == 10);
+    return preview_active() && (preview_draw(scale, font, font_big, preview_page), true);
 }
 
-// The description box: the text of the setting under the cursor (ui_tip), else the page's, on the rows' text column
-// with as much room above it as at its left; at the text's size unless it is longer than the box (smaller then)
-static void description(ImDrawList *dl, ImVec2 a, ImVec2 b, float pad_y, const char *text) {
-    ui_info_box(dl, a, b);
-    float in = ui_inset(), ww = b.x - a.x - in * 2, hh = b.y - a.y - pad_y * 2;
-    ImFont *font = ImGui::GetFont();
-    float size = ImGui::GetFontSize();
-    for (float f = 1.0f; f >= 0.6f; f -= 0.05f) {
-        size = ImGui::GetFontSize() * f;
-        if (font->CalcTextSizeA(size, FLT_MAX, ww, text).y <= hh) break;
-    }
-    dl->AddText(font, size, ImVec2(a.x + in, a.y + pad_y), ImGui::GetColorU32(ImGuiCol_Text), text, NULL, ww);
+#if PLAT_TOUCH
+// A menu page's title on a touch screen: an icon in the screen's corner (a notch or a camera hole sits mid-height, clear
+// of it). tab: -1000 Settings (a gear), 3 Randomizer (a die), 4 Warp (a map pin), 2 Save Editor (a floppy disk),
+// 7 Cosmetics (a paint palette), 5 Cheats (a star)
+// (its left edge: 14 px in, or further on an iPhone, clear of the screen's rounded corner)
+static float page_corner_x(float scale) {
+    float bs = 44 * 1.35f * scale;
+    return fmaxf(14 * scale, plastic_corner_clear(12 * scale + bs * 0.5f, bs * 0.5f) - bs * 0.5f);
 }
-
-// F12: the settings, applied live (runtime/ui/settings_ui.mm: the start screen's pages); saved to larecomp.ini on closing.
-// B / Esc / F12 close; L / R on a controller change the tab. The look of the game's Options screen: the title and the
-// tabs, the description box, the settings as pills, the button prompts on a white strip at the bottom.
-static void cfg_draw(ImGuiIO &io, float scale) {
-    // (small: scale is already half the window's - menu_render; the margin a fortieth of the window's height)
-    float margin = roundf(io.DisplaySize.y * 0.025f);
-    if (!g_cfg_small) {
-        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 70));
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+static void page_corner_icon(int tab, float scale) {
+    float bs = 44 * 1.35f * scale, ox = page_corner_x(scale), oy = 12 * scale;
+    ImVec2 vp = ImGui::GetMainViewport()->Pos, c(vp.x + ox + bs * 0.5f, vp.y + oy + bs * 0.5f);
+    // (a page whose X is in a pane (the Randomizer, Warp, Save Editor): level with that X, last frame's)
+    if (ImGui::GetFrameCount() - g_plastic_pane_close_frame <= 1) c.y = g_plastic_pane_close_cy;
+    float r = bs * 0.42f;
+    ImU32 gc = ImGui::ColorConvertFloat4ToU32(plastic_col(plastic_theme().title));
+    ImVec4 p = plastic_theme().panel;
+    p.w = 1;
+    ImU32 cut = ImGui::ColorConvertFloat4ToU32(p);  // (the holes: the paper's colour)
+    ImDrawList *gd = ImGui::GetWindowDrawList();
+    gd->PushClipRectFullScreen();
+    if (tab == -1000) {
+        gd->AddCircle(c, r * 0.52f, gc, 32, r * 0.34f);
+        for (int k = 0; k < 8; k++) {
+            float a = k * 3.14159265f / 4, ca = cosf(a), sa = sinf(a), hw = r * 0.15f;
+            ImVec2 in(c.x + ca * r * 0.6f, c.y + sa * r * 0.6f), out(c.x + ca * r, c.y + sa * r);
+            gd->AddQuadFilled(ImVec2(in.x - sa * hw * 1.25f, in.y + ca * hw * 1.25f), ImVec2(out.x - sa * hw, out.y + ca * hw),
+                              ImVec2(out.x + sa * hw, out.y - ca * hw), ImVec2(in.x + sa * hw * 1.25f, in.y - ca * hw * 1.25f), gc);
+        }
+    } else if (tab == 3) {
+        float e = r * 0.86f, o = e * 0.5f, pr = e * 0.17f;
+        gd->AddRectFilled(ImVec2(c.x - e, c.y - e), ImVec2(c.x + e, c.y + e), gc, r * 0.28f);
+        const float pip[5][2] = {{-1, -1}, {1, -1}, {0, 0}, {-1, 1}, {1, 1}};  // (a five)
+        for (const auto &p : pip) gd->AddCircleFilled(ImVec2(c.x + p[0] * o, c.y + p[1] * o), pr, cut, 16);
+    } else if (tab == 4) {
+        float hr = r * 0.68f;
+        ImVec2 head(c.x, c.y - r * 0.3f);
+        gd->AddCircleFilled(head, hr, gc, 32);
+        gd->AddTriangleFilled(ImVec2(c.x - hr * 0.86f, head.y + hr * 0.5f), ImVec2(c.x + hr * 0.86f, head.y + hr * 0.5f), ImVec2(c.x, c.y + r), gc);
+        gd->AddCircleFilled(head, hr * 0.42f, cut, 24);
+    } else if (tab == 7) {
+        gd->AddCircleFilled(c, r * 0.95f, gc, 32);
+        gd->AddCircleFilled(ImVec2(c.x + r * 0.42f, c.y + r * 0.38f), r * 0.2f, cut, 16);  // (the thumb hole)
+        const float well[4][2] = {{-0.48f, -0.1f}, {-0.2f, -0.52f}, {0.3f, -0.48f}, {-0.3f, 0.42f}};  // (the paints)
+        for (const auto &w : well) gd->AddCircleFilled(ImVec2(c.x + w[0] * r, c.y + w[1] * r), r * 0.15f, cut, 16);
+    } else if (tab == 5) {
+        ImVec2 pt[10];  // (a five-pointed star: points and the notches between them)
+        for (int k = 0; k < 10; k++) {
+            float a = -3.14159265f / 2 + k * 3.14159265f / 5, rr = k & 1 ? r * 0.42f : r;
+            pt[k] = ImVec2(c.x + cosf(a) * rr, c.y + sinf(a) * rr);
+        }
+        for (int k = 0; k < 10; k += 2) gd->AddTriangleFilled(pt[(k + 9) % 10], pt[k], pt[k + 1], gc);
+        ImVec2 mid[5] = {pt[1], pt[3], pt[5], pt[7], pt[9]};
+        gd->AddConvexPolyFilled(mid, 5, gc);
     } else {
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - margin, io.DisplaySize.y - margin), ImGuiCond_Always, ImVec2(1, 1));
+        float e = r * 0.92f;
+        ImVec2 a(c.x - e, c.y - e), b(c.x + e, c.y + e);
+        gd->AddRectFilled(a, b, gc, r * 0.14f);
+        gd->AddRectFilled(ImVec2(c.x - e * 0.5f, a.y + e * 0.08f), ImVec2(c.x + e * 0.5f, a.y + e * 0.72f), cut, r * 0.06f);  // shutter
+        gd->AddRectFilled(ImVec2(c.x + e * 0.14f, a.y + e * 0.18f), ImVec2(c.x + e * 0.38f, a.y + e * 0.62f), gc);
+        gd->AddRectFilled(ImVec2(c.x - e * 0.66f, c.y + e * 0.08f), ImVec2(c.x + e * 0.66f, b.y), cut, r * 0.06f);  // label
     }
-    // one size for every tab (a page taller than it scrolls; pad navigation follows)
-    float ww = fminf(io.DisplaySize.x * 0.92f, 1120 * scale), wh = fminf(io.DisplaySize.y * 0.92f, 900 * scale);
-    if (g_cfg_small) ww = fminf(ww, io.DisplaySize.x * 0.5f - margin), wh = fminf(wh, io.DisplaySize.y * 0.5f - margin);
-    ImGui::SetNextWindowSize(ImVec2(ww, wh), ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, 0);
-    ImGui::Begin("##cfg", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
-    ImGui::PopStyleColor();
-    ui_window_backdrop();
-    const ImGuiStyle &st = ImGui::GetStyle();
+    gd->PopClipRect();
+}
+#endif
+
+// A page alone on a touch screen (the bar's pages but Settings; the start screen's Randomizer): its icon
+// in the corner for a title, the page from the top of the screen, clear of the icon. Returns the indent to undo.
+extern "C" float menu_page_corner(int tab, float scale) {
+#if PLAT_TOUCH
+    page_corner_icon(tab, scale);
+    float bs = 44 * 1.35f * scale;
+    ImVec2 vp = ImGui::GetMainViewport()->Pos, p = ImGui::GetCursorScreenPos();
+    float indent = fmaxf(0, vp.x + page_corner_x(scale) + 8 * scale + bs - p.x);
+    ImGui::SetCursorScreenPos(ImVec2(p.x, vp.y + 14 * scale));
+    if (indent > 0) ImGui::Indent(indent);
+    return indent;
+#else
+    (void)tab, (void)scale;
+    return 0;
+#endif
+}
+
+// false: nothing of the game is loaded yet - the tabs that need it are greyed out; prelaunch: the start screen's own
+// first tab, game files and fonts, drawn by launcher.mm). only: one page alone, without the tab bar (the in-game menu
+// bar's pages but Settings).
+static void tabs_body(float scale, bool in_game, void (*prelaunch)(float), int only = -1000) {
+    // (id: the page; -1 = Prelaunch)
+    struct Tab { const char *name; int id; bool on; };
+    Tab tabs[12];
+    int ntabs = 0;
+    if (prelaunch) tabs[ntabs++] = {LN("System"), -1, true};
+    static const char *names[] = {LN("Video"), LN("Audio"), LN("Save Editor"), LN("Randomizer"), LN("Warp"),
+                                  LN("Cheats"), LN("Gameplay"), LN("Cosmetics"), PLAT_TOUCH ? LN("Controller") : LN("Controls"), LN("Quit"),
+                                  LN("Touch"), LN("General")};
+    // General, Controls, Video, Audio, Gameplay (ids stay: test hooks; General leads, after the start screen's System -
+    // user 2026-11-11). Warp, Save Editor and Quit are the in-game menu bar's own entries (only usable in a save - user
+    // 2026-11-03); the Randomizer is the bar's entry in game and its own row on the start screen (user 2026-11-09);
+    // Cosmetics and Cheats are the bar's entries too, and not on the start screen (user 2026-11-11). Touch screens:
+    // Touch after General
+#if PLAT_TOUCH
+    static const int order[] = {11, 10, 8, 0, 1};
+#else
+    static const int order[] = {11, 8, 0, 1};
+#endif
+    int keep_tab = g_tab;  // (one page alone: the Settings window's tab stays as it was)
+    if (only != -1000) tabs[ntabs++] = {names[only], only, true}, g_tab = only;
+    else
+        for (int i : order) tabs[ntabs++] = {names[i], i, in_game || i != 5};
+    int cur = 0;  // g_tab / g_tab_request hold ids
+    for (int i = 0; i < ntabs; i++) if (tabs[i].id == g_tab) cur = i;
+    if (!tabs[cur].on) cur = 0;
+    // L/R (or Q/E) switch tabs, skipping greyed-out ones and stopping at the first / last (not while typing: Q / E are letters then, and the on-screen
+    // keyboard has the controller)
+    static const int cycle = getenv("LARECOMP_MENU_TAB_CYCLE") ? atoi(getenv("LARECOMP_MENU_TAB_CYCLE")) : 0;
+    static int cycle_frames, cycle_i;  // (test) <frames>: each tab in turn, that many frames each (screenshot series)
+    if (cycle > 0 && cycle_frames++ % cycle == 0 && cycle_i < ntabs) g_tab_request_ext = tabs[cycle_i++].id;
+    if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
+    bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();
+    static int focused_tab = -99;  // the tab the controller's cursor is on (from the frame before; -99: none)
+    bool switching = false;  // (L / R this frame: the page changes next frame)
+    if (!any_popup && !typing && only == -1000) {
+        int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
+                 : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
+        int i = cur;
+        if (step) do i += step; while (i >= 0 && i < ntabs && !tabs[i].on);
+        if (step && i >= 0 && i < ntabs) {
+            g_tab_request = tabs[i].id;
+            // the cursor goes onto the new tab (left behind on the tab bar, A on it switched straight back - user
+            // 2026-10-11; left in the old page, it stayed on a row that is gone, and Down went on from where that row
+            // had been)
+            g_focus_tab = tabs[i].id, g_focus_frames = 0;
+            switching = true;
+            menu_sfx_play(MENU_SFX_TAB);
+        }
+    }
+    bool down = !any_popup && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown) ||
+                                          ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown) ||
+                                          ImGui::IsKeyPressed(ImGuiKey_DownArrow));
+    bool up = !any_popup && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp) ||
+                                        ImGui::IsKeyPressed(ImGuiKey_GamepadLStickUp) || ImGui::IsKeyPressed(ImGuiKey_UpArrow));
+    // The first Down on a page just switched to (L / R, a click or A on a tab, the menu opening), or Down with the
+    // cursor on the tab bar: the page's first enabled row, top to bottom - never ImGui's pick from wherever its cursor
+    // was (a row of the page before, the tab bar's x). Option rows take it (opt_focus_first); a page without them gets
+    // its first control (g_page_focus_next).
+    if (ImGui::GetIO().MouseClicked[0]) g_page_fresh = false;  // (the mouse went into the page)
+    bool down_from_tab = down && !switching &&
+                         ((focused_tab != -99 && ImGui::GetCurrentContext()->NavCursorVisible) || g_page_fresh);
+    if (down_from_tab) {
+        ImGui::NavMoveRequestCancel();  // (ImGui's own move this frame)
+        g_page_fresh = false;
+        g_focus_tab = -99, g_focus_frames = 0;  // (the cursor stops going back to the tab)
+    }
+    opt_focus_first(down_from_tab);
+    // Up / Down on a page of option rows: the next / previous row in order (opt_nav_step), not ImGui's spatial pick
+    if ((down || up) && !down_from_tab && !switching && opt_nav_step(down ? 1 : -1)) ImGui::NavMoveRequestCancel();
+    opt_frame_reset();
+    // The cursor moved out of the page (ImGui's pick, applied this frame for last frame's press - Up from the page's
+    // top control): onto the selected tab. ImGui's pick was the tab nearest the control's x (Controls, from most
+    // rows), or the close button
+    ImGuiContext &g = *ImGui::GetCurrentContext();
+    ImGuiWindow *root = ImGui::GetCurrentWindow()->RootWindow;
+    static bool nav_in_page;  // (the frame before: the cursor on a control of the page - its child windows)
+    static ImGuiID tabs_win;  // (the tab bar's own scrolling child, when the tabs don't fit: part of the bar, not the page)
+    bool nav_on_bar = g.NavWindow && (g.NavWindow == root || g.NavWindow->ID == tabs_win);
+    if (nav_in_page && g.NavJustMovedToId && nav_on_bar && !any_popup) g_focus_tab = -100, g_focus_frames = 0;
+    // The tabs: a row of our own pieces (the selected one orange), each a button the controller's cursor can stand on;
+    // the selected tab's page under them
+    if (g_tab_request != -2)
+        for (int k = 0; k < ntabs; k++)
+            if (tabs[k].id == g_tab_request && tabs[k].on) g_tab = tabs[k].id;
+    g_tab_request = -2;
+    if (!tabs[cur].on || tabs[cur].id != g_tab) {
+        bool found = false;
+        for (int k = 0; k < ntabs; k++) found |= tabs[k].id == g_tab && tabs[k].on;
+        if (!found) g_tab = tabs[cur].on ? tabs[cur].id : tabs[0].id;
+    }
+    if (only == -1000) {
+        const PlasticTheme &pt = plastic_theme();
+        float gap = 8 * scale, pad = 20 * scale, th = ImGui::GetFontSize() + 20 * scale, tabs_cut = 0;
+#if PLAT_TOUCH
+        {   // the Settings window on a touch screen: a gear in the screen's corner for its title (a notch or a camera
+            // hole sits mid-height, clear of it), the tabs beside it on the top row, short of the corner buttons
+            // (plastic.mm corner_button)
+            float bs = 44 * 1.35f * scale, ox = page_corner_x(scale), oy = 12 * scale;
+            ImVec2 vp = ImGui::GetMainViewport()->Pos;
+            page_corner_icon(-1000, scale);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos(ImVec2(fmaxf(p.x, vp.x + ox + bs + gap), vp.y + oy + (bs - th) * 0.5f));
+            tabs_cut = 2 * bs + 8 * scale;  // (the corner buttons, side by side on the tabs' row)
+            tabs_cut += fmaxf(0, plastic_corner_clear(oy + bs * 0.5f, bs * 0.5f) - (16 * scale + bs * 0.5f));  // (iPhone: moved in)
+        }
+#endif
+        float tw[16], text_w[16], total = 0, avail = ImGui::GetContentRegionAvail().x - 4 * scale - tabs_cut;
+        for (int k = 0; k < ntabs; k++)  // (each tab also sits 2 px right of the cursor: counted, or the bar overflowed)
+            text_w[k] = ImGui::CalcTextSize(L(tabs[k].name)).x, total += text_w[k] + (k ? gap : 0) + 2 * scale;
+        // a narrow window: tighter tabs; still too wide: on a phone the bar scrolls sideways instead of squeezing them,
+        // on the desktop the names (long ones: Russian, German) a little smaller
+        const float min_pad = 12 * scale;
+        bool scroll = PLAT_TOUCH && total + 2 * min_pad * ntabs > avail;
+        if (scroll) pad = min_pad;
+        else if (total + 2 * pad * ntabs > avail) pad = fmaxf((avail - total) / (2 * ntabs), 3 * scale);
+        float tfs = ImGui::GetFontSize();
+        if (!scroll) {
+            float names = total - gap * (ntabs - 1) - 2 * scale * ntabs;
+            float room = avail - gap * (ntabs - 1) - (2 * pad + 2 * scale) * ntabs;
+            if (names > room && names > 0) {
+                float k = fmaxf(room / names, 0.6f);
+                tfs *= k;
+                for (int i = 0; i < ntabs; i++) text_w[i] *= k;
+            }
+        }
+        for (int k = 0; k < ntabs; k++) tw[k] = text_w[k] + 2 * pad;
+        if (scroll) {
+            ImGui::BeginChild("##tabs", ImVec2(avail + 4 * scale, th + 6 * scale), ImGuiChildFlags_NavFlattened,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground);
+            tabs_win = ImGui::GetCurrentWindow()->ID;
+        }
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        static int shown_sel = -99;  // (the selected tab brought into view once, when it changes)
+        if (g_focus_tab == -1 && !prelaunch) g_focus_tab = 11;  // (no Prelaunch in game: General, the first tab)
+        for (int k = 0; k < ntabs; k++) {
+            const Tab &t = tabs[k];
+            ImGui::BeginDisabled(!t.on);
+            if (k) ImGui::SameLine(0, gap);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            p.x += 2 * scale;
+            ImGui::SetCursorScreenPos(p);
+            ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));  // (the piece shows the cursor)
+            ImGui::PushID(t.id + 2);
+            bool clicked = ImGui::InvisibleButton("##tab", ImVec2(tw[k], th),
+                                                  ImGuiButtonFlags_EnableNav | ImGuiButtonFlags_PressedOnClick);
+            menu_sfx_tab_item();
+            ImGui::PopID();
+            ImGui::PopStyleColor();
+            bool focus_here = g_focus_tab == t.id || (g_focus_tab == -100 && t.id == g_tab);
+            if (focus_here) {  // the controller's cursor starts on this tab
+                ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+                ImGui::SetNavCursorVisible(true);
+                // a few frames: the page's child window appearing makes ImGui pick its first widget once it's laid out
+                if (++g_focus_frames >= 4) g_focus_tab = -99, g_focus_frames = 0;
+                else g_focus_tab = t.id;
+                if (scroll) ImGui::ScrollToItem(ImGuiScrollFlags_KeepVisibleEdgeX);
+            }
+            if (clicked && t.on) g_tab = t.id;
+            bool sel = t.id == g_tab;
+            if (scroll && sel && shown_sel != t.id) shown_sel = t.id, ImGui::ScrollToItem(ImGuiScrollFlags_KeepVisibleEdgeX);
+            bool lit = (ImGui::IsItemFocused() && g.NavCursorVisible) || ImGui::IsItemHovered();
+            bool hot = lit && !sel && t.on;
+            ImVec4 col = sel ? pt.tab_sel : hot ? pt.tab_hot : pt.tab;
+            if (sel && lit) col = ImVec4(col.x * 0.88f, col.y * 0.88f, col.z * 0.88f, col.w);  // (the cursor on it: deeper)
+            if (!t.on) col.w *= 0.45f;
+            plastic_pill(dl, ImVec2(p.x, p.y + (sel || hot ? 0 : 2 * scale)), ImVec2(p.x + tw[k], p.y + th - 2 * scale),
+                         10 * scale, col, (sel || hot ? 7 : 4) * scale, sel || hot ? 1.0f : 0.55f, scale, sel || hot);
+            ImU32 tc = sel || hot ? pt.text_sel : t.on ? pt.text : pt.text_dim;
+            ImVec2 ts(text_w[k], tfs);
+            dl->AddText(ImGui::GetFont(), tfs, ImVec2(p.x + (tw[k] - ts.x) * 0.5f, p.y + (th - ts.y) * 0.5f - (sel ? 2 : 1) * scale),
+                        tc, L(t.name));
+            if (ImGui::IsItemFocused()) focused_tab = t.id;
+            else if (focused_tab == t.id) focused_tab = -99;
+            ImGui::EndDisabled();
+        }
+        if (scroll) ImGui::EndChild();
+    }
+    for (int k = 0; k < ntabs; k++) {
+        const Tab &t = tabs[k];
+        if (t.id != g_tab) continue;
+        if (t.id != g_shown_tab) g_shown_tab = t.id, g_page_fresh = true, g_page_focus_next = false;
+        ImGui::Dummy(ImVec2(0, 4 * scale));
+        ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None,  // (the rest of the window: no hint line)
+                          ImGuiWindowFlags_NavFlattened);
+        if (g_page_focus_next) {  // (a page without option rows: its first control)
+            g_page_focus_next = false;
+            ImGui::SetKeyboardFocusHere();
+            ImGui::SetNavCursorVisible(true);
+        }
+        switch (t.id) {
+        case -1: prelaunch(scale); break;
+        case 0: tab_display(); break;
+        case 1: tab_audio(); break;
+        case 11: general_draw(scale); break;
+        case 8: controls_tab_draw(scale); break;
+#if PLAT_TOUCH
+        case 10: touch_tab_draw(scale); break;
+#endif
+        }
+        static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
+        if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
+        // no enabled option row took the cursor: the page's first control, next frame (SetKeyboardFocusHere: the
+        // first item that takes the cursor, in order)
+        if (opt_focus_first_left() && down_from_tab) g_page_focus_next = true;
+        ImGui::EndChild();
+    }
+    opt_focus_first_left();  // (no page drawn: nothing took it)
+    nav_in_page = g.NavWindow && g.NavWindow != g.NavWindow->RootWindow && g.NavWindow->RootWindow == root &&
+                  g.NavWindow->ID != tabs_win;
+    // (checks: fresh presses only - a held key's repeats come faster than a check's few frames)
+    bool down1 = down && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown, false) ||
+                          ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown, false) || ImGui::IsKeyPressed(ImGuiKey_DownArrow, false));
+    bool up1 = up && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp, false) ||
+                      ImGui::IsKeyPressed(ImGuiKey_GamepadLStickUp, false) || ImGui::IsKeyPressed(ImGuiKey_UpArrow, false));
+    for (int k = 0; k < ntabs; k++)
+        if (tabs[k].id == g_tab) focus_check(down1, up1, down, focused_tab, g_tab, tabs[k].name);
+    if (only != -1000) g_tab = keep_tab;
+}
+
+// The menu's look for a window of the start screen's (its game files window): until menu_style_end
+static ImGuiStyle g_style_saved;
+void menu_style_begin(float scale) {
+    g_style_saved = ImGui::GetStyle();
+    style_init();
+    style_parchment(ImGui::GetStyle());
+    ImGui::GetStyle().ScaleAllSizes(scale);
+}
+void menu_style_end(void) { ImGui::GetStyle() = g_style_saved; }
+
+// only: one page alone (the start screen's Randomizer panel: 3)
+void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, void (*prelaunch)(float), int only) {
+    ImFont *f0 = g_font, *f1 = g_font_big;
+    g_font = font, g_font_big = font_big;
+    ImGuiStyle saved = ImGui::GetStyle();  // the menu's look (the start screen has its own style)
+    style_init();
+    style_parchment(ImGui::GetStyle());
+    ImGui::GetStyle().ScaleAllSizes(scale);
+    tabs_body(scale, in_game, prelaunch, only);
+    ImGui::GetStyle() = saved;
+    g_font = f0, g_font_big = f1;
+}
+
+// The start screen's Settings: Reset to vanilla beside its close X, as in game (user 2026-11-11). seed: PLAY would
+// start a seed. True when Reset was pressed (the caller drops that seed: nothing is running to reboot).
+bool menu_reset_corner(float bx, float scale, ImFont *font, ImFont *font_big, bool seed) {
+    ImFont *f0 = g_font, *f1 = g_font_big;
+    g_font = font, g_font_big = font_big;
+    ImGuiStyle saved = ImGui::GetStyle();  // (the question in the menu's look, as menu_tabs_draw's pages)
+    style_init();
+    style_parchment(ImGui::GetStyle());
+    ImGui::GetStyle().ScaleAllSizes(scale);
+    if (plastic_reset_corner(bx, scale)) ImGui::OpenPopup("##vanilla");
+    bool r = vanilla_popup(scale, seed, false);
+    ImGui::GetStyle() = saved;
+    g_font = f0, g_font_big = f1;
+    return r;
+}
+
+// The menu bar (in game; its window is drawn in the menu's font), only while no page is open: left / right (d-pad,
+// stick, arrows, L / R, Q / E) move the cursor, A / Enter opens the entry, B / Esc closes the menu. The mouse lights
+// the entry under it, a click opens it (the page is drawn from the next frame: the press that opened it isn't the
+// page's too).
+static const char *g_bar_names[BAR_N] = {LN("Settings"), LN("Reset"), LN("Quit"), ""};
+// an entry's tab at x, y (w x ph), its name in the current font at size fs
+static void bar_entry(ImDrawList *dl, float x, float y, float w, float ph, float pad, float fs, bool sel, bool hot,
+                      const char *name, float scale) {
+    // (as the Settings window's tabs: tabs_body - the user wants the bar's look to match Settings, 2026-11-03)
+    const PlasticTheme &pt = plastic_theme();
+    ImVec4 col = sel ? pt.tab_sel : hot ? pt.row_mark : pt.tab;
+    if (sel && hot) col = ImVec4(col.x * 0.88f, col.y * 0.88f, col.z * 0.88f, col.w);
+    plastic_pill(dl, ImVec2(x, y + (sel ? 0 : 2 * scale)), ImVec2(x + w, y + ph - 2 * scale), 10 * scale, col,
+                 (sel ? 7 : 4) * scale, sel ? 1.0f : 0.55f, scale, sel);
+    dl->AddText(ImGui::GetFont(), fs, ImVec2(x + pad, y + (ph - fs) * 0.5f - (sel ? 2 : 1) * scale),
+                sel ? pt.text_sel : pt.text, name);
+}
+
+// The bar as a picture at the cursor, as wide as width at most, Settings lit: the start screen's note on opening the
+// menu (launcher.mm menu_tip) shows what opens. In the current font, shrunk to fit.
+void menu_bar_picture(float width, float scale) {
+    float fs = ImGui::GetFontSize(), natural = 0;
+    for (int e = 0; e < BAR_CLOSE; e++) natural += ImGui::CalcTextSize(L(g_bar_names[e])).x + (2 * 22 + 10) * scale;
+    natural += 2 * 30 * scale + fs + 20 * scale;  // (the frame's insets and the X)
+    float k = fminf(1.0f, width / natural), s = scale * k, w = natural * k;
+    fs *= k;
+    float in = 30 * s, ph = fs + 20 * s, pad = 22 * s, gap = 10 * s, bh = ph + 2 * in;
+    ImVec2 a = ImGui::GetCursorScreenPos();
+    a.x += (width - w) * 0.5f;
+    ImGui::Dummy(ImVec2(width, bh));
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    plastic_panel(dl, a, ImVec2(a.x + w, a.y + bh), s);
+    float x = a.x + in, y = a.y + in;
+    for (int e = 0; e < BAR_CLOSE; e++) {
+        float ew = ImGui::CalcTextSize(L(g_bar_names[e])).x * k + 2 * pad;
+        bar_entry(dl, x, y, ew, ph, pad, fs, e == BAR_SETTINGS, false, L(g_bar_names[e]), s);
+        x += ew + gap;
+    }
+    // the close X (as plastic_close_button draws it)
+    const PlasticTheme &pt = plastic_theme();
+    float bx = ph, m = bx * 0.32f, th = 2.6f * s * 1.5f, dy = -1 * s;
+    ImVec2 p(a.x + w - in - bx, y);
+    plastic_pill(dl, p, ImVec2(p.x + bx, p.y + bx), bx * 0.5f, pt.row, 6 * s, 1.0f, s, false);
+    dl->AddLine(ImVec2(p.x + m, p.y + m + dy), ImVec2(p.x + bx - m, p.y + bx - m + dy), pt.text, th);
+    dl->AddLine(ImVec2(p.x + bx - m, p.y + m + dy), ImVec2(p.x + m, p.y + bx - m + dy), pt.text, th);
+}
+
+static double g_bar_t0 = -1;  // when the bar began to drop (-1: not shown - the menu is closed or a page is open)
+static void bar_draw(ImGuiIO &io, float scale) {
+    const PlasticTheme &pt = plastic_theme();
+    double now = ImGui::GetTime();
+    if (g_bar_t0 < 0) g_bar_t0 = now;
+    float e = fminf((float)(now - g_bar_t0) / 0.18f, 1);  // (drops down from above the screen, slowing as it lands)
+    e = 1 - (1 - e) * (1 - e) * (1 - e);
+    ImGui::PushFont(g_menu_font);
+    float fs = ImGui::GetFontSize(), in = 30 * scale, ph = fs + 20 * scale, m = 12 * scale;
+    // (phones: inside the safe area sideways, the wider side inset on both sides; the top is free in landscape)
+    float sx = PLAT_TOUCH ? (float)fmaxf(g_safe_l, g_safe_r) : 0;
+    float bh = ph + 2 * in, top = m - (1 - e) * (bh + m);
+    ImGui::SetNextWindowPos(ImVec2(m + sx, top), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x - 2 * (m + sx), bh), ImGuiCond_Always);
+    ImGui::Begin("##bar", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus);
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
-    float fh = ImGui::GetFrameHeight();
-    bool popup = ImGui::IsPopupOpen((const char *)NULL, ImGuiPopupFlags_AnyPopupId);
-
-    // the title, and the tabs at its right as pills between L and R (a click picks one too)
-    ui_title(g_menu_font, M("Settings", "Configurações", "Настройки"));
-    ImVec2 t0 = ImGui::GetItemRectMin(), t1 = ImGui::GetItemRectMax();
-    if (!popup) ui_tabs_begin(&g_cfg_tab, 3);
-    {
-        const char *names[] = {M("Graphics", "Gráficos", "Графика"), M("Image and sound", "Imagem e som", "Изображение и звук"),
-                               M("Advanced", "Avançado", "Дополнительно")};
-        float pad = fh * 0.55f, gap = st.ItemSpacing.x, chip = fh * 0.95f, w[3], total = chip * 2 + gap * 4;
-        for (int t = 0; t < 3; t++) total += w[t] = ImGui::CalcTextSize(names[t]).x + pad * 2;
-        float x = wp.x + ws.x - st.WindowPadding.x - total, y = (t0.y + t1.y) * 0.5f;
-        auto shoulder = [&](float cx, const char *k) {  // L / R: a dark rounded chip
-            ImVec2 a(cx, y - fh * 0.36f), b(cx + chip, y + fh * 0.36f), ks = ImGui::CalcTextSize(k);
-            dl->AddRectFilled(a, b, IM_COL32(70, 76, 66, 255), fh * 0.2f);
-            dl->AddText(ImVec2(cx + (chip - ks.x) * 0.5f, y - ks.y * 0.5f), IM_COL32(255, 255, 255, 255), k);
+    // the keys
+    if (!ui_text_busy() && g_ask < 0 && g_notice.empty()) {
+        auto pressed = [](ImGuiKey a, ImGuiKey b, ImGuiKey c) {
+            return ImGui::IsKeyPressed(a) || ImGui::IsKeyPressed(b) || ImGui::IsKeyPressed(c);
         };
-        shoulder(x, "L");
-        x += chip + gap;
-        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
-        for (int t = 0; t < 3; t++) {
-            ImVec2 a(x, y - fh * 0.5f), b(x + w[t], y + fh * 0.5f);
-            ImGui::SetCursorScreenPos(a);
-            ImGui::PushID(t);
-            if (ImGui::InvisibleButton("##tab", ImVec2(w[t], fh))) g_cfg_tab = t;
-            ImGui::PopID();
-            bool sel = g_cfg_tab == t;
-            ui_pill(dl, a, b, sel);
-            if (!sel && ImGui::IsItemHovered()) dl->AddRect(a, b, ImGui::GetColorU32(ImGuiCol_Border), fh * 0.5f, 0, 2.5f * scale);
-            ImVec2 ts = ImGui::CalcTextSize(names[t]);
-            dl->AddText(ImVec2(a.x + (w[t] - ts.x) * 0.5f, y - ts.y * 0.5f), ImGui::GetColorU32(sel ? ImGuiCol_Text : ImGuiCol_TextDisabled), names[t]);
-            x += w[t] + gap;
-        }
-        ImGui::PopItemFlag();
-        shoulder(x, "R");  // (the row ends on the box's right edge)
-        ImGui::SetCursorScreenPos(ImVec2(t0.x, fmaxf(t1.y, y + fh * 0.5f) + 16 * scale));
+        int step = pressed(ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadLStickRight, ImGuiKey_RightArrow) ||
+                           ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
+                   : pressed(ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadLStickLeft, ImGuiKey_LeftArrow) ||
+                           ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
+        if (step) g_bar_cur = (g_bar_cur + step + BAR_N) % BAR_N, menu_sfx_play(MENU_SFX_CURSOR);
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) || ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) || ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+            if (g_bar_cur == BAR_CLOSE) set_open(false);
+            else page_open(g_bar_cur), menu_sfx_play(MENU_SFX_DECIDE);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            set_open(false);
     }
-
-    // the description box: two lines of text
-    {
-        float pad_y = ui_inset() * 0.75f;
-        ImVec2 a = ImGui::GetCursorScreenPos(), b(wp.x + ws.x - st.WindowPadding.x, a.y + ImGui::GetTextLineHeight() * 2 + pad_y * 2);
-        const char *d = ui_tip_last();
-        description(dl, a, b, pad_y, d ? d : M("Changes apply at once and are saved when this menu closes. Left / right change the highlighted setting.",
-                                        "As mudanças valem na hora e são salvas ao fechar este menu. Esquerda / direita mudam a opção destacada.",
-                                        "Изменения применяются сразу и сохраняются при закрытии меню. Влево / вправо — изменить выбранный параметр."));
-        ImGui::Dummy(ImVec2(b.x - a.x, b.y - a.y + 16 * scale - st.ItemSpacing.y));  // (16 px to the page, as above the box)
+    // the entries: a row from the left, the cursor's lit as the selected tab is
+    static ImVec2 last_mouse(-1, -1);  // (not io.MouseDelta: none for the mouse's first move)
+    bool mouse_moved = io.MousePos.x != last_mouse.x || io.MousePos.y != last_mouse.y;
+    last_mouse = io.MousePos;
+    float x = wp.x + in, y = wp.y + in, pad = 22 * scale, gap = 10 * scale;
+    // too wide for the bar (eight entries: long names - Russian, German - on a phone's larger menu): tighter entries,
+    // then the names a little smaller, as the Settings tabs do (tabs_body)
+    float text_w[BAR_CLOSE], names_w = 0, tfs = fs;
+    for (int k = 0; k < BAR_CLOSE; k++) names_w += text_w[k] = ImGui::CalcTextSize(L(g_bar_names[k])).x;
+    float room = ws.x - 2 * in - ph - gap * BAR_CLOSE;  // (the close X and the gaps)
+    if (names_w + 2 * pad * BAR_CLOSE > room) pad = fmaxf((room - names_w) / (2 * BAR_CLOSE), 8 * scale);
+    if (names_w + 2 * pad * BAR_CLOSE > room && names_w > 0) {
+        float k = fmaxf((room - 2 * pad * BAR_CLOSE) / names_w, 0.6f);
+        tfs *= k;
+        for (float &t : text_w) t *= k;
     }
-
-    // the page, above the strip at the bottom: as wide as the box (the cursor's arrow in the window's margin)
-    float strip = fh * 1.45f, page_h = wp.y + ws.y - strip - st.ItemSpacing.y - ImGui::GetCursorScreenPos().y;
-    ImGui::PushID(g_cfg_tab);  // (each page its own scroll)
-    ui_page_begin("##page", ImVec2(0, page_h));
-    static int shown = -1;  // (another page: the cursor on its first setting)
-    if (shown != g_cfg_tab && shown >= 0 && GImGui->NavCursorVisible) ImGui::SetKeyboardFocusHere();
-    shown = g_cfg_tab;
-    if (g_cfg_tab == 0) ui_page_graphics(ui_graphics_x(NULL, 0));
-    else if (g_cfg_tab == 1) ui_page_image_sound();
-    else ui_page_advanced();
-    ui_page_end();
-    ImGui::PopID();
-
-    // the strip: L / R change the tab, B closes (Esc / F12 on a keyboard); a click on Close closes too
-    bool close = !popup && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false);
-    if (!popup && (ImGui::IsKeyPressed(ImGuiKey_LeftCtrl, false) || ImGui::IsKeyPressed(ImGuiKey_RightCtrl, false) ||
-                   ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false)))
-        g_cfg_small = !g_cfg_small;
-    {
-        ImVec2 a(wp.x, wp.y + ws.y - strip), b(wp.x + ws.x, wp.y + ws.y);
-        dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 245), st.WindowRounding, ImDrawFlags_RoundCornersBottom);
-        float y = (a.y + b.y) * 0.5f, x = b.x - st.WindowPadding.x, sp = fh * 0.7f;
-        bool pad = g_last_pad.load();
-        const char *l_close = M("Close", "Fechar", "Закрыть"), *l_tab = M("Tabs", "Abas", "Вкладки");
-        char k_close[48];
-        snprintf(k_close, sizeof k_close, pad ? "B" : "Esc / %s", SDL_GetScancodeName(cfg_key()));
-        ImU32 orange = IM_COL32(240, 160, 36, 255), grey = IM_COL32(70, 76, 66, 255);
-        float wc = prompt(dl, 0, 0, k_close, orange, l_close, false);
-        x -= wc;
-        prompt(dl, x, y, k_close, pad ? orange : grey, l_close, true);
-        ImGui::SetCursorScreenPos(ImVec2(x, y - fh * 0.5f));
-        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
-        if (ImGui::InvisibleButton("##close", ImVec2(wc, fh))) close = true;
-        ImGui::PopItemFlag();
-        if (pad) {  // (L R  Tabs)
-            float wl = prompt(dl, 0, 0, "L", grey, "", false), wt = wl + prompt(dl, 0, 0, "R", grey, l_tab, false);
-            x -= sp + wt;
-            prompt(dl, x, y, "L", grey, "", true);
-            prompt(dl, x + wl, y, "R", grey, l_tab, true);
-        }
+    for (int k = 0; k < BAR_CLOSE; k++) {
+        float tw = text_w[k], w = tw + 2 * pad;
+        ImGui::SetCursorScreenPos(ImVec2(x, y));
+        ImGui::PushID(k);
+        bool clicked = ImGui::InvisibleButton("##entry", ImVec2(w, ph), ImGuiButtonFlags_PressedOnClick);
+        ImGui::PopID();
+        bool hot = ImGui::IsItemHovered();
+        if (hot && mouse_moved && g_bar_cur != k) g_bar_cur = k, menu_sfx_play(MENU_SFX_CURSOR);
+        if (clicked) page_open(k), menu_sfx_play(MENU_SFX_DECIDE);
+        bar_entry(dl, x, y, w, ph, pad, tfs, k == g_bar_cur, hot, L(g_bar_names[k]), scale);
+        x += w + gap;
     }
+    // the close X at the right end (the cursor on it: a ring round it)
+    float bx = ph;
+    ImVec2 xp(wp.x + ws.x - in - bx, y);
+    if (g_bar_cur == BAR_CLOSE)
+        plastic_pill(dl, ImVec2(xp.x - 5 * scale, xp.y - 5 * scale), ImVec2(xp.x + bx + 5 * scale, xp.y + bx + 5 * scale),
+                     bx * 0.5f + 5 * scale, pt.tab_sel, 7 * scale, 1.0f, scale, true);
+    ImGui::SetCursorScreenPos(xp);
+    if (plastic_close_button(bx, scale)) set_open(false);
+    if (ImGui::IsItemHovered() && mouse_moved && g_bar_cur != BAR_CLOSE)
+        g_bar_cur = BAR_CLOSE, menu_sfx_play(MENU_SFX_CURSOR);
     ImGui::End();
-    if (close) set_cfg(false);
+    ImGui::PopFont();
 }
 
-void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
-    bool open = g_open.load(), cfg = g_cfg.load(), kbd = g_kbd.load() == 1;
-    float fx, fy;
-    bool fdown, finger = !open && !cfg && input_finger_cursor(&fx, &fy, &fdown);
-    // At the first frame, not when the name entry first opens: by then the game has taken its memory, and on the small
-    // integrated GPU of issue #53 the fonts' texture crashed the driver there, in vkBindImageMemory.
-    if (!g_inited) {
-        init();
-        ImGui_ImplVulkan_CreateFontsTexture();
+// Show FPS > Show advanced information (user 2026-11-12): the frame rate counter as a developer overlay, in the
+// counter's corner - the frame rate (and the game's own under Frame Generation), the last 2 s of game frame times
+// against the frame pacing target, the game thread's, the render thread's and the GPU's busy share of a frame,
+// Dynamic's resolution, memory, the renderer's work per frame, shader builds and where the game is. A see-through box
+// as the plain counter's, not the menus' plastic. (hud_stats.h: what it reads; called inside the "##fps" corner set up)
+extern "C" const char *game_level_name(void);    // hle/game_state.c
+extern "C" bool game_camera_zone_id(uint32_t *id);
+// Show FPS's counter (user 2026-11-12): the frame rate alone in the advanced overlay's box, its number bright and "fps"
+// dim beside it (it showed Dynamic's resolution under it too: that's the advanced overlay's now)
+static void fps_box(float scale) {
+    const float fk = 1.5f;  // (as the advanced overlay)
+    scale *= fk;
+    ImGui::SetNextWindowBgAlpha(0.62f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8 * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12 * scale, 9 * scale));
+    ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                                    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImFont *font = ImGui::GetFont();
+    float big = ImGui::GetFontSize() * fk, small = big * 0.5f;
+    char b[32];
+    snprintf(b, sizeof b, "%.0f", g_ov_cache ? g_fps_shown : ImGui::GetIO().Framerate);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float nw = font->CalcTextSizeA(big, FLT_MAX, 0, b).x, gap = small * 0.4f;
+    dl->AddText(font, big, p, IM_COL32(255, 255, 255, 255), b);
+    dl->AddText(font, small, ImVec2(p.x + nw + gap, p.y + big - small * 1.25f), IM_COL32(180, 178, 169, 255), "fps");
+    ImGui::Dummy(ImVec2(nw + gap + font->CalcTextSizeA(small, FLT_MAX, 0, "fps").x, big));
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
+static void perf_overlay(float scale) {
+    // half as big again as the menus' scale at every size (user 2026-11-12: easier to read), as long as the box fits
+    // the window's height
+    const float fk = fmaxf(1.0f, fminf(1.5f, ImGui::GetIO().DisplaySize.y * 0.9f / (330 * scale)));
+    scale *= fk;  // (the fonts are drawn at the menus' scale: their sizes take fk below)
+    PaceHud ph;
+    RendererHud rh;
+    pace_hud(&ph);
+    renderer_hud(&rh);
+    // per frame / per second figures, over half-second windows
+    static uint64_t w_frames, w_draws, w_passes, w_disp, w_comp;
+    static double w_comp_ms, w_t;
+    static double draws, passes, disp, comp_s, comp_ms_s;
+    double now = ImGui::GetTime();
+    if (now - w_t >= 0.5) {
+        double df = (double)(ph.frames - w_frames), dt = now - w_t;
+        if (w_t > 0 && df > 0) {
+            draws = (rh.draws - w_draws) / df, passes = (rh.passes - w_passes) / df, disp = (rh.dispatches - w_disp) / df;
+            comp_s = (rh.compiles - w_comp) / dt, comp_ms_s = rh.compile_ms >= 0 ? (rh.compile_ms - w_comp_ms) / dt : -1;
+        }
+        w_frames = ph.frames, w_draws = rh.draws, w_passes = rh.passes, w_disp = rh.dispatches, w_comp = rh.compiles;
+        w_comp_ms = rh.compile_ms, w_t = now;
     }
-    if (!open && !cfg && !kbd && !g_settings.show_fps && !finger) {
+
+    const ImU32 c_text = IM_COL32(255, 255, 255, 255), c_dim = IM_COL32(180, 178, 169, 255);
+    const ImU32 c_ok = IM_COL32(151, 196, 89, 255), c_warn = IM_COL32(239, 159, 39, 255), c_bad = IM_COL32(240, 149, 149, 255);
+    ImFont *font = ImGui::GetFont();
+    float big = ImGui::GetFontSize() * fk, small = big * 0.5f;
+    auto width = [&](float size, const char *t) { return font->CalcTextSizeA(size, FLT_MAX, 0, t).x; };
+
+    // what it shows, first: the box is as wide as its widest row (a wider font or a longer translation, Android's
+    // "Draws / passes / dispatches" ran into its value) and its footer, 250 at least
+    double shown = g_ov_cache ? g_fps_shown : ImGui::GetIO().Framerate;
+    char fps_n[16], head[96];
+    snprintf(fps_n, sizeof fps_n, "%.0f", shown);
+    // the frame's work against the target's time (user 2026-11-12, as Metal HUD: "8 / 16.7 ms" has room to spare; the
+    // frame's own time sits at the target while it keeps up): 60's, or 30's while the game runs at 30 (Internal FPS
+    // target 30, or frame pacing holding it there); under Frame Generation the game's own frame rate before it
+    float target = ph.hold30 || settings_fps_target() == FPS_TARGET_30 ? 33.3f : 16.7f;
+    if (g_settings.frame_interp && ph.fps > 0 && shown > ph.fps * 1.3)
+        snprintf(head, sizeof head, L("%.0f game, %.1f / %.1f ms"), ph.fps, ph.work_ms, target);
+    else snprintf(head, sizeof head, "%.1f / %.1f ms", ph.work_ms, target);
+    struct Line { const char *label; char value[80]; ImU32 col; };
+    Line lines[8];
+    int nl = 0;
+    auto add = [&](const char *label, ImU32 col) -> char * {
+        Line &l = lines[nl++];
+        l.label = label, l.col = col, l.value[0] = 0;
+        return l.value;
+    };
+    int rw = 0, rh2 = 0;  // (the size the game draws at, whatever Internal resolution is; Dynamic's share of it too)
+    output_scale_render_size(&rw, &rh2);
+    if (rw > 0) {
+        if (g_settings.dyn_res)
+            snprintf(add(L("Resolution"), c_text), 80, "%dx%d  %.0f%%", rw, rh2, output_scale_dynamic_factor() * 100);
+        else snprintf(add(L("Resolution"), c_text), 80, "%dx%d", rw, rh2);
+    }
+    if (uint64_t ram = plat_mem_used_bytes()) snprintf(add(L("Memory"), c_text), 80, "%.1f GB", ram / 1073741824.0);
+    if (rh.gpu_bytes) snprintf(add(L("GPU memory"), c_text), 80, "%.1f GB", rh.gpu_bytes / 1073741824.0);
+    snprintf(add(L("Textures"), c_text), 80, "%d  %.0f MB", rh.textures, rh.texture_bytes / 1048576.0);
+    snprintf(add(L("Draws / passes / dispatches"), c_text), 80, "%.0f / %.0f / %.0f", draws, passes, disp);
+    {
+        char *v = add(L("Shaders built"), comp_s > 0 ? c_warn : c_text);
+        if (comp_ms_s >= 0) snprintf(v, 80, L("%.0f a second, %.0f ms"), comp_s, comp_ms_s);
+        else snprintf(v, 80, L("%.0f a second"), comp_s);
+    }
+    if (game_in_play()) {
+        uint32_t zone;
+        char *v = add(L("Level"), c_text);
+        if (game_camera_zone_id(&zone)) snprintf(v, 80, "%s  %X", game_level_name(), zone);
+        else snprintf(v, 80, "%s", game_level_name());
+    }
+    if (ph.hold30) snprintf(add(L("Frame pacing"), c_warn), 80, "%s", L("Holding 30 fps"));
+    // the system's name and version, short (user 2026-11-12): plat_system_info's up to its details - "macOS 15.4",
+    // "Windows 11", "Android 15" (not the phone's model and kernel), "Debian GNU/Linux 12" - and a long Linux name
+    // cut at 24 characters
+    static char os_name[64];
+    if (!os_name[0]) {
+        PlatSysInfo si = {};
+        plat_system_info(&si);
+        snprintf(os_name, sizeof os_name, "%s", si.os);
+        os_name[strcspn(os_name, "(,")] = 0;
+        for (size_t n = strlen(os_name); n && os_name[n - 1] == ' '; n--) os_name[n - 1] = 0;
+        if (strlen(os_name) > 24) strcpy(os_name + 21, "...");  // (os-release names are ASCII)
+    }
+    char foot[256];
+    snprintf(foot, sizeof foot, "%s · %s · %s", rh.gpu_name ? rh.gpu_name : "", rh.backend ? rh.backend : "", os_name);
+    float gap = small * 1.2f, w = fmaxf(250 * scale, width(small * 0.9f, foot));
+    w = fmaxf(w, width(big, fps_n) + small * 0.4f + width(small, "fps") + gap + width(small, head));
+    for (int i = 0; i < nl; i++) w = fmaxf(w, width(small, lines[i].label) + gap + width(small, lines[i].value));
+
+    ImGui::SetNextWindowBgAlpha(0.62f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8 * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12 * scale, 9 * scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6 * scale, 2 * scale));
+    ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                                    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    auto text = [&](ImVec2 at, float size, ImU32 col, const char *t) { dl->AddText(font, size, at, col, t); };
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float y = p.y;
+
+    // the frame rate shown (under Frame Generation the in-betweens too), the work / target pair on the right
+    text(ImVec2(p.x, y), big, c_text, fps_n);
+    text(ImVec2(p.x + width(big, fps_n) + small * 0.4f, y + big - small * 1.25f), small, c_dim, "fps");
+    text(ImVec2(p.x + w - width(small, head), y + big - small * 1.25f), small, c_dim, head);
+    y += big + 4 * scale;
+
+    // the game frames' times: a line against the target, spikes in amber
+    float gh = 38 * scale, top_ms = target * 2.5f;
+    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + gh), IM_COL32(255, 255, 255, 18), 3 * scale);
+    float ty = y + gh - gh * target / top_ms;
+    for (float dx = 0; dx < w; dx += 6 * scale)
+        dl->AddLine(ImVec2(p.x + dx, ty), ImVec2(p.x + fminf(dx + 3 * scale, w), ty), IM_COL32(255, 255, 255, 60), 1);
+    if (ph.n > 1) {
+        float step = w / (HUD_FRAMES - 1);
+        for (int i = 1; i < ph.n; i++) {
+            float x0 = p.x + w - (ph.n - i) * step, x1 = x0 + step;
+            float y0 = y + gh - gh * fminf(ph.frame_ms[i - 1], top_ms) / top_ms;
+            float y1 = y + gh - gh * fminf(ph.frame_ms[i], top_ms) / top_ms;
+            dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y1), ph.frame_ms[i] > target * 1.5f ? c_warn : c_ok, 1.5f * scale);
+        }
+    }
+    y += gh + 6 * scale;
+
+    // busy shares: a bar and its percent each (green, amber past 75%, red past 95%: the frame no longer fits)
+    float lw = fmaxf(width(small, L("Game")), fmaxf(width(small, L("Render")), width(small, "GPU"))) + small;
+    float bw = w - lw - width(small, "100%") - small;
+    char r[32];
+    auto bar = [&](const char *label, double pct) {
+        text(ImVec2(p.x, y), small, c_dim, label);
+        float bx = p.x + lw, by = y + small * 0.35f, bh = small * 0.4f;
+        dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(255, 255, 255, 46), bh * 0.5f);
+        if (pct >= 0) {
+            ImU32 c = pct > 95 ? c_bad : pct > 75 ? c_warn : c_ok;
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw * (float)fmin(pct, 100) / 100, by + bh), c, bh * 0.5f);
+            snprintf(r, sizeof r, "%.0f%%", pct);
+        } else snprintf(r, sizeof r, "-");
+        text(ImVec2(p.x + w - width(small, r), y), small, c_text, r);
+        y += small * 1.25f;
+    };
+    bar(L("Game"), ph.cpu_game);
+    if (ph.cpu_render >= 0) bar(L("Render"), ph.cpu_render);
+    bar("GPU", ph.gpu);
+    y += 3 * scale;
+
+    for (int i = 0; i < nl; i++) {  // label / value lines
+        text(ImVec2(p.x, y), small, c_dim, lines[i].label);
+        text(ImVec2(p.x + w - width(small, lines[i].value), y), small, lines[i].col, lines[i].value);
+        y += small * 1.25f;
+    }
+    y += 2 * scale;
+    text(ImVec2(p.x, y), small * 0.9f, c_dim, foot);
+    y += small * 1.1f;
+
+    ImGui::Dummy(ImVec2(w, y - p.y));
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+}
+
+// Whether menu_render draws anything: the menu, the keyboard, an overlay (FPS, the touch controls).
+static bool render_needed(bool open, bool kbd, bool touch) { return open || kbd || g_settings.show_fps || touch; }
+
+#ifdef __APPLE__
+void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target) {
+    const double tw = target.width, th = target.height;
+#else
+void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
+    const double tw = target_w, th = target_h;
+#endif
+    notice_take();  // (a save failed: the menu opens with it)
+    bool open = g_open.load();
+    bool kbd = g_kbd.load() == 1;
+#ifdef __APPLE__
+    plastic_perf_note(cb, open);  // (LARECOMP_UI_PERF test only)
+#else
+    plastic_perf_note_vk(open);
+#endif
+    // (on-screen controls: mobile/touch_controls.mm; also under the live preview of their own settings)
+    bool touch = (!open && !kbd && touch_visible()) || (PLAT_TOUCH && open && preview_active() && g_tab == 10 && g_settings.touch_mode != 2);
+    // (the stick / D-pad takes the thumb on the Movement row's preview only: on the others the panel may sit over it)
+    touch_preview_play(PLAT_TOUCH && open && preview_active() && g_tab == 10 && g_settings.touch_mode != 2 &&
+                       !strcmp(preview_label(), "Movement"));
+    if (!render_needed(open, kbd, touch)) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
+        g_ov_same = 0;  // (shown again: built afresh first)
         return;
     }
+#ifdef __APPLE__
+    if (!g_inited) init(dev);
+#else
+    if (!g_inited) init();
+#endif
     ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)target_w, (float)target_h);
+    io.DisplaySize = ImVec2((float)tw, (float)th);
     io.DisplayFramebufferScale = ImVec2(1, 1);
     static double last;
-    double now = SDL_GetTicks() / 1000.0;
+    // (nanoseconds: two images drawn within a millisecond - an in-between and its frame on Vulkan - counted the gap as
+    // 1/60 s, and 120 images a second showed as 70 fps)
+    double now = SDL_GetTicksNS() / 1e9;
     io.DeltaTime = last > 0 && now > last ? (float)(now - last) : 1.0f / 60;
     last = now;
+    if (g_ov_cache < 0) g_ov_cache = !getenv("LARECOMP_OVERLAY_CACHE") || atoi(getenv("LARECOMP_OVERLAY_CACHE")) != 0;
+    char key[sizeof g_ov_key];
+    key[0] = 0;
+    if (g_ov_cache) {
+        fps_note(now, io.DeltaTime);
+        // (only the FPS counter; input only reaches ImGui while the menu or the name entry is up)
+        // (not the advanced overlay: it changes every frame)
+        if (!open && !kbd && !touch && !(g_settings.show_fps && g_settings.fps_advanced)) {
+            pthread_mutex_lock(&q_lock);
+            bool events = !q_events.empty();
+            pthread_mutex_unlock(&q_lock);
+            int rw = 0, rh = 0;  // (Dynamic: the render size shown with the frame rate)
+            if (g_settings.show_fps && g_settings.dyn_res) output_scale_render_size(&rw, &rh);
+            if (!events) snprintf(key, sizeof key, "%.0fx%.0f fps %d %.0f %dx%d", tw, th, (int)g_settings.show_fps,
+                                  g_settings.show_fps ? g_fps_shown : 0.0, rw, rh);
+        }
+        ImDrawData *dd = ImGui::GetDrawData();
+        if (key[0] && g_ov_same >= 3 && !strcmp(key, g_ov_key) && dd && dd->Valid) {
+            g_text_busy = false;  // (the menu is closed)
+#ifdef __APPLE__
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = target;
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            ImGui_ImplMetal_NewFrame(rp);  // (the backend's target description only)
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            ImGui_ImplMetal_RenderDrawData(dd, cb, enc);
+            [enc endEncoding];
+#else
+            void *oc = vk_overlay_begin(cmd);  // (as below)
+            ImGui_ImplVulkan_RenderDrawData(dd, (VkCommandBuffer)oc);
+            vk_overlay_end(cmd, oc);
+#endif
+            return;
+        }
+        if (key[0] && !strcmp(key, g_ov_key)) g_ov_same++;
+        else { memcpy(g_ov_key, key, sizeof key); g_ov_same = key[0] ? 1 : 0; }
+    }
     drain_events(io);
-    // fonts are built for a ~1080 px tall output; scale to the window (spacing / rounding too)
-    static UiScaler scaler;
-    float scale = ui_scale(scaler, (float)target_h * (cfg && !open && g_cfg_small ? 0.5f : 1.0f));
+    // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window (phones: kUi larger)
+    float scale = (float)(th / 1080.0) * kUi;
+    if (scale < 0.45f) scale = 0.45f;
+    io.FontGlobalScale = scale;
+    // a drag / flick: this frame's scroll, applied after NewFrame (touch_scroll_apply)
+    float touch_px = g_touch.frame(io.DeltaTime, [&](float x, float y) { io.AddMousePosEvent(x, y); },
+                                   [&](bool down) { io.AddMouseButtonEvent(0, down); });
+
+#ifdef __APPLE__
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = target;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+#endif
+    // spacing/rounding follow the output size too (style tuned for 1080 p)
+    // (the overlays' style, and the menu's: the parchment colours only while the menu / name entry is drawn)
+    static ImGuiStyle base, ov_style, menu_style;
+    static float style_scale = -1;
+    if (style_scale < 0) base = ImGui::GetStyle();
+    if (fabsf(style_scale - scale) > 0.01f) {
+        ov_style = base;
+        ov_style.ScaleAllSizes(scale);
+        menu_style = base;
+        style_parchment(menu_style);
+        menu_style.ScaleAllSizes(scale);
+        style_scale = scale;
+    }
+    ImGui::GetStyle() = ov_style;
+    if (i18n_fonts_stale(io.Fonts)) {  // (the Language setting changed: the glyphs of the new one)
+        load_fonts();
+#ifdef __APPLE__
+        ImGui_ImplMetal_DestroyFontsTexture();
+        ImGui_ImplMetal_CreateFontsTexture(g_dev);
+#else
+        vk_imgui_fonts_rebuild();
+#endif
+    }
+#ifdef __APPLE__
+    ImGui_ImplMetal_NewFrame(rp);
+#else
     ImGui_ImplVulkan_NewFrame();
+#endif
     ImGui::NewFrame();
+    g_touch.scroll_apply(touch_px);
 
     if (g_settings.show_fps) {
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16 * scale, 16 * scale), 0, ImVec2(1, 0));
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.5f));  // (dark: over the game, not the menus' look)
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10 * scale);
-        ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("%.0f fps", io.Framerate);
-        ImGui::End();
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor(2);
+        int c = g_settings.show_fps;
+        bool right = c == FPS_TOP_RIGHT || c == FPS_BOTTOM_RIGHT, bottom = c == FPS_BOTTOM_LEFT || c == FPS_BOTTOM_RIGHT;
+        float m = 16 * scale;
+        ImGui::SetNextWindowPos(ImVec2(right ? io.DisplaySize.x - m : m, bottom ? io.DisplaySize.y - m : m), 0,
+                                ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f));
+        if (g_settings.fps_advanced) perf_overlay(scale);
+        else fps_box(scale);
     }
-    if (finger) {  // the controller's finger on the touch screen (right stick moves it, ZR touches)
-        ImDrawList *dl = ImGui::GetForegroundDrawList();
-        float r = 26 * scale;
-        dl->AddCircleFilled(ImVec2(fx, fy), r, fdown ? IM_COL32(255, 255, 255, 170) : IM_COL32(255, 255, 255, 60));
-        dl->AddCircle(ImVec2(fx, fy), r, IM_COL32(255, 255, 255, 235), 0, 4 * scale);
+
+    if (touch) touch_draw(ImGui::GetBackgroundDrawList(), io.DisplaySize.x, io.DisplaySize.y, g_font_big ? g_font_big : ImGui::GetFont(),
+                          g_menu_font_big ? g_menu_font_big : ImGui::GetFont());
+
+    if (open || kbd) {  // (the menu's colours; its windows, popups and buttons as plastic pieces)
+        ImGui::GetStyle() = menu_style;
+        plastic_widgets(true);
     }
-    if (open) quit_draw(io, scale);
-    else if (cfg && !kbd) cfg_draw(io, scale);
+    if (!open || preview_active()) g_bar_t0 = -1;
+    if (open && preview_active()) {  // (the live preview: the game, a panel at the bottom)
+        if (PLAT_TOUCH) preview_safe_area(g_safe_l, g_safe_t, g_safe_r, g_safe_b);  // (the menu window's)
+        menu_preview_frame(scale, g_menu_font, g_menu_font_big);
+        menu_sfx_frame(true);
+    } else if (open) {
+        // A page open: the bar goes up and the page has the whole screen (user 2026-11-03); B brings the bar down again
+        int page = g_page.load();
+        if (page < 0) bar_draw(io, scale), ask_popup(scale), notice_popup(scale);
+        else g_bar_t0 = -1;
+        static int shown = -1;  // (a page just opened takes ImGui's focus)
+        if (page < 0) shown = -1;
+        if (page >= 0) {
+            // dim the game behind the page (the bar alone leaves it as it is)
+            ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize,
+                                                          IM_COL32(0, 0, 0, (int)(plastic_theme().dim * 255)));
+            if (page != shown) ImGui::SetNextWindowFocus(), shown = page;
+            float w = fminf(io.DisplaySize.x * 0.9f, 1500 * scale), h = io.DisplaySize.y - 2 * 18 * scale;  // (all the height: a slim margin)
+            ImVec2 centre(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+#if PLAT_TOUCH
+            ImGuiWindowFlags page_flags = ImGuiWindowFlags_NoBackground;
+            {   // phones and tablets: the paper fills the screen, the window (what's on it) stays clear of a camera cutout,
+                // on its own side only. Top to bottom it takes the whole screen: in landscape nothing is in the way
+                // there (Android's bars are hidden but still reported), and past the edges by the window's padding, so
+                // the page runs to them.
+                float sl = g_cushion_l, pad = ImGui::GetStyle().WindowPadding.y, top = 14 * scale - pad;
+                g_plastic_corner_r = touch_corner_radius(g_safe_l, g_safe_r);  // (the corner buttons keep off the curve)
+                // (to the screen's right edge, for the corner buttons: what's on the page keeps the inset, below)
+                w = io.DisplaySize.x - sl, h = io.DisplaySize.y + pad - 8 * scale - top;
+                centre = ImVec2(sl + w * 0.5f, top + h * 0.5f);
+                plastic_panel_full(ImGui::GetBackgroundDrawList(), ImVec2(0, 0), io.DisplaySize, scale);
+            }
+#else
+            ImGuiWindowFlags page_flags = 0;
+#endif
+            ImGui::SetNextWindowPos(centre, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
+            ImGui::Begin("##menu", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | page_flags);
+#if PLAT_TOUCH
+            ImGui::GetCurrentWindow()->WorkRect.Max.x -= g_cushion_r;
+            ImGui::GetCurrentWindow()->ContentRegionRect.Max.x -= g_cushion_r;
+#endif
+            ImFont *keep_big = g_font_big;  // (the window in the menu's font; header() uses g_font_big)
+            g_font_big = g_menu_font_big;
+            ImGui::PushFont(g_menu_font);
+            // header as on the start screen's Settings: the page's title, and a close X in the corner (B / Esc too:
+            // back to the bar). ("Title screen" - rt_request_reboot(RT_REBOOT_TITLE) - is to find a new home; user
+            // 2026-10-11.)
+            static const char *titles[] = {LN("Settings")};
+            static const int only[] = {-1000};  // (the pages' tab ids)
+            bool pane_x = false;  // (touch: a page whose X is in a pane, or on its first line: menu_page_head)
+#if PLAT_TOUCH
+            // (an icon for the title; Settings': tabs_body)
+            float page_indent = page != BAR_SETTINGS ? menu_page_corner(only[page], scale) : 0;
+#else
+            ImGui::PushFont(g_font_big);
+            ImGui::TextColored(plastic_col(plastic_theme().title), "%s", L(titles[page]));
+            ImGui::PopFont();
+#endif
+            bool back = false;
+            {
+                float bx = 44 * scale;
+                if (!(PLAT_TOUCH && pane_x) && plastic_close_corner(bx, scale)) back = true;
+                if (page == BAR_SETTINGS) {
+                    if (plastic_reset_corner(bx, scale)) ImGui::OpenPopup("##vanilla");
+                    vanilla_popup(scale, false, true);
+                }
+            }
+
+            bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();  // (before
+            g_page_x = false, g_page_x_scale = scale;
+            tabs_body(scale, true, NULL, only[page]);                                             //  the pages run)
+            g_page_x = false;
+#if PLAT_TOUCH
+            if (page_indent > 0) ImGui::Unindent(page_indent);
+            if (g_page_x_pressed) g_page_x_pressed = false, back = true;
+#endif
+            // B with nothing focused-deeper goes back to the bar (not the Esc / B that ends typing: typing is from the
+            // frame before, so it's still true the frame a field lets go)
+            if (!any_popup && !typing && !ui_text_busy() && !controls_ui_took_back() &&
+                ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+                back = true;
+            if (back && g_page.load() == page) g_page = -1;
+            ImGui::PopFont();
+            g_font_big = keep_big;
+            ImGui::End();
+            osk_draw(g_font_big, scale);  // (a text field activated with the controller)
+            menu_sfx_frame(true);
+        } else menu_sfx_idle_check();
+    }
+
     if (kbd) keyboard_draw(io, scale);
-    ui_frame_end();
+    plastic_widgets(false);
+    ImGui::GetStyle() = ov_style;
     ImGui::Render();
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
+    g_text_busy = open && ui_text_busy();
+    g_text_typed = open && ui_text_typed_into();
+    {   // (phones: the field's frame for SDL's keyboard, pixels -> points; this context has no ImGui platform backend)
+        ImVec2 mn, mx;
+        if (PLAT_TOUCH && ui_text_field_rect(&mn, &mx)) {
+            float d = g_pixel_density;
+            g_ime_rect = {(int)(mn.x / d), (int)(mn.y / d), (int)((mx.x - mn.x) / d), (int)((mx.y - mn.y) / d)};
+            g_ime_send = true;
+        }
+    }
+    // the pieces (and, the menu open over the game, the small copy of the game image they read): only with the menu or
+    // the name entry up
+    bool pieces = open || kbd || touch_title_box();
+#ifdef __APPLE__
+    id<MTLTexture> scene = g_scene;
+    g_scene = nil;
+    if (pieces) plastic_frame_begin(dev, cb, target, open ? scene : nil, g_scene_uv, io.MousePos, scale);
+    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+    plastic_set_encoder(pieces ? enc : nil);
+    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
+    plastic_set_encoder(nil);
+    [enc endEncoding];
+#else
+    if (pieces) {
+        plastic_frame_begin_vk(open ? (void *)g_vk_scene_view : NULL, g_vk_scene_uv, (float)tw, (float)th, io.MousePos, scale);
+    }
+    // ImGui records its commands itself. Not into cmd, the window image's command buffer, while the recorder thread
+    // (record.c) may still be recording it (one thread at a time on a command buffer and its pool: f054d8b, the device
+    // loss entering Mabe Village), and without waiting for the recorder to catch up every frame either (a full drain:
+    // 20-30 ms a frame on the Steam Deck): into a secondary command buffer of device.c's, which the recorder executes
+    // in cmd in order - after the uploads queued above (overlay icons). Decided right here, where the draw data is
+    // final, so an overlay turning on during this function can't miss it. (Recorder off: into cmd directly.)
+    void *oc = vk_overlay_begin(cmd);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)oc);  // inside the window image's rendering
+    vk_overlay_end(cmd, oc);
+#endif
 }

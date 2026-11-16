@@ -1,0 +1,52 @@
+#!/bin/sh
+# Fuzz test for runtime/nvn/maxwell/translate.c (see tools/test_translate.c):
+#   MSL output byte-identical to the reference MSL-only translator (REF, default: the commit before the GLSL
+#   backend), and every GLSL translation compiles (shaderc, Vulkan 1.3) and validates (SPIRV-Tools).
+# usage: tools/test_translate.sh [count] [jobs] [mode msl|glsl|both]
+# Needs clang + shaderc + SPIRV-Tools (Windows: MSYS2 ucrt64; macOS: brew install shaderc spirv-tools, or
+# GLSL=0 for the MSL comparison only).
+set -e
+cd "$(dirname "$0")/.."
+COUNT=${1:-20000}
+JOBS=${2:-8}
+MODE=${3:-both}
+REF=${REF:-652e234}
+OUT=build/test_translate
+mkdir -p "$OUT/old" "$OUT/dump"
+git show "$REF:runtime/nvn/maxwell/translate.c" > "$OUT/old/translate.c"
+git show "$REF:runtime/nvn/maxwell/shader.h" > "$OUT/old/shader.h"
+CC=${CC:-clang}
+RENAME="-Dmaxwell_translate=old_maxwell_translate -Dmaxwell_free=old_maxwell_free
+ -Dmaxwell_disassemble=old_maxwell_disassemble -Dmaxwell_gmem_base=old_maxwell_gmem_base
+ -Dmaxwell_gmem_size=old_maxwell_gmem_size -Dmaxwell_dbg_code=old_maxwell_dbg_code -Dmaxwell_dbg_pc=old_maxwell_dbg_pc
+ -Dmaxwell_dbg_reg=old_maxwell_dbg_reg -Dmaxwell_dbg_vs=old_maxwell_dbg_vs
+ -Dmaxwell_gmem_chunk_shift=old_maxwell_gmem_chunk_shift -Dmaxwell_gmem_lazy=old_maxwell_gmem_lazy
+ -Dmaxwell_gmem_fs_miss=old_maxwell_gmem_fs_miss -Dmaxwell_glsl_stack_vars=old_maxwell_glsl_stack_vars
+ -Dmaxwell_gmem_mirror=old_maxwell_gmem_mirror -Dmaxwell_glsl_structured=old_maxwell_glsl_structured
+ -Dmaxwell_glsl_push=old_maxwell_glsl_push -Dmaxwell_const_data=old_maxwell_const_data
+ -Dmaxwell_const_size=old_maxwell_const_size -Dmaxwell_push_base=old_maxwell_push_base -Dmaxwell_push_cap=old_maxwell_push_cap
+ -Dmaxwell_glsl_fast_minmax=old_maxwell_glsl_fast_minmax
+ -Dmaxwell_glsl_quad_deriv=old_maxwell_glsl_quad_deriv -Dmaxwell_glsl_tint_branch=old_maxwell_glsl_tint_branch"
+PRE=""
+case "$(uname -s)" in MINGW*|MSYS*) PRE="-include malloc.h";; esac
+$CC -O2 -w $PRE $RENAME -c "$OUT/old/translate.c" -o "$OUT/old.o"
+$CC -O2 -Wall -c runtime/nvn/maxwell/translate.c -o "$OUT/new.o"
+if [ "${GLSL:-1}" = 1 ]; then
+  $CC -O2 -Wall -DWITH_GLSL tools/test_translate.c "$OUT/new.o" "$OUT/old.o" -o "$OUT/test_translate" \
+    -lshaderc_shared -lSPIRV-Tools-shared
+else
+  $CC -O2 -Wall tools/test_translate.c "$OUT/new.o" "$OUT/old.o" -o "$OUT/test_translate"
+fi
+rm -f "$OUT"/dump/*
+PER=$(( (COUNT + JOBS - 1) / JOBS ))
+i=0
+PIDS=
+while [ $i -lt "$JOBS" ]; do
+  "$OUT/test_translate" runtime/nvn/maxwell/translate.c "$PER" $((i * 7919 + ${SEED:-1})) "$MODE" "$OUT/dump" > "$OUT/log_$i.txt" 2>&1 &
+  PIDS="$PIDS $!"
+  i=$((i + 1))
+done
+FAIL=0
+for p in $PIDS; do wait "$p" || FAIL=1; done  # (each job's exit: 1 on an MSL difference, GLSL compile / validation failure)
+cat "$OUT"/log_*.txt
+exit $FAIL

@@ -1,7 +1,10 @@
-"""Per-instruction replacements applied by gen.py (guest address -> function(gen, addr) returning C code).
+"""The game's code patches, applied by gen.py to the main module (tools/game_addresses.py selects the version's
+address table first). The game's own; none yet.
 
-Derived from LASRecomp (MIT, (c) 2026 Peiikai). The Link's Awakening patches were removed: their
-addresses belong to that game's executable; so were the Pokemon Let's Go ones. Patches for this game go here later.
+PATCHES: guest address -> function(gen, addr) returning the C that replaces the instruction there.
+HOOKS: guest address -> (the instruction word it must hold, (jump targets...), what it is): the generated code calls
+rt_hook(c, site) there first (runtime/hle/hooks.c).
 """
 
 PATCHES = {}
+HOOKS = {}

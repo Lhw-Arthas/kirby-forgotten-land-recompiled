@@ -14,7 +14,7 @@ enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 }
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
 typedef struct { uint64_t off, info; int64_t addend; } Elf64Rela;
 
-static size_t lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, size_t dstlen) {
+size_t rt_lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, size_t dstlen) {  // (LZ4 block; also shader_prep.c)
     const uint8_t *s = src, *se = src + srclen;
     uint8_t *d = dst, *de = dst + dstlen;
     while (s < se) {
@@ -63,7 +63,7 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
         uint32_t csize = *(uint32_t *)(raw + 0x60 + i * 4);
         uint8_t *dst = (uint8_t *)base + seg[i][1];
         if (flags & (1 << i)) {
-            size_t got = lz4_decompress(raw + seg[i][0], csize, dst, seg[i][2]);
+            size_t got = rt_lz4_decompress(raw + seg[i][0], csize, dst, seg[i][2]);
             if (got != seg[i][2]) FATAL("lz4 %s seg %d: %zu != %u\n", path, i, got, seg[i][2]);
         } else {
             memcpy(dst, raw + seg[i][0], seg[i][2]);
@@ -174,25 +174,12 @@ static void relocate(Module *m) {
 
 void loader_load(const char *exefs) {
     char path[1024];
-    // Kirby and the Forgotten Land: the game, the SDK and subsdk0 (multimedia). Same order and bases as
-    // the generated code (Makefile `gen`, tools/gamelib_entry.c).
-    static const struct { const char *name; uint64_t base; } mods[] = {
-        {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}};
-    for (unsigned i = 0; i < sizeof mods / sizeof mods[0]; i++) {
+    const struct { const char *name; uint64_t base; } mods[] = {{"main", MAIN_BASE}, {"sdk", SDK_BASE}};  // (rt.h: may move)
+    for (unsigned i = 0; i < 2; i++) {
         Module *m = &g_modules[g_nmodules++];
         m->name = mods[i].name;
         snprintf(path, sizeof path, "%s/%s", exefs, m->name);
         load_nso(m, path, mods[i].base);
     }
     for (int i = 0; i < g_nmodules; i++) relocate(&g_modules[i]);
-    // LARECOMP_IMAGE_DUMP=<file> (research): the main module as loaded and relocated, for tools that read the image
-    // without decompressing the NSO (the script natives' table, strings)
-    const char *dump = getenv("LARECOMP_IMAGE_DUMP");
-    if (dump && g_nmodules) {
-        FILE *f = fopen(dump, "wb");
-        if (f) {
-            fwrite((const void *)(uintptr_t)g_modules[0].base, 1, g_modules[0].size, f);
-            fclose(f);
-        }
-    }
 }

@@ -1,96 +1,116 @@
-// User settings (larecomp.ini in the data folder), set on the start screen (runtime/ui/launcher_lg.mm).
+// User settings (larecomp.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
-// frame_gen = auto ("auto" in larecomp.ini): the most images per world frame that the display's refresh shows evenly
-// and the GPU keeps up with (runtime/nvn/vulkan/exec.c ip_images)
-#define FG_AUTO 1
-// How the in-between images are made (fg_method): the frame's draws run again with their constants between N-1's and
-// N's (exec.c vk_interp_replay, the default), or N-1's and N's images moved along a motion field toward the image's
-// time (exec.c flow_*: optical flow)
-enum { FG_RERENDER = 0, FG_FLOW = 1 };
 #include <stdbool.h>
 
-enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
+enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
+enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9 /* output_scale.c's mode while dyn_res is on */, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
 // (11 was 67% of the display: larecomp.ini "67%" now loads as RES_Q75)
-// FSR 3.1: temporal (AMD FidelityFX, runtime/nvn/vulkan/fsr3.c), FSR 1 when its DLL is missing
-enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3 };
-// FSR 3.1's presets (AMD's ratios, each axis): the render resolution is the window's divided by it
-enum { FSR3_NATIVE_AA = 0, FSR3_QUALITY = 1, FSR3_BALANCED = 2, FSR3_PERFORMANCE = 3, FSR3_ULTRA_PERFORMANCE = 4 };
-float settings_fsr3_ratio(void);  // 1.0, 1.5, 1.7, 2.0, 3.0
-#define UPSCALE_SHARP UPSCALE_FSR1  // the non-bilinear upscaler (the default)
-// TAA: temporal, on the game's HDR scene before its bloom (runtime/nvn/vulkan/exec.c taa_run), jittered draws
-// FSR 3.1 is the fourth choice: it anti-aliases and upscales; with the others a lower internal resolution reaches the
-// window bilinearly (the upscaler follows: settings_apply_levels)
-enum { AA_OFF = 0, AA_SMAA = 1, AA_TAA = 2, AA_FSR3 = 3 };
-// SSAO and GI quality (F12 menu): their parameters follow (settings_apply_levels); HIGH = the former defaults
-enum { FX_OFF = 0, FX_LOW = 1, FX_MEDIUM = 2, FX_HIGH = 3, FX_ULTRA = 4 };  // (ultra: SSAO only - high plus light contact shadows)
-enum { VREAD_AUTO = 0, VREAD_COPY = 1, VREAD_DIRECT = 2 };
-// the game's (each of its taps a hard in / out), each tap bilinear (2x2 PCF), each tap a 3x3 tent (4 bilinear lookups)
-enum { SHADOW_GAME = 0, SHADOW_BILINEAR = 1, SHADOW_SMOOTH = 2 };
+enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /* Windows: AMD FSR 1 */ };
+#ifdef __APPLE__
+#define UPSCALE_SHARP UPSCALE_METALFX  // each OS's non-bilinear upscaler (the default)
+#else
+#define UPSCALE_SHARP UPSCALE_FSR1
+#endif
+enum { AA_OFF = 0, AA_SMAA = 1 };
+// the game's shadow map: none, half the Switch's size, or 1 to 4 times it (output_scale_shadow). In menu order.
+enum { SHADOW_OFF = 0, SHADOW_HALF, SHADOW_DEFAULT, SHADOW_2X, SHADOW_3X, SHADOW_4X };
+enum { FPS_TARGET_60 = 0, FPS_TARGET_30 = 1, FPS_TARGET_MIXED = 2 };  // Internal FPS target (pace.c pace_target_30)
+enum { AO_SWITCH = 0, AO_HIGH = 1, AO_OFF = 2 };  // the game's ambient occlusion: the Switch's size, up to twice it (output_scale_ao), or none
+enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTATION = 3 };
+// System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
+// the game picks its text language from it, as it would from the Switch's own system setting, and the menus follow it
+// too (runtime/ui/i18n.mm). LANG_AUTO follows the host's language (macOS / Windows: the user's preferred languages;
+// Linux: $LC_ALL / $LC_MESSAGES / $LANG); the rest are the codes of the languages the game has text for.
+// The ones from N_GAME_LANGUAGES on are the menus' only (pt-BR): the game has no text for them and is told en-US.
+enum { LANG_AUTO = 0, N_GAME_LANGUAGES = 12, N_LANGUAGES = 13 };
+extern const char *const g_language_codes[N_LANGUAGES];  // what the game is told: "ja", "en-US", "es", ...
+extern const char *const g_language_names[N_LANGUAGES];  // ("Auto", "Japanese", ..., "Spanish")
+extern const char *const g_language_endonyms[N_LANGUAGES];  // each in its own language, for the menu ("日本語", "Deutsch")
+
+enum { AUDIO_OUT_STEREO, AUDIO_OUT_51, N_AUDIO_OUTS };
+enum { FPS_OFF, FPS_TOP_LEFT, FPS_TOP_RIGHT, FPS_BOTTOM_LEFT, FPS_BOTTOM_RIGHT, N_FPS_CORNERS };
 
 typedef struct {
+    int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars
     bool fullscreen;
-    int fps;  // 30 (the game's own), 60 or 120 (experimental): the world's rate (runtime/hle/fps60.c; F12 menu, live)
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
-    int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
-    int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (FSR 3.1 with its anti-aliasing,
-                         // else upscaler_pick: settings_apply_levels)
-    int upscaler_pick;   // (older files' upscaler choice: read, no longer used - bilinear unless FSR 3.1)
+    bool res_auto;       // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
+    bool dyn_res;        // Dynamic resolution (its own toggle since 2026-11-12, was res_mode RES_DYNAMIC): up to the
+                         // display's resolution, res_mode set aside while it's on (output_scale.c)
+    int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
+    bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
+    int ao_quality;      // AO_*: the resolution of the game's ambient occlusion
+    int shadow_quality;  // SHADOW_*: the resolution of the game's shadow map
+    int fps_target;      // FPS_TARGET_*: the game's 30 or 60 fps mode, or 30 outdoors (the Field) and 60 indoors
+    int dyn_min;         // Dynamic resolution's lowest render height in lines: 360, 540 or 720
     float volume;        // master volume, 1 = 100%
-    float brightness;    // colour of the game image (F12 menu, runtime/ui/menu.mm; post pass in runtime/nvn/vulkan/exec.c):
-    float contrast;      // 1 = unchanged for all three; brightness / contrast 0.5..1.5, saturation 0..2
-    float saturation;
-    int ssao_level;       // FX_*: SSAO quality (default off); ssao and its parameters follow it
-    int gi_level;         // FX_*: GI quality (default off); gi and its parameters follow it
-    bool fx_custom;       // the SSAO / contact shadow / GI parameters below set by hand (F12 Advanced, saved): the levels
-                          // then only turn the SSAO and the GI on and off, the contact shadows have a switch of their own
-    bool ssao;            // screen-space ambient occlusion on the game's HDR scene (F12 menu; runtime/nvn/vulkan/exec.c)
-    int ssao_samples;     // per pixel: 4 / 6 / 8 (low / medium / high)
-    float ssao_intensity; // 0..3 (default 1.2)
-    float ssao_radius;    // in the game's world units (~cm): 10..400 (default 240)
-    bool ssao_temporal;   // accumulated over frames along the camera motion vectors (exec.c ssao_run)
-    bool contact_on;      // (settings_apply_levels: SSAO ultra) short rays toward the sun in the depth: small objects'
-                          // shadows the shadow map misses (exec.c contact_run)
-    int contact_steps;    // ... their steps along a ray: 4..32 (6)
-    float contact_strength;  // ... how dark: 0..1 (0.35)
-    float contact_length; // ... the rays' length in world units: 10..200 (100)
-    float contact_thickness;  // ... how far behind the depth a step still counts as a hit: 5..100 (30)
-    bool ssao_debug;      // (not saved) the scene shows the occlusion alone
-    bool mv_debug;        // (not saved) the scene shows its camera motion vectors (runtime/nvn/vulkan/exec.c scene_hook)
-    bool mv_objects;      // per-object motion vectors (characters' own motion) when motion vectors are in use (default on)
-    float taa_sharpness;  // TAA: RCAS sharpening at the present, 0..1 (default 0.5)
-    float fsr3_sharpness; // FSR 3.1: its RCAS sharpening (AMD's robust CAS), 0..1 (default 0.5; graphics page, under its mode)
-    int fsr3_preset;      // FSR3_*: with the FSR 3.1 upscaler, the render resolution (default FSR3_QUALITY)
-    int frame_gen;        // frame generation: 0 off, FG_AUTO, 2 / 3 / 4 images per world frame (exec.c frame interpolation, any GPU)
-    int fg_method;        // FG_RERENDER / FG_FLOW: how its in-between images are made (F12 advanced tab; live)
-    bool blur_quality;    // the game's downsample / blur / depth-of-field composite read better (runtime/nvn/vulkan/exec.c fx_patch_fs)
-    bool ui2x;            // the interface textures at 2x when cache/ui2x.pak was made (start screen; runtime/ui2x.c)
-    int shadow_filter;    // SHADOW_*: how the shadow map is filtered (F12 menu; textures.c vk_sampler, translate.c shpcf)
-    // screen-space indirect light, one bounce (F12 menu / advanced; runtime/nvn/vulkan/exec.c gi_run). World units ~cm
-    bool gi;
-    float gi_intensity;   // 0..4 (default 2): x the diffuse reflectance (0.5)
-    float gi_radius;      // the rays' reach: 50..1000 (default 300)
-    float gi_thickness;   // depth tolerance of a hit: 5..100 (default 25)
-    int gi_rays;          // per GI pixel: 1..8 (default 4)
-    int gi_steps;         // depth checks per ray: 4..32 (default 8)
-    int gi_div;           // GI resolution: 2 half, 3 third, 4 quarter of each axis (default 2)
-    bool gi_temporal;     // accumulated over frames along the camera motion vectors (default on)
-    bool gi_debug;        // (not saved) the indirect light alone, shown at the present
-    float mouse_sens;    // mouse aim (the virtual gyro, runtime/hle/input.c): degrees per pixel
-    float stick_deadzone;  // a controller's sticks: the share of their travel read as rest (runtime/hle/input.c)
+    int audio_out;       // AUDIO_OUT_*: speaker layout of the game's sound (runtime/services/audio.c)
     bool reverb;         // room reverb effect
     bool movie_audio;
-    bool show_fps;
-    bool dpad_move;      // the d-pad (and arrow keys) move the player like the stick
-    bool render_thread;  // the backend runs on its own thread (runtime/nvn/vulkan/renderthread.c); default on
-    int vertex_read;     // VREAD_*: where the GPU reads vertex and index data (runtime/nvn/vulkan/exec.c)
-    char game_lang[8];   // the game's language code ("en-US", "es"...: runtime/mods.c game_language)
-    char mod[1024];      // the active mods (mods/<name>/), '|' between them, the first one's files win; empty = none (runtime/mods.h)
+    bool frame_interp;   // Frame Generation: extra images between the game's frames (runtime/nvn/interp.c)
+    bool metal_hud;      // macOS: Apple's Metal Performance HUD over the game (runtime/nvn/metal.m metal_hud_apply)
+    int show_fps;        // FPS_*: the frame rate counter's corner (FPS_OFF: none)
+    int fps_corner;      // FPS_* (not off): the corner Show FPS goes back to when turned on (the menu's Position row)
+    bool fps_advanced;   // Show advanced information: the frame rate counter as a developer overlay (menu.mm perf_overlay)
+    bool rumble;         // controller vibration from the game (runtime/hle/input.c)
+    int rumble_strength; // its intensity, percent (25 / 50 / 75 / 100)
+    bool bg_input;       // controllers keep working while the window isn't in front (SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)
+    bool pause_unfocused; // the game stops while its window isn't in front (runtime/hle/vi.c)
+    bool remember_window; // the window opens at the size it was closed at (runtime/paths.c rt_window_remember)
+    int window_w, window_h; // that size, in points (0: none saved yet)
+    int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
+    int prompts;         // PROMPTS_*: our menus' button glyphs (auto = follow the controller SDL reports): hle/input.c
+    // Button layout "Xbox / PlayStation": on Xbox / PlayStation pads the game's A and B swap (A on the bottom button; X / Y
+    // keep the Switch's positions), and our menus confirm with the bottom button (runtime/ui/pad_nav.mm)
+    bool face_by_label;
+                         // positions (bottom = A, right = B, left = X, top = Y): runtime/hle/bindings.c bind_pad_host
+    bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
+    bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
+    bool onedrive_kept;  // the start screen's OneDrive warning (Windows) was answered with Keep here
+    // touch screens (runtime/ui/mobile/touch_controls.mm)
+    int touch_mode;      // 0 Auto (while no controller is connected), 1 Always, 2 Off
+    bool touch_stick_fixed;  // the touch stick stays in its place (else its base comes to the thumb)
+    bool touch_dpad;  // the on-screen stick drawn and read as an 8-way D-pad (mobile/touch_controls.mm)
+    bool touch_edit_button;  // the on-screen button (top, beside the menu's) that opens the layout editor
+    float touch_opacity; // 0.15 .. 1
+    float touch_size;    // 0.6 .. 1.6 (1 = the default layout)
+    // the layout editor (touch_controls.mm): per control, moved (its place: share of the screen), size (x), hidden;
+    // saved as touch_ctl_<name> = x, y, size, hidden
+#define TOUCH_NCTL 14
+    bool touch_moved[TOUCH_NCTL];
+    float touch_pos[TOUCH_NCTL][2];
+    float touch_scale[TOUCH_NCTL];
+    bool touch_hidden[TOUCH_NCTL];
 } Settings;
 
+
+extern const char *const g_audio_outs[N_AUDIO_OUTS];  // (the menu's names: Stereo, 5.1)
+
 extern Settings g_settings;
+// The FPS target in effect: Dynamic resolution's own (user 2026-11-12) - with a resolution of the player's choosing
+// the frame pacer decides (pace.c), as at 60
+static inline int settings_fps_target(void) { return g_settings.dyn_res ? g_settings.fps_target : FPS_TARGET_60; }
+
+const char *touch_control_name(int i);  // the on-screen controls' ini names (touch_ctl_<name>), "" past TOUCH_NCTL
 
 void settings_load(void);
 void settings_save(void);
-void settings_clamp_color(void);  // brightness / contrast / saturation / SSAO into their ranges
-void settings_apply_levels(void);  // the SSAO / GI parameters from their levels, the upscaler from the anti-aliasing and pick
+// At device init: the defaults that depend on the GPU. integrated (Vulkan: an integrated GPU; never on macOS): plain
+// bilinear upscaling instead of the sharp upscaler, whose pass at the window's size costs as much as the game's frame
+// there (UHD 770: FSR 1 + SMAA 8 ms of GPU per frame at 1080p, 20 ms at 4K), and Dynamic resolution instead of Match
+// display. A player's own choice is kept. Anti-aliasing is off by default everywhere. LARECOMP_INTEGRATED=0/1 (test):
+// treat the GPU as dedicated / integrated.
+void settings_resolve_defaults(bool integrated);
+extern int g_default_upscaler;  // UPSCALE_*: what the menu shows as the default
+extern int g_default_res_mode;  // RES_*: likewise
+// An integrated GPU (as settings_resolve_defaults was told): the fixed 1x renders 1280x720 there, what the game itself
+// picked on such a GPU (runtime/nvn/output_scale.c)
+extern bool g_gpu_integrated;
+// The language code to serve the game ("es", "en-US", ...): the setting, or the host locale for LANG_AUTO (en-US for a
+// language of the menus only)
+const char *settings_language(void);
+// The menus' language code: the setting's, or the host locale's (pt-BR too, which the game itself doesn't have)
+const char *settings_menu_language(void);
+// That code's name for the menu ("Spanish")
+const char *settings_language_name(void);

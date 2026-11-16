@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "cpu.h"
 
@@ -20,27 +22,39 @@
 #endif
 
 // GAMELIB_ID (-D, from the Makefile): a hash of the generator and the headers the game code is compiled against. A
-// library's own id is that plus "-" and the CPU level it was compiled for (gamelib_id()); one built with another id is
-// rebuilt, not loaded. (tools/gamelib_entry.c gets the full id as its GAMELIB_ID.)
+// library built with another one is rebuilt, not loaded. A library's own id (its .id file, GameLibTables.id) is
+// GAMELIB_ID-<the first 16 hex digits of the game's main build ID>: switching game versions rebuilds it too.
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif
-#define GAMELIB_ABI 3  // (3: FN_ENTER calls the function hooks, runtime/fnhook.c)
-#define GAMELIB_MAX_MODULES 4
+#define GAMELIB_ABI 1
+#define GAMELIB_FULL_ID_SIZE 96
 
-// One table per recompiled module, in load order (main, sdk, subsdk0, subsdk1: runtime/loader.c).
-typedef struct {
-    const char *name;
-    const uint64_t *addrs;  // sorted guest addresses
-    const GuestFn *fns;     // the functions at them
-    const uint64_t *count;
-} GameLibModule;
+// The id a library for the game files in game_dir has (<id>-<build ID>, id = GAMELIB_ID, or the iOS build's for an
+// export from the desktop: runtime/gamebuild.c); false when exefs/main is unreadable.
+static inline bool gamelib_full_id_for(const char *id, const char *game_dir, char *out, size_t size) {
+    char path[1100];
+    unsigned char hdr[0x60];
+    snprintf(path, sizeof path, "%s/exefs/main", game_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr && !memcmp(hdr, "NSO0", 4);
+    fclose(f);
+    if (!ok) return false;
+    int n = snprintf(out, size, "%s-", id);
+    for (int i = 0; i < 8 && n + 2 < (int)size; i++) n += snprintf(out + n, size - n, "%02X", hdr[0x40 + i]);
+    return true;
+}
+static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size) {
+    return gamelib_full_id_for(GAMELIB_ID, game_dir, out, size);
+}
 
 typedef struct {
     uint32_t abi;    // GAMELIB_ABI
-    const char *id;  // GAMELIB_ID
-    uint32_t nmods;
-    GameLibModule mods[GAMELIB_MAX_MODULES];
+    const char *id;  // GAMELIB_ID-<build ID> (gamelib_full_id)
+    const uint64_t *main_addrs, *sdk_addrs;  // sorted guest addresses
+    const GuestFn *main_fns, *sdk_fns;       // the functions at them
+    const uint64_t *main_count, *sdk_count;
 } GameLibTables;
 
 // The library's one exported function (tools/gamelib_entry.c).
@@ -58,11 +72,9 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size);
 const GameLibTables *gamelib_tables(void);
 // True when a library usable with this build is in one of those places (without loading it).
 bool gamelib_present(const char *game_dir);
-// The CPU level the game code is built for on this machine: "v3" (x86-64-v3: AVX2, FMA, BMI2) when the CPU has it, else
-// "v2" (x86-64-v2: SSE4.2, slower); LARECOMP_GAME_CPU=v2 asks for v2 on a v3 CPU. "base" off x86-64 (no level).
-const char *gamelib_cpu_level(void);
-// The id a library must carry to be loaded here: GAMELIB_ID "-" gamelib_cpu_level().
-const char *gamelib_id(void);
+// iOS only: the app's own library (its id's GAMELIB_ID matches) - the game's build ID it was made for (16 hex digits,
+// the id's last part), whatever game files are there. false: none.
+bool gamelib_built_for(char *out, size_t size);
 
 #ifdef __cplusplus
 }
