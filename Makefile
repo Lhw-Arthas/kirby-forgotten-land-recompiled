@@ -5,6 +5,13 @@
 # iOS: `make PLATFORM=ios` on a Mac, after `make deps-ios`: Metal renderer, the game code a framework in the app.
 UNAME := $(shell uname -s)
 include game/game.mk
+# WORK=<folder>: the game files (extracted/), the generated code and the build outside the repository, as the launcher's
+# developer mode and the scripted runs (tools/run_scripted.sh) use them
+ifneq ($(WORK),)
+B    ?= $(WORK)/build
+GEN  ?= $(WORK)/generated
+GAME ?= $(WORK)/extracted
+endif
 comma := ,
 ifneq ($(filter MINGW% MSYS% CYGWIN% Windows_NT,$(UNAME) $(OS)),)
 PLATFORM := windows
@@ -402,56 +409,10 @@ ios-sim-test: ios-sim
 dmg: app
 	tools/make_dmg.sh
 
-# Windows: build/dist/LAS Recomp-<version>-windows.zip, top folder "LAS Recomp/": the exe, what the start screen builds
-# the game code with on the player's machine (make gen-helper,
-# tools/fetch_zig.sh slimmed by tools/zig_slim.sh: its runtime built ahead of time, gamelib-src/, the exe's import library)
-# and the DLLs they load (runs without MSYS2). No game code. The exe is a release build in $(WIN_B):
-# linked against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build) and without a console window
-# (RELEASE=1: the log goes next to the exe - lasrecomp.log is the latest run, plus up to five recent
-# lasrecomp-backup-*.log - and fatal errors show a message box). Its DLLs are looked up
-# with build/deps-win/bin first (the FFmpeg DLL names are the same as MSYS2's GPL ones). vulkan-1.dll is left
-# out: every Vulkan driver installs the loader in System32. Saves and game files go next to the exe at run time.
-# Needs: Windows 10+ x64, a Vulkan 1.3 driver, an AVX2 CPU (GENARCH x86-64-v3; checked at startup).
-# ARM64 (experimental, from an MSYS2 CLANGARM64 shell): the same steps give LAS Recomp-<version>-windows-arm64.zip; its
-# helpers are built with an x64 Python 3.12 (GEN_PY=...: capstone / unicorn have no ARM64 Windows wheels) and run
-# under emulation, everything else is ARM64.
-DIST     := build/dist/LAS Recomp
-WIN_B    := build/win-release
-# the zip's platform name, as the update check names it (runtime/ui/launcher.mm LARECOMP_PLATFORM)
-WINZIP   := windows$(if $(filter aarch64,$(WINARCH)),-arm64)
+# Windows release: `make dist` is tools/dist.mk's (included below), not LAS's. deps-windows (the LGPL FFmpeg) and gen-helper
+# (below) are LAS's, and dist.mk uses both.
 deps-windows:
 	tools/build_deps_windows.sh
-dist:
-	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
-	@[ -d build/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
-	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 $(WIN_B)/lasrecomp.exe
-	! nm $(WIN_B)/lasrecomp.exe | grep ' f_70' >/dev/null  # (no game code inside)
-	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
-	cp $(WIN_B)/lasrecomp.exe $(WIN_B)/lasrecomp.dll.a "$(DIST)/"
-	tools/zig_slim.sh $(strip $(filter-out -Iruntime,$(GENFLAGS)))  # (zig with its runtime built ahead of time)
-	cp -R build/helper/lasgen "$(DIST)/"
-	cp -R build/zig-slim "$(DIST)/zig"
-	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
-	    "$(DIST)/gamelib-src/"
-	cp docs/icon/icon_1024.png "$(DIST)/icon.png"
-	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"  # (start screen font, OFL)
-	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
-	cp third_party/fonts/DejaVu/DejaVuSans.ttf third_party/fonts/DejaVu/DejaVuSans-Bold.ttf "$(DIST)/"  # (last-resort fonts, free license)
-	cp third_party/fonts/DejaVu/LICENSE "$(DIST)/DejaVu-LICENSE.txt"
-	cp README.md LICENSE "$(DIST)/"  # (licenses and source links of the bundled components: README "License")
-	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/lasrecomp.exe | awk '(/ucrt64/ || /clangarm64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
-	    xargs -I{} cp -u {} "$(DIST)/"
-	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
-	# (no path of this machine inside: build/deps-win, debug info, zig's runtime. Not on CI: its paths name no one)
-	if [ "$${CI:-}" != true ]; then \
-	    case "$$(basename "$$(cygpath -u "$$USERPROFILE")")" in runner|runneradmin) h= ;; *) h=$$(cygpath -m "$$USERPROFILE") ;; esac; \
-	    ! grep -rlaiF -e "$(CURDIR)" -e "$$(cygpath -m '$(CURDIR)')" -e "$$(cygpath -w '$(CURDIR)')" \
-	        $${h:+-e "$$h" -e "$$(cygpath -w "$$h")"} "$(DIST)"; fi
-	cd build/dist && if command -v zip >/dev/null; then zip -qr "LAS Recomp-$(VERSION)-$(WINZIP).zip" "LAS Recomp"; \
-	    else /c/Windows/System32/tar.exe -a -cf "LAS Recomp-$(VERSION)-$(WINZIP).zip" "LAS Recomp"; fi
-	@echo "build/dist/LAS Recomp-$(VERSION)-$(WINZIP).zip"
-
 # The game code generator's Python (tools/lasgen.spec, frozen by PyInstaller in its own venv, build/gen-venv).
 # PyInstaller only builds for the OS it runs on.
 # Windows x86-64: from the MSYS2 shell with a python.org CPython 3.12, e.g.
@@ -487,7 +448,13 @@ appimages:
 	tools/linux/appimage.sh x86_64
 	tools/linux/appimage.sh aarch64
 
+include tools/dist.mk
+
 .PHONY: dmg all gen gen-helper gen-objs runtime-objs deps deps-windows app dist appimage appimages
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c
+
+# the CI checks and the static checks (branches rebase/ci and verify/static): absent until those are merged
+-include tools/ci/ci.mk
+-include tools/verify/verify.mk
