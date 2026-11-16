@@ -1078,10 +1078,11 @@ void renderer_slow_counters(uint64_t *submits, uint64_t *gpu_wait_ns, uint64_t *
 // (shader code addresses and content hashes, as in "[shader] slow build" / shader_variants.txt, and how long they
 // have been skipped without a break). "building" for tens of seconds is a build that never finishes.
 enum { SK_NO_PROGRAM, SK_NO_STAGES, SK_PROG_BUILDING, SK_PROG_FAILED, SK_PIPE_BUILDING, SK_PIPE_FAILED, SK_CS_BUILDING,
-       SK_CS_FAILED, SK_TOPOLOGY, SK_DEBUG_SKIP, SK_HIDDEN, SK_N };
+       SK_CS_FAILED, SK_TOPOLOGY, SK_DEBUG_SKIP, SK_HIDDEN, SK_CS_NO_IMAGE, SK_N };
 static const char *const skip_names[SK_N] = {
     "no program", "program missing a stage", "program building", "program failed", "pipeline building", "pipeline failed",
-    "compute building", "compute failed", "topology", "debug skip list", "hidden on purpose"};
+    "compute building", "compute failed", "topology", "debug skip list", "hidden on purpose",
+    "compute image not bound"};
 static int log_skips = -1;  // (-1: not read yet: the first skip reads it)
 static uint64_t skip_n[SK_N];
 #define SKIP_TOP 32
@@ -2704,6 +2705,18 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     uint32_t tic = h & 0xFFFFF;
     if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) return NULL;
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+}
+
+// The storage view of the image an image slot (SUST) names: image handles follow the texture ones from 0x120
+// (translate.c IMAGE_HANDLES), each an index into the texture pool (objects.c nvnDeviceGetImageHandle). (From the v0.2.0
+// runtime, 382e8cb.)
+static VkImageView shader_image_view(int stage, const ShaderTexture *t) {
+    int k = ((int)t->handle_offset - 0x120) / 8;
+    uint64_t h = k >= 0 && k < 8 ? st.img[stage][k] : 0;
+    uint32_t id = (uint32_t)(h & 0xFFFFF);
+    if (!h || !st.tpool || id >= (uint32_t)st.tpool->count) return VK_NULL_HANDLE;
+    NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[id];
+    return e->tex ? vk_storage_view(e->tex, &e->view, e->has_view, t->type) : VK_NULL_HANDLE;
 }
 
 static bool is_attachment(NvnTexture *t) {
@@ -5867,6 +5880,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_fr[sg][ti][0] = fr[0]; tex_fr[sg][ti][1] = fr[1];
             }
             w[n].pImageInfo = &ii[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding >= 32 && (int)b->binding - 32 < si->ntex) {
+            ii[n] = (VkDescriptorImageInfo){VK_NULL_HANDLE, shader_image_view(stage, &si->tex[b->binding - 32]), VK_IMAGE_LAYOUT_GENERAL};
+            w[n].pImageInfo = &ii[n];  // (never null: dispatch_compute skips a dispatch whose image is missing)
         } else if (is_ubo(b->type) && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
@@ -6394,6 +6410,8 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             LOG("\n");
         }
     }
+    for (int i = 0; i < cp->si->ntex; i++)  // (an image slot the game left unbound, or a texture without storage usage)
+        if (cp->si->tex[i].is_image && !shader_image_view(5, &cp->si->tex[i])) { SKIP_CS(SK_CS_NO_IMAGE); return; }
     st_cs_stores = cp->si->uses_gmem_store;
     snap_apply(5, 0xFFFF);  // (overlap) every bound slot: the probe / copy decision per range, before gfast and the sets read the table
     vk_end_pass();

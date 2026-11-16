@@ -51,11 +51,18 @@ static uint64_t ldc(int d, int a, int idx, uint32_t off, int size) {
            (uint64_t)idx << 36 | (uint64_t)size << 48;
 }
 
+// LDS / STS Rd, [Ra + off]: shared memory (compute only). Sizes: 0 U8, 1 S8, 2 U16, 3 S16, 4 32-bit, 5 .64, 6 .128
+static uint64_t lds(int d, int a, uint32_t off, int size) {
+    return 0xef48000000000000ull | PT_GUARD | (uint64_t)d | (uint64_t)a << 8 | (uint64_t)(off & 0xFFFFFF) << 20 | (uint64_t)size << 48;
+}
+static uint64_t sts(int d, int a, uint32_t off, int size) { return lds(d, a, off, size) | 1ull << 52; }
+
 typedef struct {
     const char *name;
     uint64_t insn[6];  // 0-terminated
     const char *var;   // the register / predicate to check
     uint32_t expect;
+    bool compute_only;
 } Case;
 
 enum { LT = 1, GT = 4, AND = 0, OR = 1 };
@@ -65,7 +72,8 @@ enum { LT = 1, GT = 4, AND = 0, OR = 1 };
 static const Case *cases(int *n) {
     static Case c[64];
     int k = 0;
-#define CASE(nm, var_, exp_, ...) c[k++] = (Case){nm, {__VA_ARGS__, 0}, var_, exp_}
+#define CASE(nm, var_, exp_, ...) c[k++] = (Case){nm, {__VA_ARGS__, 0}, var_, exp_, false}
+#define CASE_CS(nm, var_, exp_, ...) c[k++] = (Case){nm, {__VA_ARGS__, 0}, var_, exp_, true}
     // I2I: .SAT compares in the source's signedness and saturates 32-bit destinations too
     CASE("I2I.U8.U32.SAT 0xffffffff", "r0", 0xFFu, mov32i(1, 0xFFFFFFFFu), i2i(0, 1, 0, false, 2, false, true, false, false));
     CASE("I2I.U16.U32.SAT 0x12345", "r0", 0xFFFFu, mov32i(1, 0x12345u), i2i(0, 1, 1, false, 2, false, true, false, false));
@@ -105,6 +113,12 @@ static const Case *cases(int *n) {
     CASE("LDC.64 R4, c[3][R5+4] (low)", "r4", 0x1003u, mov32i(5, 8), ldc(4, 5, 3, 4, 5));
     CASE("LDC.64 R4, c[3][R5+4] (high)", "r5", 0x1004u, mov32i(5, 8), ldc(4, 5, 3, 4, 5));
     CASE("LDC R4, c[3][R4+4]", "r4", 0x1003u, mov32i(4, 8), ldc(4, 4, 3, 4, 4));
+    // LDS / STS: one array of words shared by the workgroup; sub-word stores keep the word's other bytes
+    CASE_CS("STS [R2+4] / LDS [20]", "r0", 0x12345678u, mov32i(1, 0x12345678u), mov32i(2, 16), sts(1, 2, 4, 4), lds(0, 255, 20, 4));
+    CASE_CS("STS.U8 into a stored word", "r0", 0xAABB11DDu, mov32i(1, 0xAABBCCDDu), sts(1, 255, 8, 4), mov32i(3, 0x11), sts(3, 255, 9, 0), lds(0, 255, 8, 4));
+    CASE_CS("LDS.S16 sign-extends the high half", "r0", 0xFFFF8000u, mov32i(1, 0x8000FFFFu), sts(1, 255, 0, 4), lds(0, 255, 2, 3));
+    CASE_CS("STS.64 / LDS.64 (high)", "r1", 2u, mov32i(4, 1), mov32i(5, 2), sts(4, 255, 0x40, 5), lds(0, 255, 0x40, 5));
+#undef CASE_CS
 #undef CASE
     *n = k;
     return c;
@@ -115,6 +129,7 @@ static const char prelude[] =
     "#include <cstdint>\n#include <cstdio>\n#include <cstring>\n#include <cstdlib>\n"
     "typedef uint32_t uint; typedef uint64_t ulong;\n"
     "#define long int64_t\n"
+    "#define threadgroup\n"
     "template <class T, class U> static T as_type(U u) { static_assert(sizeof(T) == sizeof(U), \"size\"); T t; memcpy(&t, &u, sizeof t); return t; }\n"
     "template <class T> static T min(T a, T b) { return b < a ? b : a; }\n"
     "template <class T> static T max(T a, T b) { return a < b ? b : a; }\n"
@@ -158,6 +173,7 @@ static int write_glsl(const char *dir) {
         uint64_t prog[16];
         int m = program(&cs[i], prog);
         for (int j = 0; j < 3; j++) {
+            if (cs[i].compute_only && st[j].stage != STAGE_COMPUTE) continue;
             // vertex / fragment: the 0x80-byte program header first (zero, as tools/test_translate.c's; fragment:
             // color target 0 written, output map at 0x30 + 0x48)
             uint8_t buf[0x80 + sizeof prog] = {0};
@@ -207,6 +223,32 @@ static int write_glsl(const char *dir) {
             fputs(s->msl, f);
             fclose(f);
         }
+        maxwell_free(s);
+    }
+    {   // (compute, GLSL) SUST.P.3D through a bindless handle LDC loaded from c[2] (image 1: byte 0x128) becomes an
+        // imageStore on the image slot of that handle; a handle the code computes is refused, not guessed
+        uint64_t sust = 0xeb20000000000000ull | PT_GUARD | 0xFull << 20 | 5ull << 33 | 7ull << 39 | 4ull << 8 | 0;  // [R4..R6], R0..R3, handle R7
+        const Case ok = {.name = "SUST.P.3D, handle from c[2]", .insn = {mov32i(4, 1), ldc(7, 255, 2, 0x128, 4), mov32i(0, 0x3f800000), sust, 0}};
+        const Case no = {.name = "SUST.P.3D, computed handle", .insn = {mov32i(7, 0x128), sust, 0}};
+        uint64_t prog[16];
+        ShaderKey key = {0};
+        key.glsl = 1;
+        ShaderInfo *s = maxwell_translate((const uint8_t *)prog, (size_t)program(&ok, prog) * 8, STAGE_COMPUTE, &key);
+        fprintf(names, "%02d_comp %s\n", n + 1, ok.name);
+        if (!s->msl || !strstr(s->msl, "uniform writeonly image3D t0;") || !strstr(s->msl, "imageStore(t0, ivec3(") ||
+            s->ntex != 1 || !s->tex[0].is_image || s->tex[0].handle_offset != 0x128) {
+            printf("FAIL %s: %s\n", ok.name, s->msl ? "not an imageStore on the handle's image" : s->error);
+            bad++;
+        } else {
+            snprintf(path, sizeof path, "%s/%02d_comp.comp", dir, n + 1);
+            FILE *f = fopen(path, "w");
+            if (!f) { perror(path); return 2; }
+            fputs(s->msl, f);
+            fclose(f);
+        }
+        maxwell_free(s);
+        s = maxwell_translate((const uint8_t *)prog, (size_t)program(&no, prog) * 8, STAGE_COMPUTE, &key);
+        if (s->msl || !strstr(s->error, "image handle")) { printf("FAIL %s: %s\n", no.name, s->msl ? "translated" : s->error); bad++; }
         maxwell_free(s);
     }
     fclose(names);

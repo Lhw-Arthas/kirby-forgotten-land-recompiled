@@ -42,6 +42,7 @@ const uint8_t *maxwell_dbg_vs;
 
 #define RZ 255
 #define LMEM_WORDS 256  // local memory per invocation (1 KB)
+#define SMEM_WORDS 8192  // shared memory of a workgroup indexing it with a register: 32 KB (its own size is not in the code)
 #define PT 7
 
 typedef struct {
@@ -113,7 +114,7 @@ typedef struct {
     uint8_t pred_used[8];
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
-    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
+    bool uses_branches, uses_cc, uses_local, uses_shared, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
@@ -138,7 +139,9 @@ typedef struct {
     bool ao_taps;          // the AO blur's taps follow rscale[65].y (ao_grid_fix)
     bool shadow_tap[2];    // the shadow map's texel size (x, y) is read: shadow_taps
     bool ao_pass;          // the AO pass: white while rscale[65].z > 0 (ao_grid_fix)
+    const uint8_t *label;  // the branch targets among the instruction words (image_handle)
     int lmem_words;        // the local memory array's size in words (lmem_size; MSL: always LMEM_WORDS)
+    int smem_words;        // the shared memory array's size in words (lmem_size)
     // GLSL: each BRX whose jump table was read (brx_table_labels): its targets, so that static_stacks_resolve can walk
     // through it and the structured program can branch on its value (struct_blocks)
     struct BrxTab { size_t at; int n; uint32_t t[256]; bool ahead; } *brx;  // (ahead: struct_blocks' dispatch form)
@@ -927,6 +930,66 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     write_tex_result(c, slot, call, mask, d, RZ, false, false);
 }
 
+// NVN keeps the bound handles in c[2]: textures from 0x20, images from 0x120 (8 bytes each). The backend binds an image
+// slot from the image bound at its handle (vulkan/exec.c shader_image_view); the bank itself is never read.
+#define HANDLE_CBUF 2
+#define IMAGE_HANDLES 0x120
+
+// Whether instruction w may write register r (an over-estimate: true unless it can't)
+static bool may_write(uint64_t w, int r) {
+    int d = (int)bits(w, 0, 8), top = (int)(w >> 52);
+    static const int psetp[] = {0x5b6, 0x4b6, 0x366, 0x367, 0x5bb, 0x4bb, 0x36b, 0x5b8, 0x4b8, 0x368, 0x509, 0x50a, 0x5d2};
+    for (size_t i = 0; i < sizeof psetp / sizeof psetp[0]; i++)
+        if (top == psetp[i]) return false;  // (ISETP FSETP DSETP PSETP CSETP HSETP2: predicates only)
+    // shortcut: arithmetic writes one register; a 64-bit result (DADD ...) into the handle's pair would be missed
+    if ((w >> 60) <= 5 || (w >> 51) == 0xf0c8 >> 3) return d == r;  // (and S2R)
+    if ((w & 0xf400000000000000ull) == 0xd000000000000000ull) {  // TEXS / TLDS / TLD4S: two pairs, Rd and bits 28-35
+        int d1 = (int)bits(w, 28, 8);
+        return (d != RZ && r >= d && r < d + 2) || (d1 != RZ && r >= d1 && r < d1 + 2);
+    }
+    return r >= d && r < d + 4;  // (loads and texture fetches: up to four)
+}
+
+// The c[2] byte offset register r holds at pc: the straight-line code before it must load r with a LDC or MOV from c[2]
+// (no branch target in between, nothing else writing r). -1: not found.
+static int64_t image_handle(Ctx *c, int r, uint32_t pc) {
+    for (size_t j = pc / 8; j-- > 1;) {
+        if (j % 4 == 0) continue;
+        uint64_t w = ((const uint64_t *)c->code)[j];
+        int d = (int)bits(w, 0, 8);
+        uint64_t op = w & 0xfff8000000000000ull;
+        if (op == 0xef90000000000000ull && bits(w, 8, 8) == RZ && bits(w, 36, 5) == HANDLE_CBUF &&
+            r >= d && r < d + (bits(w, 48, 3) == 5 ? 2 : 1))  // LDC c[2][imm] (.64: two handles)
+            return (int64_t)bits(w, 20, 16) + 4 * (r - d);
+        if (op == 0x4c98000000000000ull && bits(w, 34, 5) == HANDLE_CBUF && d == r)  // MOV c[2][imm]
+            return (int64_t)bits(w, 20, 14) * 4;
+        if (c->label[j] || may_write(w, r)) return -1;  // (a join, or an instruction that may write r)
+    }
+    return -1;
+}
+
+// SUST.P (untyped surface store, all four components): data Rd..Rd+3, integer coordinates from Ra, the image bound at
+// handle offset bits 36-48 (bit 51) or bindless through register bits 39-46 (yuzu surface_load_store.cpp layout)
+static void emit_sust(Ctx *c, uint64_t w, uint32_t pc) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), dim = (int)bits(w, 33, 3), hr = (int)bits(w, 39, 8);
+    int64_t off = bits(w, 51, 1) ? (int64_t)bits(w, 36, 13) * 4 : image_handle(c, hr, pc);
+    int type = dim == 0 ? TEXTYPE_1D : dim == 3 ? TEXTYPE_2D : dim == 5 ? TEXTYPE_3D : -1;
+    if (!c->glsl) { fail(c, "sust: GLSL only"); return; }
+    if (c->stage != STAGE_COMPUTE) { fail(c, "sust outside a compute shader"); return; }
+    if (bits(w, 20, 4) != 0xf) { fail(c, "sust: component mask %#x", (unsigned)bits(w, 20, 4)); return; }
+    if (type < 0) { fail(c, "sust: dimension %d", dim); return; }
+    if (off < IMAGE_HANDLES) { fail(c, "sust: image handle r%d not loaded from c[%d] at %#x", hr, HANDLE_CBUF, pc); return; }
+    int s = tex_slot(c, (uint32_t)off / 4, type, false, false);
+    c->info->tex[s].is_image = true;
+    int n = type == TEXTYPE_3D ? 3 : type == TEXTYPE_2D ? 2 : 1;
+    char co[160] = "", v[640] = "";
+    for (int i = 0; i < n; i++) sprintf(co + strlen(co), "%sint(%s)", i ? ", " : "", R(a == RZ ? RZ : a + i));
+    for (int i = 0; i < 4; i++) sprintf(v + strlen(v), "%s%s", i ? ", " : "", F(R(d == RZ ? RZ : d + i)));
+    // shortcut: the data goes out as float4, right for float / unorm images only; an integer image needs a uimage type
+    if (n == 1) sp(&c->body, "    imageStore(t%d, %s, float4(%s));\n", s, co, v);
+    else sp(&c->body, "    imageStore(t%d, int%d(%s), float4(%s));\n", s, n, co, v);
+}
+
 // ------------------------------------------------------------------ instruction translation
 // The game's light-culling compute shader (a 30x17 grid of 64-pixel tiles for the tiled lighting of interiors and
 // caves) turns a tile's pixel column into a view direction with the screen height alone: x = px * 2 / height -
@@ -1181,6 +1244,34 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         } else {
             fail(c, "txq type %d", qt);
         }
+    } else if (OPM(0xdf58000000000000ull, 0xfff8000000000000ull)) {  // TMML: level of detail a sample would use
+        // TEX's layout (index, array, target, mask); coordinates from Ra (layer first). Results are 8.8 fixed point in
+        // the inverse order of textureQueryLod: x = the computed lod, y = the level accessed.
+        uint32_t index = (uint32_t)bits(w, 36, 13);
+        int target = (int)bits(w, 29, 2);
+        bool array = bits(w, 28, 1);
+        uint32_t mask = (uint32_t)bits(w, 31, 4);
+        int type = target == 0 ? (array ? TEXTYPE_1D_ARRAY : TEXTYPE_1D)
+                 : target == 1 ? (array ? TEXTYPE_2D_ARRAY : TEXTYPE_2D)
+                 : target == 2 ? TEXTYPE_3D
+                               : (array ? TEXTYPE_CUBE_ARRAY : TEXTYPE_CUBE);
+        int ncoord = target == 0 ? 1 : target == 1 ? 2 : 3;
+        int slot = tex_slot(c, index, type, false, array);
+        int ar = a + (array ? 1 : 0);
+        char co[160] = "";
+        for (int i = 0; i < ncoord; i++) sprintf(co + strlen(co), "%sas_type<float>(%s)", i ? ", " : "", R(ar + i));
+        const char *gv = ncoord == 1 ? "" : ncoord == 2 ? "vec2" : "vec3", *mv = ncoord == 1 ? "" : ncoord == 2 ? "float2" : "float3";
+        if (c->stage != STAGE_FRAGMENT)  // (no derivatives outside fragment shaders: the base level)
+            sp(&c->body, "    { float2 lq = float2(0.0f);\n");
+        else if (c->glsl)
+            sp(&c->body, "    { vec2 lq = textureQueryLod(t%d, %s(%s)).yx;\n", slot, gv, co);
+        else
+            sp(&c->body, "    { float2 lq = float2(t%d.calculate_unclamped_lod(s%d, %s(%s)), t%d.calculate_clamped_lod(s%d, %s(%s)));\n",
+               slot, slot, mv, co, slot, slot, mv, co);
+        int n = 0;
+        for (int i = 0; i < 2; i++)
+            if ((mask & (1u << i)) && d + n < RZ) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = uint(int(lq[%d] * 256.0f));\n", d + n, i); n++; }
+        sp(&c->body, "    }\n");
     } else if (OPM(0x5080000000000000ull, 0xfff8000000000000ull)) {  // MUFU
         int fn = (int)bits(w, 20, 4);
         const char *x = NA(F(R(a)), bits(w, 48, 1), bits(w, 46, 1));
@@ -1790,12 +1881,17 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         icmp_expr(cmp, (int)bits(w, 49, 3), cv, "0u", bits(w, 48, 1));
         sprintf(t, "(%s ? %s : %s)", cmp, R(a), bv);
         set_reg(c, d, t);
-    } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) || OPM(0xef50000000000000ull, 0xfff8000000000000ull)) {  // LDL / STL
-        // thread-private local memory, modelled as a word array (byte/short accesses within a word)
-        bool store = bits(w, 52, 1);
+    } else if (OPM(0xef40000000000000ull, 0xffe0000000000000ull)) {  // LDL / LDS / STL / STS (bit 51: shared)
+        // thread-private local memory / the workgroup's shared memory, modelled as word arrays (byte/short accesses
+        // within a word)
+        bool store = bits(w, 52, 1), shared = bits(w, 51, 1);
         int size = (int)bits(w, 48, 3);
         int32_t off = (int32_t)sbits(w, 20, 24);
-        c->uses_local = true;
+        if (shared && c->stage != STAGE_COMPUTE) { fail(c, "shared memory outside a compute shader"); return; }
+        const char *mem = shared ? "smem" : "lmem";
+        int words = shared ? c->smem_words : c->lmem_words;
+        if (shared) c->uses_shared = true;
+        else c->uses_local = true;
         char addr[128];
         if (a == RZ) sprintf(addr, "%du", off);
         else sprintf(addr, "(%s + %du)", R(a), (uint32_t)off);
@@ -1805,19 +1901,23 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             if (size < 4) {
                 static const char *const ext[] = {"(v >> sh) & 0xFFu", "uint(int(char((v >> sh) & 0xFFu)))", "(v >> sh) & 0xFFFFu",
                                                   "uint(int(short((v >> sh) & 0xFFFFu)))"};
-                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = lmem[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", c->lmem_words - 1, d, ext[size]); }
+                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = %s[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", mem, words - 1, d, ext[size]); }
             } else {
                 for (int k = 0; k < nw; k++)
-                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = lmem[((la >> 2) + %du) & %du];\n", d + k, k, c->lmem_words - 1); }
+                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = %s[((la >> 2) + %du) & %du];\n", d + k, mem, k, words - 1); }
             }
         } else {
             if (size < 4) {
                 uint32_t m = size < 2 ? 0xFFu : 0xFFFFu;
-                sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; lmem[i] = (lmem[i] & ~(0x%xu << sh)) | ((%s & 0x%xu) << sh);\n",
-                   c->lmem_words - 1, m, R(d), m);
+                if (shared && c->glsl)  // (atomic: other invocations may store the word's other bytes at the same time)
+                    sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; atomicAnd(smem[i], ~(0x%xu << sh)); atomicOr(smem[i], (%s & 0x%xu) << sh);\n",
+                       words - 1, m, R(d), m);
+                else
+                    sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; %s[i] = (%s[i] & ~(0x%xu << sh)) | ((%s & 0x%xu) << sh);\n",
+                       words - 1, mem, mem, m, R(d), m);
             } else {
                 for (int k = 0; k < nw; k++)
-                    sp(&c->body, "      lmem[((la >> 2) + %du) & %du] = %s;\n", k, c->lmem_words - 1, R(d == RZ ? RZ : d + k));
+                    sp(&c->body, "      %s[((la >> 2) + %du) & %du] = %s;\n", mem, k, words - 1, R(d == RZ ? RZ : d + k));
             }
         }
         sp(&c->body, "    }\n");
@@ -1921,6 +2021,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (!c->glsl) sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         else if (c->stage == STAGE_COMPUTE) sp(&c->body, "    barrier();\n");
         else sp(&c->body, "    /* bar */\n");  // GLSL barrier() is compute / tessellation only
+    } else if (OPM(0xeb20000000000000ull, 0xfff0000000000000ull)) {  // SUST.P
+        emit_sust(c, w, pc);
     } else {
         fail(c, "unknown instruction %016llx at %#x", (unsigned long long)w, pc);
     }
@@ -2341,6 +2443,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
+        if (t->is_image) {  // (stores only: no format qualifier, shaderStorageImageWriteWithoutFormat)
+            sp(&s, "layout(set = %d, binding = %d) uniform writeonly %s t%d;\n", set, 32 + i,
+               t->type == TEXTYPE_3D ? "image3D" : t->type == TEXTYPE_2D ? "image2D" : "image1D", i);
+            continue;
+        }
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
@@ -2378,6 +2485,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (glsl_early_tests(c)) sp(&s, "layout(early_fragment_tests) in;\n");
     } else {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
+        if (c->uses_shared) sp(&s, "shared uint smem[%d];\n", c->smem_words);
     }
     sp(&s, "void main() {\n");
     if (stage == STAGE_VERTEX) {
@@ -2507,6 +2615,10 @@ static int64_t brx_table_ldc(const uint8_t *code, size_t i, size_t end, size_t *
         if (k % 4 == 0) continue;  // (scheduling words)
         seen++;
         uint64_t w = ((const uint64_t *)code)[k];
+        if ((w & 0xfff0000000000020ull) == 0xe240000000000000ull) {  // a BRA forward within (k, i]: both paths stay in
+            int64_t t = norm_target((int64_t)k * 8 + 8 + sbits(w, 20, 24));  // the window the walk checks
+            if (t > (int64_t)k * 8 && t <= (int64_t)i * 8) continue;
+        }
         if ((w & 0xfff0000000000000ull) >= 0xe200000000000000ull && (w & 0xfff0000000000000ull) <= 0xe350000000000000ull)
             return -1;  // flow control between: not straight-line
         if ((w & 0xfff8000000000000ull) == 0xef90000000000000ull && (int)bits(w, 0, 8) == ra) {  // LDC ra, c[idx][Rx + off]
@@ -2526,6 +2638,7 @@ static int64_t brx_table_ldc(const uint8_t *code, size_t i, size_t end, size_t *
                            (w & 0xfff0000000000020ull) != 0xe2a0000000000000ull && (w & 0xfff0000000000020ull) != 0xe2b0000000000000ull))
             continue;
         int64_t t = norm_target((int64_t)k * 8 + 8 + sbits(w, 20, 24));
+        if (k > from && k < i) continue;  // (a forward BRA inside the window: the walk allowed it)
         if (t > (int64_t)from * 8 && t <= (int64_t)i * 8) return -1;
     }
     *from_out = from;
@@ -3149,20 +3262,23 @@ static Ast *ast_build(Ctx *c, SBlock *b, int nb) {
 // x cores (38 MB on an RK3588 for the fixed 1 KB). The size covers every immediate address (RZ + offset). A
 // register-indexed access is bounded by the SPH's local memory size (low + high: the guest compiler's own per-thread
 // need) in graphics stages; compute (no SPH here) and a size of 0 keep LMEM_WORDS, as does a negative immediate.
-static int lmem_size(const uint64_t *code, size_t end, const uint8_t *sph) {
-    uint64_t need = 0;
+// (shared: the shared memory's, from LDS / STS; else the local memory's, from LDL / STL)
+static int lmem_size(const uint64_t *code, size_t end, const uint8_t *sph, bool shared) {
+    uint64_t need = 0, op = shared ? 0xef48000000000000ull : 0xef40000000000000ull;
+    int max = shared ? SMEM_WORDS : LMEM_WORDS;
     bool indexed = false;
     for (size_t i = 0; i < end; i++) {
         if (i % 4 == 0) continue;
         uint64_t w = code[i];
-        if ((w & 0xfff8000000000000ull) != 0xef40000000000000ull && (w & 0xfff8000000000000ull) != 0xef50000000000000ull) continue;
+        if ((w & 0xffe8000000000000ull) != op) continue;  // (bit 52: the store)
         int size = (int)bits(w, 48, 3);
         int64_t off = sbits(w, 20, 24);
         if ((int)bits(w, 8, 8) != RZ) { indexed = true; continue; }
-        if (off < 0) return LMEM_WORDS;  // (wraps to a high address)
+        if (off < 0) return max;  // (wraps to a high address)
         uint64_t e = (uint64_t)off + (size == 5 ? 8 : size >= 6 ? 16 : 4);
         if (e > need) need = e;
     }
+    if (indexed && shared) return SMEM_WORDS;
     if (indexed) {
         uint32_t lo = 0, hi = 0;
         if (sph) { memcpy(&lo, sph + 4, 4); memcpy(&hi, sph + 8, 4); }
@@ -3171,7 +3287,7 @@ static int lmem_size(const uint64_t *code, size_t end, const uint8_t *sph) {
         if (declared > need) need = declared;
     }
     int words = 1;
-    while (words < LMEM_WORDS && (uint64_t)words * 4 < need) words *= 2;
+    while (words < max && (uint64_t)words * 4 < need) words *= 2;
     return words;
 }
 
@@ -3203,9 +3319,11 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (w == 0 && i > 4) break;
         end = i + 1;
     }
-    c->lmem_words = c->glsl ? lmem_size((const uint64_t *)code, end, stage == STAGE_COMPUTE ? NULL : sph) : LMEM_WORDS;
+    c->lmem_words = c->glsl ? lmem_size((const uint64_t *)code, end, stage == STAGE_COMPUTE ? NULL : sph, false) : LMEM_WORDS;
+    c->smem_words = lmem_size((const uint64_t *)code, end, NULL, true);
     // collect branch targets (labels)
     uint8_t *label = calloc(end + 4, 1);
+    c->code = code, c->label = label;
     label[1] = 1;
     bool any_branch = false;
     for (size_t i = 0; i < end; i++) {
@@ -3428,6 +3546,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
+    if (c->uses_shared) sp(&s, "  threadgroup uint smem[%d];\n", c->smem_words);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
