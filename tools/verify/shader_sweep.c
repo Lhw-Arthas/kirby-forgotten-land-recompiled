@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <zstd.h>
 
 #include "../../runtime/nvn/vulkan/shaders.h"
@@ -38,7 +39,7 @@ static uint64_t rd64(const uint8_t *d, size_t o) { uint64_t v; memcpy(&v, d + o,
 // ---------------------------------------------------------------- the game's shaders, deduplicated by code
 // A stage's code is kept from its NVN header (graphics) or first instruction (compute) to the end of its constants.
 typedef struct { uint64_t hash; uint8_t *code; uint32_t len, coff, csize; int slot; } Code;  // slot: nn::gfx stage 0..5
-typedef struct { int code[6]; uint64_t key; int file; } Prog;  // code[slot]: index into codes, -1 none
+typedef struct { int code[6]; uint64_t key; int file; double ms; } Prog;  // code[slot]: index into codes, -1 none; ms: pipeline build
 
 static Code *codes;
 static int ncodes, capcodes;
@@ -64,7 +65,7 @@ static bool code_same(int i, uint64_t h);
 static bool prog_same(int i, uint64_t h);
 
 static int code_add(const uint8_t *d, uint32_t len, uint32_t coff, uint32_t cs, int slot) {
-    uint64_t h = fnv(d, len, 0xcbf29ce484222325ull ^ (uint64_t)slot);
+    uint64_t h = fnv(d, len, 0xcbf29ce484222325ull);  // (runtime/nvn/shader_prep.c shader_code_hash: the game's records)
     int *t = tab_find(code_tab, h, code_same);
     if (*t) return *t - 1;
     *t = ncodes + 1;
@@ -479,7 +480,11 @@ static void run_vk(int prog, int stage, uint32_t *const *spv, const size_t *nw, 
         goto out;
     }
     long before = g_messages;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     VkResult r = nmod == 1 ? compute_pipeline(m[0], l.pl) : graphics_pipeline(m[0], m[1], a, b, l.pl);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    progs[prog].ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
     free_layout(&l);
     char msg[96];
     snprintf(msg, sizeof msg, "pipeline creation: VkResult %d", r);
@@ -543,6 +548,13 @@ static void *worker(void *arg) {
     return NULL;
 }
 
+static int by_ms(const void *a, const void *b) {
+    double x = progs[*(const int *)a].ms, y = progs[*(const int *)b].ms;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static uint64_t code_hash(int c) { return c >= 0 ? codes[c].hash : 0; }
+
 static int by_programs(const void *a, const void *b) {
     const Class *x = a, *y = b;
     return x->programs < y->programs ? 1 : x->programs > y->programs ? -1 : strcmp(x->what, y->what);
@@ -565,9 +577,23 @@ int main(int argc, char **argv) {
     if (!g_tsv) { perror(p); return 1; }
     fprintf(g_tsv, "program\tstage\tphase\tclass\tfile\tmessage\n");
     putenv("LARECOMP_VK_NO_SPIRV_CACHE=1");
+    putenv("__GL_SHADER_DISK_CACHE=0");  // (NVIDIA: every pipeline built cold, as on a first visit)
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     walk(argv[1]);
+    if (getenv("SWEEP_ONLY")) {  // SWEEP_ONLY=<code hash>,...: only the programs with one of these stage codes
+        int n = 0;
+        for (int i = 0; i < nprogs; i++) {
+            bool keep = false;
+            for (int k = 0; k < 6; k++) {
+                char h[20];
+                snprintf(h, sizeof h, "%016llx", (unsigned long long)code_hash(progs[i].code[k]));
+                keep |= progs[i].code[k] >= 0 && strstr(getenv("SWEEP_ONLY"), h);
+            }
+            if (keep) progs[n++] = progs[i];
+        }
+        nprogs = n;
+    }
     long ngfx = 0, ncs = 0;
     for (int i = 0; i < ncodes; i++) codes[i].slot == 5 ? ncs++ : ngfx++;
     printf("files read %ld (%ld .cmp, %ld not decompressed), files with shaders %d, distinct programs %d, distinct stage codes %d (%ld compute)\n",
@@ -596,5 +622,17 @@ int main(int argc, char **argv) {
             fprintf(f, "%8ld %-5s %s  (e.g. %05d)\n", classes[i].programs, STAGE_NAME[classes[i].stage], classes[i].what, classes[i].example);
     }
     if (r) fclose(r);
+    if (g_vk_on) {  // the slowest pipeline builds (the game's first-visit stalls), by stage code hash
+        int *ord = malloc(sizeof *ord * (size_t)(nprogs + 1));
+        for (int i = 0; i < nprogs; i++) ord[i] = i;
+        qsort(ord, (size_t)nprogs, sizeof *ord, by_ms);
+        printf("slowest pipeline builds (ms, vs / cs, fs, file):\n");
+        for (int i = 0; i < nprogs && i < 15; i++) {
+            const Prog *q = &progs[ord[i]];
+            printf("%9.0f %016llx %016llx %s\n", q->ms, (unsigned long long)code_hash(q->code[q->code[5] >= 0 ? 5 : 0]),
+                   (unsigned long long)code_hash(q->code[4]), files[q->file]);
+        }
+        free(ord);
+    }
     return 0;
 }
