@@ -349,8 +349,10 @@ $(B)/third_party/miniz.o: $(MINIZ)/.fetched
 $(B)/rt/zipfile.o: $(MINIZ)/.fetched
 $(B)/rt/zipfile.o: RTFLAGS += -I$(MINIZ)
 
-# Python: tools/venv (macOS, Linux: bin/python, Windows: Scripts/python.exe)
-PY := $(firstword $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
+# Python: .venv (the launcher's developer mode needs it there), else tools/venv (tools/setup_windows.ps1). Windows:
+# Scripts/python.exe; macOS, Linux: bin/python
+PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/python) $(wildcard tools/venv/Scripts/python.exe) \
+            $(wildcard tools/venv/bin/python))
 
 gen:
 	cd tools && for m in $(GAME_MODULES); do n=$${m%%:*}; \
@@ -460,6 +462,6 @@ test-setup-cli: $(EXE)
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c
 
-# the CI checks and the static checks (branches rebase/ci and verify/static): absent until those are merged
--include tools/ci/ci.mk
--include tools/verify/verify.mk
+# the CI checks (make ci-test, make verify) and the static checks (make verify-selftest)
+include tools/ci/ci.mk
+include tools/verify/verify.mk
