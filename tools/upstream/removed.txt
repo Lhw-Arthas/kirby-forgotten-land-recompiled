@@ -107,12 +107,14 @@ tools/tests/patches_v1_0_0.json
 tools/warp_table.py
 
 # Link's Awakening test runs and tests
+tools/dbgfs.sh
 tools/doorjump_test.sh
 tools/dynres_run.sh
 tools/fresh_save.sh
 tools/livesplit_mock.py
 tools/linux/smoketest.sh
 tools/perf_sweep.py
+tools/run.sh
 tools/shot.sh
 tools/stairs_test.sh
 tools/test_field_regions.py
@@ -129,3 +131,6 @@ tools/test_save_romfs_fds.c
 tools/test_host_fs.h
 tools/test_text_speed.c
 tools/test_text_speed.py
+
+# LAS Recomp's issue bot (its workflow, .github/workflows/log_triage.yml, is not in this repo)
+tools/log_triage.py
