@@ -1123,7 +1123,8 @@ static uint64_t cum_build_skips, cum_skips;  // skipped for a build still runnin
 static uint64_t stat_skipped_held;  // of stat_skipped, those in frames vk_build_hold kept off the screen
 #define SKIP(why) do { int w_ = (why); stat_skipped++, cum_skips++; cum_build_skips += w_ == SK_PROG_BUILDING || w_ == SK_PIPE_BUILDING; \
                        if (log_skips) skip_note(w_, false); } while (0)
-#define SKIP_CS(why) do { stat_skipped++, cum_skips++; if (log_skips) skip_note(why, true); } while (0)
+#define SKIP_CS(why) do { int w_ = (why); stat_skipped++, cum_skips++; cum_build_skips += w_ == SK_CS_BUILDING; \
+                          if (log_skips) skip_note(w_, true); } while (0)
 static void skip_log(void) {
     if (log_skips <= 0) return;
     uint64_t total = 0;
@@ -1187,19 +1188,20 @@ static void builds_check(void) {
     pthread_mutex_unlock(&builds_lock);
 }
 
-// At each present (device.c, the render thread). A frame with many draws skipped because their programs or pipelines
-// are still being built (the first visit of an area: hundreds at once) is not shown: the render thread waits here for
-// the builds, up to 10 s a frame, so the game waits with it, and the window keeps the last frame shown. Skipping
-// instead, 2 cores with a cold driver cache showed a black screen for half a minute and more while the game played on
-// (a fifth of the draws missing was enough for black: the lighting pass). A few new programs (an effect seen for the
-// first time) are not held for: those draws pop in as before. begin(): a run of held frames starts. notice(done,
-// total): from a second into the run, 4 times a second, the builds finished since it started of those plus the rest.
+// At each present (device.c, the render thread). A frame with a draw or dispatch skipped because its program or
+// pipeline is still being built is not shown: the render thread waits here for the builds, up to 10 s a frame, so the
+// game waits with it, and the window keeps the last frame shown. Skipping instead, 2 cores with a cold driver cache
+// showed a black screen for half a minute and more while the game played on (a fifth of the draws missing was enough
+// for black: the lighting pass), and an effect seen for the first time popped in a few frames late, after the stage
+// had started (a boss's attacks: hundreds of draws a stage in the tour). begin(): a run of held frames starts.
+// notice(done, total): from a second into the run, 4 times a second, the builds finished since it started of those
+// plus the rest.
 bool vk_build_hold(void (*begin)(void), void (*notice)(int done, int total)) {
     static uint64_t l_draws, l_skips, l_all, since;  // since: the run's first held frame (0: the last frame was shown)
     static int done0;
     uint64_t drawn = cum_draws - l_draws, skipped = cum_build_skips - l_skips;
     int jobs = atomic_load(&jobs_pending);
-    bool hold = skipped >= 16 && (skipped * 3 >= drawn || jobs >= 8);
+    bool hold = skipped > 0;
     if (hold) {
         uint64_t t0 = SDL_GetTicksNS(), painted = 0;
         if (!since) {
