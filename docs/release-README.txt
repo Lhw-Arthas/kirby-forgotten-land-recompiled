@@ -25,11 +25,11 @@ How to start
 2. Open ForgottenLandLauncher.exe. It is not code-signed: if Windows says "Windows protected your PC", click
    "More info" and then "Run anyway". Do the same if it asks about ForgottenLandRecomp.exe.
 3. Click "Select game folder" and pick the folder that holds your exefs and romfs folders.
-4. Click "Build". The launcher copies the game files into this folder, then translates the game code and compiles it
-   for your PC. This takes a while, once: about 16 minutes on a 16-thread PC (most of it compiling; the bar slows
-   down near the end on two very large files, and names the file it is on). Fewer cores take longer. If your game
-   folder has a romfs folder but no romfs.bin, writing that 6 GB image comes first. You can Cancel and Build again
-   later; it starts over from the beginning.
+4. Click "Build". The launcher puts the game files into this folder (Windows links them when your game folder is
+   on the same drive, which is instant; on another drive it copies about 6 GB first), then translates the game code
+   and compiles it for your PC. This takes a while, once: about 16 minutes on a 16-thread PC (most of it compiling;
+   the bar slows down near the end on two very large files, and names the file it is on). Fewer cores take longer.
+   You can Cancel and Build again later; the pieces already compiled are kept, so it carries on from there.
 5. Click "Play". Next time the launcher shows Play straight away.
 
 Controls
@@ -48,8 +48,8 @@ gamecontrollerdb.txt in this folder.
 Updating: unzip a new version over the old folder. If the new version needs the game code built again, the launcher
 says so and offers "Rebuild game code" (about 15 minutes; your game folder is not needed again).
 
-Closing the launcher ends a build in progress (Build again later; it starts over). A game that is running keeps
-running.
+Closing the launcher ends a build in progress (Build again later; it carries on from the pieces already compiled). A
+game that is running keeps running.
 
 Keep the path of this folder short, under about 200 characters (for example C:\Games\ForgottenLandRecomp): Windows
 stops the build at long paths, and the launcher says so before it starts. It also checks the free disk space first.
@@ -57,15 +57,17 @@ stops the build at long paths, and the launcher says so before it starts. It als
 If an antivirus removes or blocks lasgen\lasgen.exe or zig\zig.exe, the build cannot run. Restore them (or unzip again)
 and allow this folder in the antivirus.
 
-Disk space: the game data image (romfs.bin, 5.9 GB) and the game code (about 115 MB) are kept in the extracted
-folder here. A romfs.bin already in your game folder, on the same drive, is hard-linked instead of copied and takes
-no extra space. While building, the translated code and the compiler's files take a few hundred MB more, deleted
-when the build ends. After a successful build the folder you picked is no longer needed by this copy.
+Disk space: the game's data (the romfs, about 6 GB) and the game code (about 115 MB) are kept in the extracted
+folder here. Your romfs folder (or a romfs.bin you picked instead), on the same drive as this folder, is hard-linked
+instead of copied and takes no extra space; on another drive it is copied and takes about 6 GB. The launcher asks for
+6.5 GB free either way. The translated code and the compiler's files take a few hundred MB more and stay in
+extracted\.gamebuild, so a later build or an update compiles only what changed. After a successful build the folder
+you picked is no longer needed by this copy.
 
 Where things are
 ----------------
 Everything stays in this folder:
-- extracted\        the game files and the game code built from them (yours: never share them)
+- extracted\        the game files, the game code built from them and the build's files (yours: never share them)
 - larecomp.ini      settings (the launcher's Settings page changes some of them)
 - save\             saves
 - cache\            shader caches
