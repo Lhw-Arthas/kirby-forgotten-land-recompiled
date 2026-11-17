@@ -46,6 +46,23 @@ check has run and passed.
 | Shader sweep | Every shader translates, validates and builds a pipeline on this PC's driver | `tools/verify/shader_sweep.sh` |
 | Stage tour | Every stage loads and renders without errors | `tools/verify/stage_tour.sh` |
 
+## Stutter on a first visit
+
+The stage tour passes with any amount of stutter, so a change that touches shader builds or frame holds is also
+compared on a cold cache, the way a player's first run sees it:
+
+```sh
+rm -rf <work>/cache    # the pipeline cache
+LARECOMP_VK_COLD=1 TOUR_ONLY='^(Level1/Stage2|CstageFire/Stage01|Level2/Stage1)/' WORK=<work> \
+    bash tools/verify/stage_tour.sh <game folder> <out>
+python tools/verify/hold_stats.py <out>
+```
+
+`LARECOMP_VK_COLD=1` makes every pipeline new to the driver's own cache too. Run each side at least three times,
+alternating. `hold_stats.py` prints the frames held outside area entry (what a player feels as stutter), those of 50 ms
+or more, the area-entry bursts behind the "Preparing graphics" notice, and the frames shown with a few draws late.
+0.3.1 measured on an RTX 3050 Laptop: holds of 50 ms or more 35-37 -> 12 a run, about 60 frames shown with draws late.
+
 ## What no check proves
 
 That the game can be finished. The checks show that every stage's code, data and shaders work and that no known
