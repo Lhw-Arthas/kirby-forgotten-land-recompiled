@@ -31,3 +31,8 @@ export const PHASE_LABEL = {
   translate: 'Translating the game code',
   compile: 'Compiling the game code',
 };
+
+// Mods are read when the game starts and the mods folder may be in use by the setup: leave them alone meanwhile.
+export function modsLocked(s) {
+  return s.running || BUSY_PHASES.includes(s.phase);
+}

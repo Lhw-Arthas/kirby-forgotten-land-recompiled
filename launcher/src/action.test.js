@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BUSY_PHASES, PHASE_LABEL, REBUILD_NOTE, primaryAction, toolsMissing } from './action.js';
+import { BUSY_PHASES, PHASE_LABEL, REBUILD_NOTE, modsLocked, primaryAction, toolsMissing } from './action.js';
 
 const base = { running: false, phase: 'idle', game_dir: 'D:\dump', game_error: null, tools_missing: [], built: true, error: '' };
 
@@ -43,4 +43,11 @@ test('every busy phase has a label', () => {
   for (const p of BUSY_PHASES) assert.ok(PHASE_LABEL[p], p);
   assert.equal(PHASE_LABEL.files, 'Preparing the game files');
   for (const p of BUSY_PHASES) assert.doesNotMatch(PHASE_LABEL[p], /image/i, `${p}: the runtime builds no image`);
+});
+
+test('mods are left alone while the game runs or a build runs', () => {
+  assert.equal(modsLocked(base), false);
+  assert.equal(modsLocked({ ...base, phase: 'failed' }), false);
+  assert.equal(modsLocked({ ...base, running: true }), true);
+  for (const p of BUSY_PHASES) assert.equal(modsLocked({ ...base, phase: p }), true, p);
 });

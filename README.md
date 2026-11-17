@@ -42,6 +42,11 @@ You need:
 The zip's `README.txt` has the controls and what to do when something goes wrong. [CHANGELOG.md](CHANGELOG.md) lists
 what changed.
 
+Mods are the player's own: a folder `mods\<name>\romfs\...` in the install folder replaces the game's RomFS files of the
+same path, and the launcher's Settings page switches them on and off and sets their order. This project makes and ships
+no mod. A 60fps mod by Lhw-Arthas ([#9](https://github.com/scarxity/kirby-forgotten-land-recompiled/pull/9)) is an
+example. The zip's `README.txt` has the details.
+
 The zip also carries a `recomplauncher.json`, so [RecompLauncher](https://recomplauncher.com) can set the game up
 from the same folder, show its settings and start it.
 

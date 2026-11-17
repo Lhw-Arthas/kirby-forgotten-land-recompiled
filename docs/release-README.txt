@@ -37,7 +37,8 @@ How to start
 
 The first time you reach an area, the game may pause on "Preparing graphics for this area... (first visit only)" with
 a progress bar while it builds that area's shaders. Wait for it. On a slow PC this can take 15 to 25 seconds. The
-shaders are kept in the cache folder, so later visits pause about a second.
+shaders are kept in the cache folder, so later visits pause about a second. Inside an area, something you see for
+the first time (a new effect or enemy) may appear a frame late instead of stopping the game.
 
 At the online prompt, choose "Do Not Use": online features do not work.
 
@@ -57,6 +58,22 @@ bind_key_... and bind_pad_... lines. A controller that SDL does not know can be 
 this folder.
 
 To quit, open the menu and choose Quit, or close the window.
+
+Mods
+----
+You can install mods of your own choosing. This project does not make, include or distribute any, and a mod is not
+part of this project: you get it from its author and use it at your own risk. An example is a 60fps mod by Lhw-Arthas
+(PR #9 in the repository, not included here).
+- A mod is a folder that holds a romfs folder. Put it in the mods folder here (the launcher's Settings page has
+  "Open mods folder"), so that a file such as mods\<mod name>\romfs\basil\Scn.bin replaces the game's file of the same
+  path in romfs.
+- The launcher lists the mods on the Settings page. Switch one off with its box, or move it up or down. When two mods
+  have the same file, the one higher in the list wins. The launcher writes the list to mods\mods.txt: one mod name a
+  line, in order, and "-<mod name>" for a mod switched off. You can edit it by hand. Mods it does not list come after
+  the listed ones, in name order, switched on.
+- Changes apply the next time the game starts. The launcher keeps the list locked while the game or a build is running.
+- To turn a mod off, clear its box. To remove it, delete its folder. The game files in extracted\ are never changed.
+- If the game misbehaves, turn all mods off before you report a problem.
 
 Updating
 --------
@@ -84,6 +101,7 @@ Everything stays in this folder:
 - extracted\        the game files, the game code built from them and the build's files (yours: never share them)
 - larecomp.ini      settings (the launcher's Settings page and the in-game menu change them)
 - save\             saves
+- mods\             the mods you installed, and mods.txt, their order
 - cache\            shader caches
 - game.log          the log of the last time the game ran; setup.log, the log of the last build
 - crash-*.log       the logs of the last five crashes (the launcher shows a notice when the game crashes)

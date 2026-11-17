@@ -235,6 +235,7 @@ struct Status {
     detail: Option<String>,
     error: String,
     settings: Vec<(String, String)>,
+    mods: Vec<ModEntry>,
     crash: Option<Crash>,
     packaged: bool,
 }
@@ -411,6 +412,9 @@ impl App {
     }
     fn ini(&self) -> PathBuf {
         self.work.join("larecomp.ini")
+    }
+    fn mods_dir(&self) -> PathBuf {
+        self.work.join("mods")
     }
     /// The times of what `--status` reads: the runtime, the game code and its id, and the RomFS the setup copied (the
     /// folder, or the romfs.bin the player picked instead).
@@ -617,6 +621,7 @@ fn status(app: St) -> Status {
         detail: job.detail.clone(),
         error: job.error.clone(),
         settings: app.settings(),
+        mods: read_mods(&app.mods_dir()),
         crash: app.crash.lock().unwrap().clone(),
         packaged: matches!(app.mode, Mode::Packaged),
     }
@@ -833,6 +838,78 @@ fn set_setting(app: St, key: String, value: String) -> Result<(), String> {
     fs::write(app.ini(), lines.join("\n") + "\n").map_err(|e| e.to_string())
 }
 
+#[derive(Debug, PartialEq, Serialize)]
+struct ModEntry {
+    name: String,
+    on: bool,
+}
+
+/// The mods in `dir` in the order the game applies them, switched off ones in place. This must stay the rule of
+/// runtime/mods.c: a folder holding romfs/ is a mod, mods.txt lists them first (`-name` is off, the first mention wins,
+/// unknown names are ignored), the rest follow in name order, on.
+fn read_mods(dir: &Path) -> Vec<ModEntry> {
+    let mut found: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("romfs").is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.') && n.len() < 256)
+        .collect();
+    found.sort();
+    let listed = String::from_utf8_lossy(&fs::read(dir.join("mods.txt")).unwrap_or_default()).into_owned();
+    let mut mods: Vec<ModEntry> = Vec::new();
+    for line in listed.lines() {
+        let (name, on) = line.strip_prefix('-').map_or((line, true), |n| (n, false));
+        if found.iter().any(|f| f == name) && !mods.iter().any(|m| m.name == name) {
+            mods.push(ModEntry { name: name.into(), on });
+        }
+    }
+    for name in found {
+        if !mods.iter().any(|m| m.name == name) {
+            mods.push(ModEntry { name, on: true });
+        }
+    }
+    mods
+}
+
+/// The whole order, every time: written beside the file and renamed over it, so the game never reads half of it. A name
+/// starting with a dash cannot be listed as on (that line would read as off), so it is left out and stays unlisted.
+fn write_mods(dir: &Path, mods: &[ModEntry]) -> Result<(), String> {
+    let text: String = mods
+        .iter()
+        .filter_map(|m| match (m.on, m.name.starts_with('-')) {
+            (false, _) => Some(format!("-{}\n", m.name)),
+            (true, false) => Some(format!("{}\n", m.name)),
+            (true, true) => None,
+        })
+        .collect();
+    let tmp = dir.join("mods.txt.tmp");
+    fs::write(&tmp, text).and_then(|_| fs::rename(&tmp, dir.join("mods.txt"))).map_err(|e| e.to_string())
+}
+
+fn edit_mods(dir: &Path, name: &str, change: impl FnOnce(&mut Vec<ModEntry>, usize)) -> Result<(), String> {
+    let mut mods = read_mods(dir);
+    let i = mods.iter().position(|m| m.name == name).ok_or("That mod is no longer in the mods folder.")?;
+    change(&mut mods, i);
+    write_mods(dir, &mods)
+}
+
+#[tauri::command]
+fn set_mod(app: St, name: String, on: bool) -> Result<(), String> {
+    edit_mods(&app.mods_dir(), &name, |mods, i| mods[i].on = on)
+}
+
+#[tauri::command]
+fn move_mod(app: St, name: String, up: bool) -> Result<(), String> {
+    edit_mods(&app.mods_dir(), &name, |mods, i| {
+        let j = if up { i.wrapping_sub(1) } else { i + 1 };
+        if j < mods.len() {
+            mods.swap(i, j);
+        }
+    })
+}
+
 #[tauri::command]
 fn dismiss_crash(app: St) {
     *app.crash.lock().unwrap() = None;
@@ -842,6 +919,10 @@ fn dismiss_crash(app: St) {
 fn open_path(app: St, which: String) -> Result<(), String> {
     let p = match which.as_str() {
         "work" => app.work.clone(),
+        "mods" => {
+            fs::create_dir_all(app.mods_dir()).map_err(|e| e.to_string())?;
+            app.mods_dir()
+        }
         "setup_log" => app.work.join("setup.log"),
         "game_log" => app.work.join("game.log"),
         // the file name is the one the backend recorded, never a path from the page
@@ -878,7 +959,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(app)
-        .invoke_handler(tauri::generate_handler![status, set_game_dir, start_setup, cancel_setup, play, set_setting, open_path, dismiss_crash])
+        .invoke_handler(tauri::generate_handler![status, set_game_dir, start_setup, cancel_setup, play, set_setting, set_mod, move_mod, open_path, dismiss_crash])
         .run(tauri::generate_context!())
         .expect("launcher failed to start");
 }
@@ -1241,5 +1322,76 @@ mod tests {
         assert_eq!(t.join().unwrap(), Err("Cancelled.".into()));
         assert!(started.elapsed().as_secs() < 5 && app.job.lock().unwrap().child.is_none());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn mods_in(name: &str, mods: &[&str], file: Option<&str>) -> PathBuf {
+        let dir = scratch(name);
+        for m in mods {
+            fs::create_dir_all(dir.join(m).join("romfs").join("basil")).unwrap();
+        }
+        if let Some(text) = file {
+            fs::write(dir.join("mods.txt"), text).unwrap();
+        }
+        dir
+    }
+
+    fn listed(dir: &Path) -> Vec<(String, bool)> {
+        read_mods(dir).into_iter().map(|m| (m.name, m.on)).collect()
+    }
+
+    fn pairs(v: &[(&str, bool)]) -> Vec<(String, bool)> {
+        v.iter().map(|(n, on)| (n.to_string(), *on)).collect()
+    }
+
+    #[test]
+    fn mods_follow_mods_txt_then_name_order() {
+        let dir = mods_in("mods-order", &["alpha", "beta", "gamma", "delta"], Some("gamma\r\n-alpha\n"));
+        assert_eq!(listed(&dir), pairs(&[("gamma", true), ("alpha", false), ("beta", true), ("delta", true)]));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_and_repeated_names_in_mods_txt_are_ignored() {
+        let dir = mods_in("mods-junk", &["a", "b"], Some("ghost\nb\n-b\nb\n\n-ghost\n-a\na\n"));
+        assert_eq!(listed(&dir), pairs(&[("b", true), ("a", false)]));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_without_romfs_is_not_a_mod() {
+        let dir = mods_in("mods-kinds", &["real", ".hidden"], None);
+        fs::create_dir_all(dir.join("notes").join("exefs")).unwrap();
+        fs::create_dir_all(dir.join("file-romfs")).unwrap();
+        fs::write(dir.join("file-romfs").join("romfs"), "").unwrap();
+        assert_eq!(listed(&dir), pairs(&[("real", true)]));
+        assert!(read_mods(&dir.join("missing")).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn switching_and_moving_mods_is_written_in_full_and_read_back() {
+        let dir = mods_in("mods-write", &["a", "b", "c"], None);
+        edit_mods(&dir, "a", |m, i| m.swap(i, i + 1)).unwrap();
+        edit_mods(&dir, "c", |m, i| m[i].on = false).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("mods.txt")).unwrap(), "b\na\n-c\n");
+        assert!(!dir.join("mods.txt.tmp").exists());
+        assert_eq!(listed(&dir), pairs(&[("b", true), ("a", true), ("c", false)]));
+        assert_eq!(edit_mods(&dir, "gone", |_, _| {}), Err("That mod is no longer in the mods folder.".into()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_mod_dropped_into_a_written_list_comes_after_it_and_a_dash_name_is_not_listed_as_on() {
+        let dir = mods_in("mods-new", &["b", "a"], None);
+        edit_mods(&dir, "b", |m, i| m[i].on = true).unwrap();
+        fs::create_dir_all(dir.join("-x").join("romfs")).unwrap();
+        fs::create_dir_all(dir.join("c").join("romfs")).unwrap();
+        assert_eq!(listed(&dir), pairs(&[("a", true), ("b", true), ("-x", true), ("c", true)]));
+        edit_mods(&dir, "-x", |m, i| m[i].on = false).unwrap();
+        edit_mods(&dir, "c", |m, i| m[i].on = true).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("mods.txt")).unwrap(), "a\nb\n--x\nc\n");
+        edit_mods(&dir, "-x", |m, i| m[i].on = true).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("mods.txt")).unwrap(), "a\nb\nc\n");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

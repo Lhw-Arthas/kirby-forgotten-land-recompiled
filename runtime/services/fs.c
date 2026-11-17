@@ -16,10 +16,27 @@
 #include <pthread.h>
 
 #include "../hle.h"
-// Replacement and added RomFS files, from a folder (LAS Recomp: a randomizer seed's). None without a game layer: the
-// overlay below stays empty.
+#include "../paths.h"
+#include "../mods.h"
+// Player mods (mods.h): the first mod switched on that has the file replaces it. Replacements only (LAS Recomp's
+// overlay below also adds files, from a randomizer seed's folder: none here).
 static const char *romfs_overlay_dir(void) { return NULL; }
-static bool romfs_overlay_file(const char *path, char *host, size_t cap) { (void)path, (void)host, (void)cap; return false; }
+static bool romfs_overlay_file(const char *path, char *host, size_t cap) {
+    static ModName *mods;
+    static int nmods = -1;
+    char dir[1100];
+    snprintf(dir, sizeof dir, "%s/mods", rt_data_root());
+    if (nmods < 0) {
+        nmods = mods_order(dir, &mods);
+        for (int i = 0; i < nmods; i++) LOG("[fs] mod %d: %s\n", i + 1, mods[i]);
+    }
+    for (int i = 0; i < nmods; i++) {
+        struct stat sb;
+        snprintf(host, cap, "%s/%s/romfs/%s", dir, mods[i], path);
+        if (!stat(host, &sb) && S_ISREG(sb.st_mode)) return true;
+    }
+    return false;
+}
 #include "../ipc.h"
 #include "../platform.h"
 #include "../game_addresses.h"
@@ -430,7 +447,7 @@ static void rom_index(void) {
         ov_n++;
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
-    if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
+    if (ov_n) LOG("[fs] mods: %d romfs files replaced\n", ov_n);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
     // The game's own files (before a seed's added files; the crash dialog checks them), their sizes summed (the files
     // that aren't the game's left out: issue #553), and the files that aren't the game's named. Copies of the game code at the root (game_romfs_exefs_copy) are left out.

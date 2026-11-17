@@ -36,6 +36,8 @@ Reproduce the opening and the first stage with `bash tools/run_scripted.sh <name
 - A first visit to an area pauses while its shaders build, on the "Preparing graphics for this area" notice. On a
   2-core PC with a cold cache the pause at the beach was about 15 to 25 s (an older measurement). Fast PCs pause less.
   Later visits use the shader cache: the longest pause on a second run was about 1.2 s, with a cold driver cache.
+- In an area already entered, a new effect or enemy can still pause the picture for up to 33 ms while its shaders
+  build, or appear a frame late (0.3.1; 12 pauses of 50 ms or more a run on the three-stage cold test, down from 36).
 - Rarely, the game crashed after the opening movie while the PC was heavily overloaded: a UI script read an empty
   widget. It did not happen in 15 runs without other load, including runs that starved the game's threads on purpose
   and 3,265 injected pauses.
