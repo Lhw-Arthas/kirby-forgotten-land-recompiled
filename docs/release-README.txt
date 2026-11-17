@@ -37,7 +37,8 @@ How to start
 
 The first time you reach an area, the game may pause on "Preparing graphics for this area... (first visit only)" with
 a progress bar while it builds that area's shaders. Wait for it. On a slow PC this can take 15 to 25 seconds. The
-shaders are kept in the cache folder, so later visits pause about a second.
+shaders are kept in the cache folder, so later visits pause about a second. Inside an area, something you see for
+the first time (a new effect or enemy) may appear a frame late instead of stopping the game.
 
 At the online prompt, choose "Do Not Use": online features do not work.
 

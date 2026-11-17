@@ -2,6 +2,30 @@
 
 Versions are tagged `vX.Y.Z`. Small fixes bump the last number; features and large fixes bump the middle one.
 
+## 0.3.1
+
+**Less stutter the first time you play an area** ([#14](https://github.com/scarxity/kirby-forgotten-land-recompiled/issues/14)).
+In 0.3.0 every new shader froze the picture until the graphics driver had built it, 20 to 140 ms each, on any PC: a
+fast GPU stuttered as much as a slow one. Now a frame that waits only for a few new shaders (a new effect or enemy)
+waits at most 33 ms and is shown without them; they appear a frame later. Entering a new area still waits behind the
+"Preparing graphics" notice. Measured on an RTX 3050 Laptop with an empty shader cache, over three stages: pauses of
+50 ms or more outside area entry went from 35-37 to 12 a run; about 60 frames a run show a few objects one frame late.
+Later visits use the shader cache, as before.
+
+Unzip over 0.3.0: the game code from 0.3.0 is used as it is, nothing to rebuild.
+
+### Changed
+- `LARECOMP_HOLD_SMALL_MS` sets how long such a frame waits (default 33)
+
+### Added (testing)
+- `LARECOMP_VK_COLD=1` makes every pipeline new to the driver's cache, as on a player's first run, and
+  `tools/verify/hold_stats.py` sums a run's stutter; `docs/testing.md` has the steps
+- The stage tour counts the draws shown late in its 2-second stats line, and allows only those
+
+### Known issues
+- As 0.3.0, and: Intel GPUs are untested on 0.3.x ([#12](https://github.com/scarxity/kirby-forgotten-land-recompiled/issues/12)
+  was reported on 0.2.0). Frame Generation (in the game's menu) is still untested
+
 ## 0.3.0
 
 **Stage music plays, and a new area no longer starts on a black screen.** This version is rebuilt on LAS Recomp's
