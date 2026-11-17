@@ -1121,6 +1121,7 @@ static void skip_note(int why, bool compute) {
 }
 static uint64_t cum_build_skips, cum_skips;  // skipped for a build still running / for any reason, never reset (vk_build_hold)
 static uint64_t stat_skipped_held;  // of stat_skipped, those in frames vk_build_hold kept off the screen
+static uint64_t stat_skipped_late;  // of stat_skipped, those vk_build_hold showed late (their builds still running)
 #define SKIP(why) do { int w_ = (why); stat_skipped++, cum_skips++; cum_build_skips += w_ == SK_PROG_BUILDING || w_ == SK_PIPE_BUILDING; \
                        if (log_skips) skip_note(w_, false); } while (0)
 #define SKIP_CS(why) do { int w_ = (why); stat_skipped++, cum_skips++; cum_build_skips += w_ == SK_CS_BUILDING; \
@@ -1233,6 +1234,7 @@ bool vk_build_hold(void (*begin)(void), void (*notice)(int done, int total)) {
                 (SDL_GetTicksNS() - t0) / 1e6, jobs, (unsigned long long)skipped, (unsigned long long)drawn);
         if (small && atomic_load(&jobs_pending) > 0) {
             hold = false;
+            stat_skipped_late += skipped;
             if (nlog < 200) LOG("[vk] frame shown after %.0f ms with %llu draws missing\n", (SDL_GetTicksNS() - t0) / 1e6,
                                 (unsigned long long)skipped);
         } else stat_skipped_held += cum_skips - l_all;
@@ -1254,10 +1256,10 @@ const char *renderer_stats(void) {
     int compiles = atomic_exchange(&stat_compiles, 0);
     hud_compiles += (uint64_t)compiles;
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped (%llu in held frames), %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, "
+             "%llu draws, %llu skipped (%llu in held frames, %llu late), %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, "
              "fbcopy %llu, upload %.1fMB, deferred %llu, snap %lluKB/%llu",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_skipped_held,
-             (unsigned long long)stat_passes,
+             (unsigned long long)stat_skipped_late, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              compiles, (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)__atomic_exchange_n(&stat_deferred, 0, __ATOMIC_RELAXED), (unsigned long long)(stat_snap_bytes >> 10),
@@ -1377,7 +1379,7 @@ const char *renderer_stats(void) {
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
     hud_draws += stat_draws, hud_passes += stat_passes, hud_dispatches += stat_dispatches;  // (renderer_hud's totals)
-    stat_draws = stat_skipped = stat_skipped_held = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    stat_draws = stat_skipped = stat_skipped_held = stat_skipped_late = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
     return stats_text;
 }
 

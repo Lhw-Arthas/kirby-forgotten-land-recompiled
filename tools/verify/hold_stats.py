@@ -3,7 +3,8 @@
 Frames the engine held for shader builds (vk_build_hold), split into area-entry bursts (100 or more draws waiting, behind
 the "Preparing graphics" notice) and the rest (what a player feels as stutter), and the frames shown with a few draws
 late. Compare a change on a cold cache: LARECOMP_VK_COLD=1 and an empty <work>/cache, the same stages, several runs a
-side, alternating. Standard library only.
+side, alternating. The engine logs the first 200 held frames of a run: keep runs short (the stage tour's are).
+Standard library only.
 """
 import glob
 import os
@@ -12,6 +13,7 @@ import sys
 
 HELD = re.compile(r'\[vk\] frame held (\d+) ms for \d+ shader / pipeline builds \((\d+) draws waiting')
 SHOWN = re.compile(r'\[vk\] frame shown after \d+ ms with (\d+) draws missing')
+LATE = re.compile(r'\[vk\] t=.* in held frames, (\d+) late\)')
 
 
 def stats(folder):
@@ -29,9 +31,10 @@ def stats(folder):
                         s['holds'] += 1
                         s['hold_ms'] += ms
                         s['long'] += ms >= 50
-                m = SHOWN.match(line)
-                if m:
+                if SHOWN.match(line):
                     s['late_frames'] += 1
+                m = LATE.match(line)
+                if m:
                     s['late_draws'] += int(m.group(1))
     return s
 

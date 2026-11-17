@@ -15,8 +15,7 @@ import struct
 import sys
 import zlib
 
-VK = re.compile(r'\[vk\] t=[\d.]+ frame (\d+) .*?\((\d+) draws, (\d+) skipped(?: \((\d+) in held frames\))?')
-SHOWN = re.compile(r'\[vk\] frame shown after \d+ ms with (\d+) draws missing')
+VK = re.compile(r'\[vk\] t=[\d.]+ frame (\d+) .*?\((\d+) draws, (\d+) skipped(?: \((\d+) in held frames(?:, (\d+) late)?\))?')
 STEP_READ = '[fs] read ubin/Step/Map/'
 NOTED = ('[hle] UNIMPLEMENTED', '[ipc] STUB', '(unhandled')
 
@@ -81,20 +80,16 @@ def wav_tail_rms(path, seconds=5.0):
 def check(stage, log_path, shot, wav, hold):
     rec = {'stage': stage, 'reached': False, 'load_frame': None, 'last_frame': 0, 'fatal': None, 'missing_fn': 0,
            'translate_failed': 0, 'hang': False, 'timed_out': False, 'skipped_after_hold': 0, 'late_draws': 0, 'held_frames': 0, 'noted': {}}
-    stats, late = [], 0
+    stats = []
     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             if line.startswith(STEP_READ + stage + '/'):
                 rec['reached'] = True
                 if rec['load_frame'] is None:
                     rec['load_frame'] = stats[-1][0] if stats else 0
-            m = SHOWN.search(line)
-            if m:
-                late += int(m.group(1))
             m = VK.search(line)
             if m:
-                stats.append((int(m.group(1)), max(0, int(m.group(3)) - int(m.group(4) or 0)), late))
-                late = 0
+                stats.append((int(m.group(1)), max(0, int(m.group(3)) - int(m.group(4) or 0)), int(m.group(5) or 0)))
                 rec['last_frame'] = int(m.group(1))
             if (line.startswith('FATAL') or line.startswith('*** exception')) and not rec['fatal']:
                 rec['fatal'] = line.strip()[:200]
