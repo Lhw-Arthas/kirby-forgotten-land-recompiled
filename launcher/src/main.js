@@ -98,7 +98,7 @@ function modsCard(s) {
       : '<p>No mods are installed. To install one, put the folder of the mod, the one that holds <code>romfs</code>, into the mods folder.</p>'}
     ${locked ? '<p class="fine">Mods cannot be changed while the game or a build is running.</p>' : ''}
     <div class="row mods-row"><button class="btn" data-act="open-mods">Open mods folder</button></div>
-    <p class="fine">Mods are made by players and are not part of this project. Changes apply the next time the game starts.</p>
+    <p class="fine">Mods are made by players and are not part of this project.</p>
   </section>`;
 }
 
