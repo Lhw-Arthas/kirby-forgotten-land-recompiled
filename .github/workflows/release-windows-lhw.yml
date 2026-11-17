@@ -1,0 +1,133 @@
+name: Build Release Zip (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional: version tag (e.g. v0.2.0). Leave empty to only upload artifact.'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build Release Zip (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            git
+            make
+            zip
+            unzip
+            tar
+            nasm
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-tools
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-vulkan-memory-allocator
+            mingw-w64-ucrt-x86_64-vulkan-validation-layers
+            mingw-w64-ucrt-x86_64-gdb
+            mingw-w64-ucrt-x86_64-nodejs
+            mingw-w64-ucrt-x86_64-nasm
+
+      - name: Setup Python venv
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install lz4 capstone unicorn pyinstaller
+
+      # Single shell: PATH setup, toolchain check, all make targets, locate zip
+      - name: Build everything
+        id: build
+        run: |
+          set -e
+
+          # 1. Persist Cargo path in ~/.bash_profile (MSYS2 resets PATH on startup)
+          CARGO_BIN_MSYS="$(cygpath -u "$CARGO_HOME")/bin"
+          {
+            echo "export CARGO_HOME='$(cygpath -w "$CARGO_HOME")'"
+            echo "export PATH=\"$CARGO_BIN_MSYS:\$PATH\""
+          } >> ~/.bash_profile
+          source ~/.bash_profile
+
+          # 2. Toolchain self-check (surface missing deps early)
+          echo "--- toolchain ---"
+          clang --version | head -n1
+          node --version
+          npm --version
+          cargo --version
+          rustc --version
+          nasm --version
+          unzip -v | head -n1
+          .venv/Scripts/python.exe --version
+          .venv/Scripts/python.exe -m PyInstaller --version
+
+          # 3. Build all prerequisites of dist in order
+          echo "--- deps-windows (LGPL FFmpeg) ---"
+          make -j$(nproc) deps-windows
+
+          echo "--- gen-helper ---"
+          make gen-helper
+
+          echo "--- zig ---"
+          make zig
+
+          echo "--- dist ---"
+          make -j$(nproc) dist
+
+          # 4. Locate zip and convert to Windows absolute path for upload-artifact
+          ZIP_PATH=$(find . .. -name "ForgottenLandRecomp-*-Windows-x64.zip" -type f 2>/dev/null | head -n 1)
+          if [ -z "$ZIP_PATH" ]; then
+            echo "::error::Release zip not found."
+            exit 1
+          fi
+          ZIP_PATH="$(cygpath -w "$(realpath "$ZIP_PATH")")"
+          echo "zip_path=$ZIP_PATH" >> $GITHUB_OUTPUT
+          echo "Found: $ZIP_PATH"
+          ls -lh "$ZIP_PATH"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForgottenLandRecomp-Release
+          path: ${{ steps.build.outputs.zip_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create Release
+        if: inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          files: ${{ steps.build.outputs.zip_path }}
+          generate_release_notes: true
+          draft: false
