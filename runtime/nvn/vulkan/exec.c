@@ -1196,19 +1196,29 @@ static void builds_check(void) {
 // had started (a boss's attacks: hundreds of draws a stage in the tour). begin(): a run of held frames starts.
 // notice(done, total): from a second into the run, 4 times a second, the builds finished since it started of those
 // plus the rest.
+// A frame with only a few draws waiting (fewer than HOLD_FULL_DRAWS: a new effect or object, not a new area) is held
+// at most LARECOMP_HOLD_SMALL_MS (33) and then shown without them: each such build is a new shader for the driver,
+// 20 to 140 ms, and holding every one stuttered on any PC (issue #14). With a cold cache on the 3-stage tour (median of
+// 3 runs) holds of 50 ms or more outside area entry went 36 -> 12; about 60 frames a run show ~5 draws a frame late,
+// none by more than a frame and none dark (they come with the stage's fade-in).
+#define HOLD_FULL_DRAWS 16
 bool vk_build_hold(void (*begin)(void), void (*notice)(int done, int total)) {
     static uint64_t l_draws, l_skips, l_all, since;  // since: the run's first held frame (0: the last frame was shown)
     static int done0;
     uint64_t drawn = cum_draws - l_draws, skipped = cum_build_skips - l_skips;
     int jobs = atomic_load(&jobs_pending);
     bool hold = skipped > 0;
+    static int64_t small_ms = -1;
+    if (small_ms < 0) small_ms = getenv("LARECOMP_HOLD_SMALL_MS") ? atoll(getenv("LARECOMP_HOLD_SMALL_MS")) : 33;
+    bool small = hold && skipped < HOLD_FULL_DRAWS;
     if (hold) {
         uint64_t t0 = SDL_GetTicksNS(), painted = 0;
-        if (!since) {
+        uint64_t limit = small ? (uint64_t)small_ms * 1000000ull : 10000000000ull;
+        if (!since && !small) {
             since = t0, done0 = atomic_load(&jobs_done);
             if (begin) begin();
         }
-        while (atomic_load(&jobs_pending) > 0 && SDL_GetTicksNS() - t0 < 10000000000ull) {
+        while (atomic_load(&jobs_pending) > 0 && SDL_GetTicksNS() - t0 < limit) {
             uint64_t now = SDL_GetTicksNS();
             if (notice && now - since > 1000000000ull && now - painted >= 250000000ull) {
                 painted = now;
@@ -1221,8 +1231,13 @@ bool vk_build_hold(void (*begin)(void), void (*notice)(int done, int total)) {
         if (nlog++ < 200)
             LOG("[vk] frame held %.0f ms for %d shader / pipeline builds (%llu draws waiting, %llu drawn)\n",
                 (SDL_GetTicksNS() - t0) / 1e6, jobs, (unsigned long long)skipped, (unsigned long long)drawn);
-        stat_skipped_held += cum_skips - l_all;
-    } else since = 0;
+        if (small && atomic_load(&jobs_pending) > 0) {
+            hold = false;
+            if (nlog < 200) LOG("[vk] frame shown after %.0f ms with %llu draws missing\n", (SDL_GetTicksNS() - t0) / 1e6,
+                                (unsigned long long)skipped);
+        } else stat_skipped_held += cum_skips - l_all;
+    }
+    if (!hold) since = 0;
     l_draws = cum_draws, l_skips = cum_build_skips, l_all = cum_skips;
     return hold;
 }
@@ -2671,10 +2686,18 @@ typedef struct {
     VkPipelineDynamicStateCreateInfo dy;
     VkPipelineRenderingCreateInfo ri;
     VkGraphicsPipelineCreateInfo pi;
-    VkSpecializationMapEntry spe;  // (k->recol: RECOLOUR = true)
-    VkBool32 spv;
-    VkSpecializationInfo spi;
+    VkSpecializationMapEntry spe[2], spe_vs;  // (k->recol: RECOLOUR = true; LARECOMP_VK_COLD's constant)
+    uint32_t spv[2];
+    VkSpecializationInfo spi, spi_vs;
 } PipeCI;
+
+// LARECOMP_VK_COLD=1 (measurement): every pipeline new to the driver's own caches, as on a player's first run: a
+// specialization constant no shader reads, with a value new to each run
+static uint32_t cold_nonce(void) {
+    static uint32_t n = 1;
+    if (n == 1) n = getenv("LARECOMP_VK_COLD") && atoi(getenv("LARECOMP_VK_COLD")) ? (uint32_t)SDL_GetTicksNS() | 2u : 0;
+    return n;
+}
 
 static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     memset(c, 0, sizeof *c);
@@ -2682,15 +2705,18 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
         .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"};
     c->stages[1] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = k->a2c && k->prog->fs_late ? k->prog->fs_late : k->prog->fs, .pName = "main"};
-    if (k->recol) {
-        c->spe = (VkSpecializationMapEntry){RECOLOUR_SPEC_ID, 0, sizeof(VkBool32)};
-        c->spv = VK_TRUE;
-        c->spi = (VkSpecializationInfo){1, &c->spe, sizeof c->spv, &c->spv};
+    uint32_t cold = cold_nonce(), ns = 0;
+    if (k->recol) c->spe[ns] = (VkSpecializationMapEntry){RECOLOUR_SPEC_ID, 0, sizeof(VkBool32)}, c->spv[ns++] = VK_TRUE;
+    if (cold) c->spe[ns] = (VkSpecializationMapEntry){0x7fff, 4 * ns, 4}, c->spv[ns++] = cold;
+    if (ns) {
+        c->spi = (VkSpecializationInfo){ns, c->spe, 4 * ns, c->spv};
         c->stages[1].pSpecializationInfo = &c->spi;
     }
+    if (cold) c->spe_vs = (VkSpecializationMapEntry){0x7fff, 0, 4}, c->spi_vs = (VkSpecializationInfo){1, &c->spe_vs, 4, &c->spv[ns - 1]};
     if (k->prog->gs)
         c->stages[2] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = VK_SHADER_STAGE_GEOMETRY_BIT, .module = k->prog->gs, .pName = "main"};
+    if (cold) c->stages[0].pSpecializationInfo = c->stages[2].pSpecializationInfo = &c->spi_vs;
     uint32_t na = 0, nb = 0, nd = 0;
     for (int i = 0; i < 32; i++)
         if (k->attr_mask & (1u << i)) c->va[na++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr_bind[i], k->attr_fmt[i], k->attr_off[i]};
