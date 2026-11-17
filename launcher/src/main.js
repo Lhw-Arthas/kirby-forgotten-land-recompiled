@@ -2,7 +2,7 @@ import './style.css';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import { BUSY_PHASES, PHASE_LABEL, REBUILD_NOTE, primaryAction, toolsMissing } from './action.js';
+import { BUSY_PHASES, PHASE_LABEL, REBUILD_NOTE, modsLocked, primaryAction, toolsMissing } from './action.js';
 
 const PAGES = [
   ['home', 'Home'],
@@ -47,6 +47,9 @@ const actions = {
   play: () => call('play'),
   'go-setup': () => go('setup'),
   'open-work': () => call('open_path', { which: 'work' }),
+  'open-mods': () => call('open_path', { which: 'mods' }),
+  'mod-up': ({ mod }) => call('move_mod', { name: mod, up: true }),
+  'mod-down': ({ mod }) => call('move_mod', { name: mod, up: false }),
   'open-setup-log': () => call('open_path', { which: 'setup_log' }),
   'open-game-log': () => call('open_path', { which: 'game_log' }),
   'open-crash-log': () => call('open_path', { which: 'crash_log' }),
@@ -77,6 +80,25 @@ function crashCard(c) {
       <button class="btn quiet" data-act="open-work">Open work folder</button>
       <button class="btn quiet" data-act="dismiss-crash">Dismiss</button>
     </div>
+  </section>`;
+}
+
+function modsCard(s) {
+  const locked = modsLocked(s) ? 'disabled' : '';
+  const row = (m, i) => `<div class="field mod ${m.on ? '' : 'off'}">
+      <span class="mod-name">${esc(m.name)}</span>
+      <button class="btn sm quiet" data-act="mod-up" data-mod="${esc(m.name)}" aria-label="Move ${esc(m.name)} up" ${locked || i === 0 ? 'disabled' : ''}>&#9650;</button>
+      <button class="btn sm quiet" data-act="mod-down" data-mod="${esc(m.name)}" aria-label="Move ${esc(m.name)} down" ${locked || i === s.mods.length - 1 ? 'disabled' : ''}>&#9660;</button>
+      <input type="checkbox" data-mod="${esc(m.name)}" aria-label="${esc(m.name)} on" ${m.on ? 'checked' : ''} ${locked} />
+    </div>`;
+  return `<section class="card glass">
+    <h2>Mods</h2>
+    ${s.mods.length
+      ? `<p>A mod higher in the list wins when two change the same file.</p>${s.mods.map(row).join('')}`
+      : '<p>No mods are installed. To install one, put the folder of the mod, the one that holds <code>romfs</code>, into the mods folder.</p>'}
+    ${locked ? '<p class="fine">Mods cannot be changed while the game or a build is running.</p>' : ''}
+    <div class="row mods-row"><button class="btn" data-act="open-mods">Open mods folder</button></div>
+    <p class="fine">Mods are made by players and are not part of this project. Changes apply the next time the game starts.</p>
   </section>`;
 }
 
@@ -130,6 +152,7 @@ const views = {
         <label class="field"><span>Volume</span>
           <input type="range" min="0" max="1" step="0.05" data-key="volume" value="${esc(v.volume || '1')}" /></label>
       </section>
+      ${modsCard(s)}
       <p class="fine">Changes apply the next time the game starts.</p>
     </div>`;
   },
@@ -186,10 +209,11 @@ async function refresh() {
 document.addEventListener('click', (e) => {
   const nav = e.target.closest('.nav-item');
   if (nav) return go(nav.dataset.page);
-  const act = e.target.closest('[data-act]')?.dataset.act;
-  if (act && actions[act]) actions[act]();
+  const el = e.target.closest('[data-act]');
+  if (el && actions[el.dataset.act]) actions[el.dataset.act](el.dataset);
 });
 document.addEventListener('change', (e) => {
+  if (e.target.dataset?.mod) return call('set_mod', { name: e.target.dataset.mod, on: e.target.checked });
   const key = e.target.dataset?.key;
   if (!key) return;
   const value = e.target.type === 'checkbox' ? (e.target.checked ? '1' : '0') : e.target.value;
