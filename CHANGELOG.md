@@ -17,6 +17,12 @@ Unzip over 0.3.0: the game code from 0.3.0 is used as it is, nothing to rebuild.
 ### Changed
 - `LARECOMP_HOLD_SMALL_MS` sets how long such a frame waits (default 33)
 
+### Added
+- Mods. A folder `mods\<name>\romfs\...` in the install folder replaces the game's RomFS files of the same path.
+  The launcher's Settings page lists the mods, switches each on or off and sets their order (`mods\mods.txt`).
+  Changes apply the next time the game starts. No mod is included: they are the player's own, for example a 60fps
+  mod by Lhw-Arthas ([#9](https://github.com/scarxity/kirby-forgotten-land-recompiled/pull/9))
+
 ### Added (testing)
 - `LARECOMP_VK_COLD=1` makes every pipeline new to the driver's cache, as on a player's first run, and
   `tools/verify/hold_stats.py` sums a run's stutter; `docs/testing.md` has the steps

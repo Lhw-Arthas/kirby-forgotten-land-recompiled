@@ -176,6 +176,8 @@ In the data root (the install folder):
 | `larecomp.ini` | runtime, launcher | settings, `key = value` lines (`SETTINGS_FILE` in `runtime/settings.c`) |
 | `save\` | runtime | saves (`save\save_0\file0` and the rest) |
 | `cache\` | runtime | shader and pipeline caches |
+| `mods\<mod>\romfs\<path>` | player | a mod: this file replaces the game's RomFS file `<path>`. A folder is a mod when it holds `romfs\`; names starting with `.` are skipped |
+| `mods\mods.txt` | launcher | the mods in priority order, one name a line, `-<name>` for one switched off |
 | `game.log` | launcher, or the runtime on its own | the log of the last run |
 | `setup.log` | launcher | stdout and stderr of the last Build |
 | `crash-*.log` | launcher | copies of `game.log` after crashes |
@@ -185,6 +187,15 @@ The setup only ever deletes entries it made in `extracted` (`--setup` removes `e
 and its id, by `rt_remove_game_file`, which refuses any name outside its list in `runtime/paths.c`) and refuses when
 `extracted` is a link or not `<data root>\extracted`. The launcher's developer mode links `extracted` to the player's
 dump on purpose, so a runtime started by it must never run `--setup`.
+
+Mods (`runtime/mods.c`, used by `runtime/services/fs.c`; the launcher's `read_mods` and `write_mods` are the same rule
+and must change with it). The runtime reads `mods\` once, when the game starts, and logs `[fs] mod N: <name>` for each mod
+switched on and `[fs] mods: K romfs files replaced`. The first mod switched on that has a file wins. The order is
+`mods.txt` first (the first mention of a name wins, unknown names are ignored, a `-` before a name is off), then the
+mods it does not list, in name order, switched on. The launcher writes the whole order each time, to `mods.txt.tmp`
+and renames it over `mods.txt`, and leaves an on mod whose name starts with `-` out (that line would read as off). It
+only replaces files: a mod cannot add a file the game's RomFS lacks. The project ships no mod and no file derived from
+the game.
 
 Settings the launcher writes and RecompLauncher sets (`recomplauncher.json` `settings`), all of which the runtime's
 `settings_load` must read: `fullscreen` (`0` or `1`), `resolution` (`match`, `75%`, `50%`, `25%`, `1x`, `2x`) and
