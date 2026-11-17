@@ -5,8 +5,9 @@
 
 A stage passes when its step's files were read (LARECOMP_STAGE took it there), nothing fatal (FATAL or a crash), no missing function, no shader
 that failed to translate, no hang dump, no skipped draw in a frame shown once <hold frames> have passed since the step loaded (the
-shaders had time to build), the final window image is not black, and the game made sound in the last seconds. Unimplemented services and
-stubbed commands are listed, not failed: some are expected offline.
+shaders had time to build) beyond those the engine reports it showed late (a few draws whose shaders still build), the final window image
+is not black, and the game made sound in the last seconds. Unimplemented services and stubbed commands are listed, not failed: some are
+expected offline.
 """
 import json
 import re
@@ -15,6 +16,7 @@ import sys
 import zlib
 
 VK = re.compile(r'\[vk\] t=[\d.]+ frame (\d+) .*?\((\d+) draws, (\d+) skipped(?: \((\d+) in held frames\))?')
+SHOWN = re.compile(r'\[vk\] frame shown after \d+ ms with (\d+) draws missing')
 STEP_READ = '[fs] read ubin/Step/Map/'
 NOTED = ('[hle] UNIMPLEMENTED', '[ipc] STUB', '(unhandled')
 
@@ -78,17 +80,21 @@ def wav_tail_rms(path, seconds=5.0):
 
 def check(stage, log_path, shot, wav, hold):
     rec = {'stage': stage, 'reached': False, 'load_frame': None, 'last_frame': 0, 'fatal': None, 'missing_fn': 0,
-           'translate_failed': 0, 'hang': False, 'timed_out': False, 'skipped_after_hold': 0, 'held_frames': 0, 'noted': {}}
-    stats = []
+           'translate_failed': 0, 'hang': False, 'timed_out': False, 'skipped_after_hold': 0, 'late_draws': 0, 'held_frames': 0, 'noted': {}}
+    stats, late = [], 0
     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             if line.startswith(STEP_READ + stage + '/'):
                 rec['reached'] = True
                 if rec['load_frame'] is None:
                     rec['load_frame'] = stats[-1][0] if stats else 0
+            m = SHOWN.search(line)
+            if m:
+                late += int(m.group(1))
             m = VK.search(line)
             if m:
-                stats.append((int(m.group(1)), max(0, int(m.group(3)) - int(m.group(4) or 0))))
+                stats.append((int(m.group(1)), max(0, int(m.group(3)) - int(m.group(4) or 0)), late))
+                late = 0
                 rec['last_frame'] = int(m.group(1))
             if (line.startswith('FATAL') or line.startswith('*** exception')) and not rec['fatal']:
                 rec['fatal'] = line.strip()[:200]
@@ -106,7 +112,8 @@ def check(stage, log_path, shot, wav, hold):
                     rec['noted'][k] = rec['noted'].get(k, 0) + 1
     if rec['load_frame'] is not None:
         start = rec['load_frame'] + hold
-        rec['skipped_after_hold'] = sum(s for fr, s in stats if fr >= start)
+        rec['late_draws'] = sum(n for fr, s, n in stats if fr >= start)
+        rec['skipped_after_hold'] = sum(max(0, s - n) for fr, s, n in stats if fr >= start)
         rec['held_frames'] = max(0, rec['last_frame'] - rec['load_frame'])
     rec['luma'] = png_luma(shot)
     rec['audio_rms'] = wav_tail_rms(wav)

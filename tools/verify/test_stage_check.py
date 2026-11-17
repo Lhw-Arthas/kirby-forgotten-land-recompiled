@@ -65,4 +65,13 @@ with tempfile.TemporaryDirectory() as d:
     open(log, 'w').write((LOG % 7).replace('7 skipped,', '7 skipped (5 in held frames),'))
     r = stage_check.check('Cat/Stage/Step01', log, shot, snd, 600)
     assert r['skipped_after_hold'] == 2 and r['verdict'] == 'FAIL: skipped draws', r
+
+    # a frame the engine showed with a few draws still building (vk_build_hold's small holds) is allowed; others are not
+    shown = '[vk] frame shown after 33 ms with 2 draws missing\n'
+    open(log, 'w').write((LOG % 2).replace('[vk] t=3.0', shown + '[vk] t=3.0'))
+    r = stage_check.check('Cat/Stage/Step01', log, shot, snd, 600)
+    assert r['skipped_after_hold'] == 0 and r['late_draws'] == 2 and r['verdict'] == 'PASS', r
+    open(log, 'w').write((LOG % 5).replace('[vk] t=3.0', shown + '[vk] t=3.0'))
+    r = stage_check.check('Cat/Stage/Step01', log, shot, snd, 600)
+    assert r['skipped_after_hold'] == 3 and r['verdict'] == 'FAIL: skipped draws', r
 print('stage_check: ok')
